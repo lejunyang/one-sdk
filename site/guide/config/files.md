@@ -7,7 +7,7 @@ osdk 将用户默认值、项目声明、环境变量和 CLI 覆盖组合成当�
 - 用户配置：`$OSDK_CONFIG_DIR/config.toml`；Linux 默认是 `~/.config/osdk/config.toml`。
 - 项目配置：`osdk.toml` 或 `.osdk.toml`。从当前目录向上查找最近一份；同一目录
   同时存在时，`osdk.toml` 优先。
-- `.tool-versions`：独立向上查找最近一份，只补充项目/用户 `[tools]` 尚未声明的键。
+- `.tool-versions`：独立向上查找，其声明参与共用的[工具版本优先级](#可配置的声明优先级)；默认顺序中优先于用户全局工具默认值。
 
 ```text
 osdk config path
@@ -141,6 +141,15 @@ offline = false
 lang = "zh"                 # 可省略；en|zh
 prerelease = "if-explicit"  # never|if-explicit|allow
 
+[settings.precedence]
+tools = "osdk"            # osdk|native；工具版本的默认顺序
+packages = "native"       # osdk|native；默认包源策略
+tool_order = []            # 所有工具共用的来源类型顺序；[] 使用默认顺序
+tool_conflicts = "prefer"  # prefer|error
+npm = "inherit"           # osdk|native|inherit；只覆盖包源策略
+python = "inherit"
+go = "inherit"
+
 [settings.shims]
 include = []                # 全局白名单；非空时未列出者一律不生成 shim
 exclude = []                # 排除；最后生效
@@ -195,7 +204,6 @@ platform = "runtime"          # runtime 或 OS/ARCH[/VARIANT]
 probe_timeout_ms = 1500
 
 [tools]
-node = "20"
 python = "3.12"
 pnpm = "10"
 "npm:prettier" = "3"
@@ -258,7 +266,7 @@ Registry 的选择语义见[JavaScript 包管理器](../tools/package-managers)�
 
 ## 精确的覆盖与合并语义
 
-总体优先级为：
+普通配置字段的总体优先级为（工具版本选择使用下文单独的策略）：
 
 ```text
 CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
@@ -268,7 +276,8 @@ CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
 
 | 配置区域 | 高优先级文件的行为 |
 | --- | --- |
-| `[settings]` | **整段替换**；只写一个字段时，其他设置回到 `Settings` 内置默认值，而不是继承用户文件 |
+| `[settings]` | 除 `precedence` 外**整段替换**；其他遗漏设置回到 `Settings` 内置默认值，而不是继承用户文件 |
+| `[settings.precedence]` | 用户、显式 `extends`、项目层按字段合并；遗漏字段继承，数组替换；`tool_order = []` 清除自定义顺序，生态字段 `"inherit"` 清除对应包源策略覆盖 |
 | `[sources]` 顶层 | `selection`、`probe_timeout_ms`、`cache_ttl` **整段替换**；遗漏项回到默认值 |
 | `[sources.<tool>]` | 按工具键合并；同一工具的 `pin`、`disable`、`custom` 等整项由高优先级层替换 |
 | 模型 `env`/`env_force` | 项目配置不能改变；始终保留用户全局值，避免项目静默改写 shell 凭据环境 |
@@ -276,7 +285,7 @@ CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
 | `[container]` | 整段替换；省略的运行时、构建器、平台、超时和 Registry 策略字段使用内置默认值 |
 | `[tools]` | 按工具键合并；高优先级同名键覆盖 |
 | `[alias.tools.<tool>]` | 按工具和别名键合并；高优先级同名别名覆盖 |
-| `.tool-versions` | 只填补合并后 `[tools]` 中缺失的工具 |
+| 原生工具声明（含 `.tool-versions`） | 按 `settings.precedence` 与项目/全局 `[tools]` 一起排序；来源类型顺序见下文 |
 
 例如，用户配置启用了 `verify_signatures = false`，而项目仅写：
 
@@ -292,3 +301,26 @@ jobs = 2
 `[settings.download_cache]` 使用 `max_size_bytes`（默认 2147483648；0 不保留；`"unlimited"` 不限）与 `max_age_secs`（默认 604800；0 不过期）。`OSDK_DOWNLOAD_CACHE_MAX_SIZE` 覆盖容量。详见[缓存与清理](../maintenance/cache)。
 
 显式继承：子项目 `osdk.toml` 可设置 `extends = "../../osdk.toml"`。目录嵌套不会自动继承。优先级为 CLI/环境变量、子文件字段、显式继承的祖先字段、用户配置、默认值。映射按键合并（包括 env），标量与列表替换，`false`、`[]` 都是有效覆盖。继承的依赖 sources/outputs/dir 与任务 dir/file 路径属于声明它的文件。发现 roots/projects 留在根目录，已发现的子配置不能重定义整个目录。继承子项目以根项目声明为默认，显式 provider 字段优先；独立子配置自行声明 provider。根/子目录调用依赖使用同一目录与有效 provider/工具选项。继承链中每个可执行或改变来源的配置都单独检查信任，信任子文件不代表信任父文件。自身循环、非祖先引用及越过仓库边界均报错。`[task].roots` 仍单独负责聚合；继承的 runner 默认值转换到具体子任务。
+
+## 可配置的声明优先级
+
+参见[工具选择](./tool-selection)的排序与冲突规则、[各工具适用来源](./tool-selection#tool-order-reference)、[项目来源诊断](./tool-selection#inspect-sources)和[工具环境变量](./tool-environment)。
+
+`[settings.precedence]` 下的 `npm`、`python`、`go` 只覆盖对应生态的**包源策略**，不控制工具版本顺序。可取 `osdk`、`native`、`inherit`（恢复使用 `packages`）；例如 `python="native"` 保留 Python 包索引策略，不会提升 `.python-version`。这些字段不重排管理器内部的认证、scope 或 TLS 来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
+复杂配置（命名索引、绑定及其他未建模字段）在 native 下整组保留，osdk 显式索引
+实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
+不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
+的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。
+
+
+### tool_order 参考 {#tool-order-reference}
+
+完整枚举与各工具适用矩阵已集中到[工具选择](./tool-selection#tool-order-reference)。
+
+### 机器上已有的系统工具 {#system-tools}
+
+参见[system 选择与限制](./tool-selection#system-tools)和[各工具环境变量行为](./tool-environment)。
+
+### 示例：Node、Python 与 JavaScript 管理器
+
+参见工具选择中的 [Node、Python 与管理器示例](./tool-selection#示例-node、python-与-javascript-管理器)。

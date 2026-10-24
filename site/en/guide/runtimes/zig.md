@@ -1,5 +1,7 @@
 # Zig
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#zig), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#zig).
+
 ```bash
 osdk install zig@latest
 osdk use zig@0.16

@@ -18,6 +18,96 @@ fn shim() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_osdk-shim"))
 }
 
+#[cfg(unix)]
+#[test]
+fn system_target_shim_executes_external_node_once_and_preserves_exit() {
+    use std::os::unix::process::CommandExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("external/bin");
+    let log = root.join("calls");
+    write_executable(&bin.join("node"), &format!("#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo v22.3.0; exit 0; fi\necho entered >> '{}'\nexit 7\n", log.display()));
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        "[settings.precedence]\ntool_order=['system']\n",
+    )
+    .unwrap();
+    let output = isolated_command(root, root)
+        .arg0("node")
+        .arg("run-once")
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "entered\n");
+    assert!(!root.join("installs/node").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn system_target_pnpm_shim_selects_external_node_and_keeps_native_home() {
+    use std::os::unix::process::CommandExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("external/bin");
+    write_executable(&bin.join("node"), "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo v22.3.0; else echo EXTERNAL_NODE; echo \"$PNPM_HOME\"; fi\n");
+    write_executable(
+        &bin.join("pnpm"),
+        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 10.0.0; else exec node run; fi\n",
+    );
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        "[settings.precedence]\ntool_order=['system']\n",
+    )
+    .unwrap();
+    let output = isolated_command(root, root)
+        .arg0("pnpm")
+        .arg("run")
+        .env("PATH", &bin)
+        .env("PNPM_HOME", root.join("native-home"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("EXTERNAL_NODE"));
+    assert!(stdout.contains("native-home"));
+    assert!(!root.join("installs").exists());
+    for original_present in [true, false] {
+        let restored = isolated_command(root, root)
+            .arg0("pnpm")
+            .arg("run")
+            .env("PATH", &bin)
+            .env("PNPM_HOME", root.join("stale-osdk-home"))
+            .env("OSDK_MANAGED_ENV", "PNPM_HOME")
+            .env(
+                "OSDK_ORIG_PNPM_HOME_PRESENT",
+                if original_present { "1" } else { "0" },
+            )
+            .env("OSDK_ORIG_PNPM_HOME", root.join("native-home"))
+            .output()
+            .unwrap();
+        assert!(
+            restored.status.success(),
+            "{}",
+            String::from_utf8_lossy(&restored.stderr)
+        );
+        let text = String::from_utf8_lossy(&restored.stdout);
+        assert!(!text.contains("stale-osdk-home"), "{text}");
+        assert_eq!(text.contains("native-home"), original_present, "{text}");
+    }
+}
+
 fn isolated_command(root: &Path, cwd: &Path) -> Command {
     let mut command = Command::new(shim());
     command
@@ -2179,5 +2269,302 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
                 "kept pre-existing {forced_key}: {stdout}"
             );
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_global_js_uses_selected_node_without_a_package_manager_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for version in ["20.1.0", "22.1.0"] {
+        let install = root.join("installs/node").join(version);
+        write_executable(
+            &install.join("bin/node"),
+            &format!("#!/bin/sh\necho NODE_{version}\n"),
+        );
+        std::fs::write(install.join(".osdk-complete"), "").unwrap();
+    }
+    for directory in ["npm/bin", "pnpm/bin", "yarn/node_modules/.bin"] {
+        let launcher = root
+            .join("data/global")
+            .join(directory)
+            .join("global-probe");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+        for version in ["20.1.0", "22.1.0"] {
+            std::fs::write(
+                root.join("osdk.toml"),
+                format!("[tools]\nnode='{version}'\n"),
+            )
+            .unwrap();
+            let output = isolated_command(root, root)
+                .arg("global-probe")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{directory}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                format!("NODE_{version}")
+            );
+        }
+        // A missing pin and an absent selection must never pick another install.
+        std::fs::write(root.join("osdk.toml"), "[tools]\nnode='99.0.0'\n").unwrap();
+        let output = isolated_command(root, root)
+            .arg("global-probe")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not installed"));
+        std::fs::remove_file(root.join("osdk.toml")).unwrap();
+        let output = isolated_command(root, root)
+            .arg("global-probe")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("osdk use --global node@"));
+        assert!(output.stdout.is_empty());
+        std::fs::remove_file(launcher).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_global_system_node_restores_original_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("external/bin");
+    write_executable(&bin.join("node"), "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo v22.1.0; else echo \"$npm_config_prefix\"; fi\n");
+    write_executable(
+        &root.join("data/global/npm/bin/global-probe"),
+        "#!/usr/bin/env node\n",
+    );
+    std::fs::write(
+        root.join("osdk.toml"),
+        "[settings.precedence]\ntool_order=['system']\n",
+    )
+    .unwrap();
+    let output = isolated_command(root, root)
+        .arg("global-probe")
+        .env("PATH", bin)
+        .env("npm_config_prefix", "stale-osdk-prefix")
+        .env("OSDK_MANAGED_ENV", "npm_config_prefix")
+        .env("OSDK_ORIG_npm_config_prefix_PRESENT", "1")
+        .env("OSDK_ORIG_npm_config_prefix", "native-prefix")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "native-prefix"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_global_bun_and_deno_do_not_resolve_unrelated_node() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for owner in ["bun", "deno"] {
+        let install = root.join("installs").join(owner).join("1.2.3");
+        let host_path = if owner == "deno" {
+            install.join(owner)
+        } else {
+            install.join("bin").join(owner)
+        };
+        write_executable(&host_path, &format!("#!/bin/sh\necho HOST_{owner}\n"));
+        std::fs::write(install.join(".osdk-complete"), "").unwrap();
+        let launcher = root
+            .join("data/global")
+            .join(owner)
+            .join("bin/global-probe");
+        write_executable(&launcher, &format!("#!/usr/bin/env {owner}\n"));
+        std::fs::write(
+            root.join("osdk.toml"),
+            format!("[tools]\n{owner}='1.2.3'\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join(".nvmrc"), "https://invalid.example/node\n").unwrap();
+        let output = isolated_command(root, root)
+            .arg("global-probe")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{owner}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("HOST_{owner}")
+        );
+        std::fs::remove_file(launcher).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_global_cargo_and_go_commands_do_not_need_compiler_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for directory in ["data/cargo/bin", "data/global/go/bin"] {
+        let launcher = root.join(directory).join("global-probe");
+        write_executable(&launcher, "#!/bin/sh\necho STANDALONE\n");
+        let output = isolated_command(root, root)
+            .arg("global-probe")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{directory}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "STANDALONE");
+        std::fs::remove_file(launcher).unwrap();
+    }
+}
+
+#[test]
+fn npm_without_selection_explains_bundled_node_and_global_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = isolated_command(temp.path(), temp.path())
+        .args(["npm", "i", "-g", "example"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bundled npm"), "{stderr}");
+    assert!(stderr.contains("osdk use --global node@"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn native_global_binary_needs_no_node_and_rustup_alias_stays_a_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let launcher = root.join("data/global/npm/bin/native-probe");
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::copy("/bin/echo", &launcher).unwrap();
+    let output = isolated_command(root, root)
+        .args(["native-probe", "NATIVE_OK"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "NATIVE_OK");
+    let cargo_bin = root.join("data/cargo/bin");
+    write_executable(&cargo_bin.join("rustup"), "#!/bin/sh\necho MUST_NOT_RUN\n");
+    std::fs::hard_link(cargo_bin.join("rustup"), cargo_bin.join("proxy-alias")).unwrap();
+    let output = isolated_command(root, root)
+        .arg("proxy-alias")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn native_global_windows_launchers_use_selected_node_and_standalone_cargo() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("global packages with spaces");
+    std::fs::create_dir_all(&root).unwrap();
+    let install = root.join("installs/node/22.1.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(
+        install.join("node.cmd"),
+        "@echo off\r\necho SELECTED_NODE\r\n",
+    )
+    .unwrap();
+    std::fs::write(install.join(".osdk-complete"), "").unwrap();
+    std::fs::write(root.join("osdk.toml"), "[tools]\nnode='22.1.0'\n").unwrap();
+    for directory in ["data/global/npm", "data/global/yarn/node_modules/.bin"] {
+        let bin = root.join(directory);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("global-probe.cmd"),
+            "@echo off\r\ncall node.cmd\r\n",
+        )
+        .unwrap();
+        let output = isolated_command(&root, &root)
+            .arg("global-probe")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("SELECTED_NODE"));
+        std::fs::remove_file(bin.join("global-probe.cmd")).unwrap();
+    }
+    std::fs::remove_file(root.join("osdk.toml")).unwrap();
+    for directory in ["data/cargo/bin", "data/global/go/bin"] {
+        let bin = root.join(directory);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("native-probe.cmd"),
+            "@echo off\r\necho STANDALONE\r\n",
+        )
+        .unwrap();
+        let output = isolated_command(&root, &root)
+            .arg("native-probe")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("STANDALONE"));
+        std::fs::remove_file(bin.join("native-probe.cmd")).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_global_broken_selected_host_never_escapes_to_ambient_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let install = root.join("installs/node/22.1.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), "").unwrap();
+    std::fs::write(root.join("osdk.toml"), "[tools]\nnode='22.1.0'\n").unwrap();
+    write_executable(&root.join("ambient/node"), "#!/bin/sh\necho WRONG_HOST\n");
+    write_executable(
+        &root.join("data/global/npm/bin/global-probe"),
+        "#!/usr/bin/env node\n",
+    );
+    for non_executable in [false, true] {
+        if non_executable {
+            write_executable(
+                &install.join("bin/node"),
+                "#!/bin/sh\necho NON_EXECUTABLE\n",
+            );
+            std::fs::set_permissions(
+                install.join("bin/node"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
+        let output = isolated_command(root, root)
+            .arg("global-probe")
+            .env("PATH", root.join("ambient"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("missing or not executable"));
     }
 }

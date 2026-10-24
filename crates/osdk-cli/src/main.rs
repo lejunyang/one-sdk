@@ -145,6 +145,14 @@ fn scan_lang_flag(args: &[String]) -> Option<String> {
 const DISPATCH_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
+    // Select the directory before loading configuration or starting worker threads.
+    if let Command::Current {
+        project: Some(path),
+        ..
+    } = &cli.command
+    {
+        std::env::set_current_dir(path)?;
+    }
     // Commands that need async use a runtime; sync ones don't strictly need it
     // but we build one uniformly for simplicity.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -265,6 +273,7 @@ fn command_scopes(command: &Command) -> &'static [osdk_core::trust::Scope] {
                 RUN_DEPS
             }
         }
+        Command::Current { probe: true, .. } => INSTALL,
         Command::Deps { .. } => DEPS,
         Command::Pkg {
             command: crate::cli::PkgCommand::Apply { .. },
@@ -327,7 +336,19 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::ListRemote { tool, filter } => commands::list_remote(app, tool, filter).await,
         Command::Use { tool, global, opts } => commands::use_cmd(app, tool, global, opts).await,
         Command::Uninstall { tool, global } => commands::uninstall(app, tool, global).await,
-        Command::Current { tool } => commands::current(app, tool),
+        Command::Current {
+            tool,
+            sources,
+            json,
+            probe,
+            ..
+        } => {
+            if sources {
+                commands::current_sources(app, &tool.expect("clap requires tool"), json, probe)
+            } else {
+                commands::current(app, tool)
+            }
+        }
         Command::Where { tool, global, bins } => commands::where_cmd(app, tool, global, bins),
         Command::Reshim => commands::reshim(app),
         Command::Activate { shell } => commands::activate(app, shell),
@@ -654,7 +675,13 @@ mod tests {
                 command: None,
             },
             Command::Untrust { path: None },
-            Command::Current { tool: None },
+            Command::Current {
+                tool: None,
+                sources: false,
+                json: false,
+                project: None,
+                probe: false,
+            },
             Command::Task {
                 command: TaskCommand::List { hidden: false },
             },

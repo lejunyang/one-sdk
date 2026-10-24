@@ -57,7 +57,7 @@ project 页面，并把结果注入 uv/pip 的 default index。
 
 ## 项目 registry 启动前预检
 
-registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs)，调用点是 [`apply_package_registry_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)。它只处理明确 allow-list 中可能拉取 npm 包的命令，并先识别 manager family；Yarn major 无法可靠确定时保守透传。
+registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs)，调用点是 [`package_sources::apply`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_sources.rs)。它只处理明确 allow-list 中可能拉取 npm 包的命令，并先识别 manager family；Yarn major 无法可靠确定时保守透传。
 
 直接 shim 的 manager 归属与 shim 生成共享同一组 Corepack 命令映射：`npm`/`npx`、
 `pnpm`/`pnpx`、`yarn`/`yarnpkg`。独立 backend 有有效选择时优先；否则才回退到选中 Node
@@ -65,22 +65,22 @@ registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sd
 `reshim` 不会把刚为独立 manager 生成的 shim 当成冲突删除。Node/Corepack 下的 npm
 和 pnpm 仍进入 registry planner；Yarn major 无法从 Node 版本推断，因此保守透传。
 
-对需要预检的命令，每次调用都会执行新的、并发的匿名探测，不复用 SDK source probe cache。候选 endpoint 是 npm-compatible Registry 的标准 `<base>/-/ping`，必须满足：成功 HTTP 状态、非空 JSON object、响应不超过 64 KiB。每个请求有界超时；redirect chain 最多包含三个 URL（即最多跟随两次 redirect），且必须始终为原始 HTTPS origin，禁止降级、跨 origin、凭据 URL 与循环。探测不会携带 registry token、cookie 或从 manager 配置提取的 Authorization；普通系统 HTTP(S) proxy 环境仍由 HTTP client 使用。
+对没有原生源策略或显式 default、需要镜像预检的命令，每次调用都会执行新的、并发的匿名探测，不复用 SDK source probe cache。候选 endpoint 是 npm-compatible Registry 的标准 `<base>/-/ping`，必须满足：成功 HTTP 状态、非空 JSON object、响应不超过 64 KiB。每个请求有界超时；redirect chain 最多包含三个 URL（即最多跟随两次 redirect），且必须始终为原始 HTTPS origin，禁止降级、跨 origin、凭据 URL 与循环。探测不会携带 registry token、cookie 或从 manager 配置提取的 Authorization；普通系统 HTTP(S) proxy 环境仍由 HTTP client 使用。
 
 候选选择规则：
 
 - 显式 `[registries.npm].urls` 是完整候选集合，项目层整段覆盖用户层，并保持配置顺序，选择第一个健康项；
-- 未显式配置时，已识别的匿名公共原生 registry 排在内置 npm mirror/npmjs 回退之前；
+- 原生源声明（包括公共源）跳过自动镜像选择；显式 `default` 遵循 `settings.precedence.packages`，进程环境和 CLI 的源选择保持权威性；
 - 只有纯内置集合按本次 latency 选择最快健康项；
 - URL 会规范化并去重。
 
-选中后只向该子进程注入 manager 原生变量：npm `npm_config_registry`、pnpm `pnpm_config_registry`、Yarn Classic `YARN_REGISTRY`、Yarn Berry `YARN_NPM_REGISTRY_SERVER`、Bun `BUN_CONFIG_REGISTRY`、Deno `NPM_CONFIG_REGISTRY`。
+选中后只向该子进程注入 manager 原生变量：npm `npm_config_registry`、pnpm 10/11 `npm_config_registry` + `pnpm_config_registry`、Yarn Classic `YARN_REGISTRY`、Yarn Berry `YARN_NPM_REGISTRY_SERVER`、Bun `BUN_CONFIG_REGISTRY`、Deno `NPM_CONFIG_REGISTRY`。
 
 ## 单次启动与 fail-closed 行为
 
 对实际进入 registry preflight 的 eligible invocation，选中健康候选后 osdk 最多发起一次 manager 启动，且启动后绝不重试；所有候选不健康时不发起启动。进程创建本身仍可能失败。保守透传的调用不会进入这一 fail-closed 预检路径。
 
-控制流上，[`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 先调用 `apply_package_registry_plan`，只有它返回成功后才唯一调用一次 `Command::status()`；直接 shim 路径也在 [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs) 的唯一 `exec` 前执行同一 planner。`RegistryPlan::Unavailable` 在启动前转成错误；manager 启动后的非零退出码直接返回，不尝试另一个 registry，也不重放 lifecycle scripts。Unix 的 `osdk exec` 集成测试覆盖：
+控制流上，[`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 先调用 `package_sources::apply`，只有它返回成功后才唯一调用一次 `Command::status()`；直接 shim 路径也在 [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs) 的唯一 `exec` 前执行同一 planner。`RegistryPlan::Unavailable` 在启动前转成错误；manager 启动后的非零退出码直接返回，不尝试另一个 registry，也不重放 lifecycle scripts。Unix 的 `osdk exec` 集成测试覆盖：
 
 - [`exec_registry_fallback_injects_only_the_manager_variable_and_runs_once`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs)：首选不可用、后备健康时，每类 manager 的调用 marker 只有一行；
 - [`exec_registry_never_retries_a_failed_manager_command`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs)：manager 启动后退出 42，marker 仍只有一次；
@@ -89,6 +89,11 @@ registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sd
 
 ## 保守透传与安全边界
 
-以下情况不探测、不注入、不改写参数或配置，原样启动 manager：显式 registry CLI 参数；已设置对应 registry 环境变量；严格 offline 参数；命令不在网络 allow-list；显式 cwd/config 参数使配置上下文无法安全复现；原生配置不可读；存在 private/unknown registry、scoped registry、认证、TLS 或 manager-native proxy 设置；Yarn major 未知。原则是无法证明“匿名、公共、无 scope/auth”时不优化。
+自动镜像选择遇到以下情况不探测、不注入、不改写参数或配置，原样启动 manager：显式 registry CLI 参数；已设置对应 registry 环境变量；严格 offline 参数；命令不在网络 allow-list；显式 cwd/config 参数使配置上下文无法安全复现；原生配置不可读；存在 private/unknown registry、scoped registry、认证、TLS 或 manager-native proxy 设置；Yarn major 未知。原则是无法证明“匿名、公共、无 scope/auth”时不优化。
 
 “registry 健康”只证明匿名 metadata endpoint 可用，不保证所有依赖都经过它。lockfile 或 metadata 中的绝对 tarball/Git URL、本地文件、workspace、git dependency、Deno JSR 或普通 URL import 都可能绕过默认 registry。osdk 不解析或重写 lockfile，也不代理凭据，因此固定到失效绝对 URL 的安装仍会失败；即使还有其他健康候选，也不会在 manager 已启动后重跑。完整设计边界见 [`docs/package-registry-design.md`](https://github.com/lejunyang/one-sdk/blob/main/docs/package-registry-design.md)。
+
+显式统一配置通过 exec、shim、deps 共用的 adapter 生效。`osdk` 策略只改受支持的默认源/index 项，scope 路由、原生认证与插值留给 manager。无法确定原生配置最终命中文件时，诊断明确标为委托原生解析。详见[包源配置](/guide/project/deps#包源与原生配置优先级)。
+
+
+工具来源排序、冲突处理、分生态覆盖及 uv 配置边界见[包管理器优先级](../guide/tools/package-managers#可配置的声明优先级)。explain 复用工具选择证据；freshness 输入文件不等于原生有效配置发现链。

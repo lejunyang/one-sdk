@@ -1,5 +1,7 @@
 # Python
 
+配置参考：[适用的 tool_order 来源](../config/tool-selection#python)、[项目来源诊断](../config/tool-selection#inspect-sources)、[本工具的选择器、托管变量与缓存覆盖](../config/tool-environment#python)。
+
 `python@3.14` 是默认 CPython 的简写。完整请求为
 `python@IMPLEMENTATION-VERSION+VARIANT`：
 

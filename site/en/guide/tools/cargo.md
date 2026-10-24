@@ -187,19 +187,15 @@ workspace and are removed before publication.
 
 ## Direct `cargo install` is managed too
 
-Beyond using the `cargo:<crate>` namespace to let osdk lock a tool, running the native
-`cargo install <crate>` directly in an activated shell is also managed: `CARGO_HOME`
-already points at the osdk data directory, and the compiled self-contained binaries land
-in `data/cargo/bin`, which is already on Rust's PATH, so they are usable as soon as the
-command exits, with no shim or reshim needed:
+Managed `cargo install` uses `data/cargo/bin` through `CARGO_HOME`. This directory is on PATH while the corresponding managed SDK is active. Run `osdk reshim` to publish these applications for use outside projects too; their shims do not require a selected Rust compiler. SDK commands and rustup proxies still obey toolchain selection.
 
 ```bash
 cargo install ripgrep
+osdk reshim
 rg --version
 ```
 
-Cargo's artifacts are self-contained native binaries, so placing the directory on PATH is
-enough; this matches Go's `go install` redirected via `GOBIN` (see [Go tools](./go)).
+This is separate from the receipt-based `cargo:` workflow. Native output overrides can place binaries outside osdk's scanned directories, and compiled applications may still need system libraries. See [global installation boundaries](./package-managers#native-global-boundaries).
 
 ## Lifecycle commands
 

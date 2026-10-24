@@ -64,3 +64,24 @@ expose = ["make"]
 ## `[settings.download_cache]`
 
 `max_size_bytes` 默认 2147483648；0 在成功提交后不保留副本，`"unlimited"` 不限容量；支持整数 GiB/MiB/KiB 和 GB/MB/KB。`max_age_secs` 默认 604800，0 禁用过期。对应 config key 是 `download_cache.max_size_bytes` 和 `download_cache.max_age_secs`；容量可用 `OSDK_DOWNLOAD_CACHE_MAX_SIZE` / `--download-cache-max-size` 覆盖。预算只管登记的下载副本，不能阻止大模型下载，不清 CAS/安装/原生 store。失败 partial 前 10 分钟受保护。没有后台清理定时器。详见 [cache](../cache/guide.md)。
+
+`[settings.precedence]`：`tools = "osdk" | "native"`（默认 osdk），`packages = "osdk" | "native"`（默认 native）。本次 CLI 和锁重放不参与此排序。详见 `registries.md`。
+
+## 可配置的声明优先级
+
+`[settings.precedence]` 的 `tools` 控制默认工具来源顺序，`tool_order` 是全工具共享的来源类型数组，
+`tool_conflicts=prefer|error` 控制排序选择或兼容性检查；`packages` 和 `npm`/`python`/`go` 则是项目包来源策略，
+不能改变单个工具的版本顺序。逐字段继承，数组替换；`tool_order=[]` 清除继承的自定义顺序并禁用 system，
+生态 `"inherit"` 清除包来源覆盖。未知/重复来源报错；其他遗漏来源自动补齐，system 只显式启用。
+完整合法值、默认顺序、适用矩阵和配置示例统一维护在[工具选择](https://lejunyang.github.io/one-sdk/guide/config/tool-selection)。
+`global` 是 osdk 用户 config.toml 的工具配置，不是 PATH；`osdk` 是最近项目配置及显式 extends。
+
+### system 执行来源
+
+`tool_order=["system","osdk"]` 启用受支持的已有工具，默认不启用。
+支持范围、home 选择器、托管变量与缓存开关集中见[工具环境变量](https://lejunyang.github.io/one-sdk/guide/config/tool-environment)。
+`override_env` 只控制对应缓存覆盖，不启用 system。显式版本、托管锁与 frozen 保持权威；
+外部路径不写安装 receipt 或可移植锁，也不由 uninstall/cache 删除。没有通用 OSDK_TOOL_VERSION。
+
+用 [current TOOL --sources](../current/guide.md#完整来源诊断) 查看项目适用/存在/缺失来源和有效排序；
+默认不运行工具，严格 system 兼容性会标为待验证。`--probe` 显式允许探测，不安装缺失运行时。

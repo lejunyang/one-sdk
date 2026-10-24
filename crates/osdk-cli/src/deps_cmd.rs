@@ -88,22 +88,60 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
+    let mut tool_evidence: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for entry in &mut entries {
-        let effective = app.config_for_project(
+        let mut effective = app.config_for_project(
             entry
                 .config
                 .project_config
                 .as_deref()
                 .unwrap_or(&config_path),
         )?;
+        if let Some(registries) = &entry.config.registries {
+            effective.sources.registries = registries.clone();
+        }
+        entry.config.registries = Some(effective.registries().clone());
+        // Resolve only the tools this provider can execute. Native files for
+        // unrelated ecosystems must not make an explicit deps provider fail.
+        let ids: Vec<String> = match deps::provider_schema(&entry.project.provider) {
+            Some(schema) => schema
+                .required_tools
+                .iter()
+                .map(|tool| tool.id.to_string())
+                .chain(std::iter::once(schema.id.to_string()))
+                .collect(),
+            None => entry.config.project_tools.keys().cloned().collect(),
+        };
+        for id in &ids {
+            if let Ok(backend) = app.registry.get(id) {
+                let selection = osdk_core::version::resolver::resolve_selection(
+                    id,
+                    &entry.project.root,
+                    &effective,
+                    backend.idiomatic_files(),
+                )?;
+                tool_evidence
+                    .entry(entry.id())
+                    .or_default()
+                    .insert(id.clone(), selection.explain());
+                if let Some(active) = selection.winner {
+                    entry.config.project_tools.insert(id.clone(), active.spec);
+                }
+            }
+        }
         entry.config.offline = effective.settings.offline;
         let tools: BTreeMap<_, _> = effective
             .tool_configs
             .iter()
             .map(|(id, tool)| (id, (tool.version(), tool.to_request_options())))
             .collect();
-        entry.config.project_context =
-            serde_json::to_string(&(&effective.settings, &effective.sources, &tools))?;
+        entry.config.project_context = serde_json::to_string(&(
+            &effective.settings,
+            &effective.tool_aliases,
+            &effective.sources,
+            effective.registries(),
+            &tools,
+        ))?;
     }
     for entry in &entries {
         if let Some(unit) = &entry.unit {
@@ -166,7 +204,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         }
         let config = entry.config.clone();
         let schema = deps::provider_schema(&project.provider);
-        let choice = deps::select_installer(&project, &[])?;
+        let mut choice = deps::select_installer(&project, &[])?;
+        if let Some(version) = config.project_tools.get(&*project.provider) {
+            choice.version = Some(version.clone());
+        }
         let mut plan = deps::plan(
             &project,
             &choice,
@@ -198,7 +239,68 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     .unwrap_or("no native lockfile")
             ));
         }
-        let decision = decide(app, schema, &project, &config, &plan, unit.as_ref())?;
+        if config.run.is_none() {
+            let mut context = source_context(app, &config)?;
+            // Dry-run/freshness must not probe; explicit mappings still apply.
+            context.config.settings.offline = true;
+            let evidence = osdk_core::package_sources::apply(
+                &context,
+                &plan.cwd,
+                &plan.program,
+                resolved_tool_versions(app, &config)
+                    .get("yarn")
+                    .map(String::as_str),
+                &plan.args,
+                &mut plan.env,
+            )
+            .await?;
+            if options.explain {
+                println!("    sources: {evidence}");
+                let candidates: Vec<_> =
+                    osdk_core::package_sources::native_files(&plan.cwd, &plan.program, &|key| {
+                        plan.env
+                            .get(key)
+                            .cloned()
+                            .or_else(|| std::env::var(key).ok())
+                    })
+                    .into_iter()
+                    .filter(|path| path.is_file())
+                    .collect();
+                println!("    fingerprint inputs: {candidates:?}; not an effective discovery chain; native winner and interpolation delegated to manager");
+                if let Some(evidence) = tool_evidence.get(&rooted.0) {
+                    for (id, selection) in evidence {
+                        let pinned_installer = id == &plan.tool && choice.version.is_some();
+                        if !plan.frozen
+                            && !pinned_installer
+                            && osdk_core::execution::enabled(&context)
+                        {
+                            if let Ok(backend) = app.registry.get(id) {
+                                let actual = osdk_core::execution::resolve_without_probes(
+                                    &context,
+                                    backend.as_ref(),
+                                    &plan.cwd,
+                                )?;
+                                println!(
+                                    "    {id}: {}; verification deferred until execution",
+                                    serde_json::to_string(&actual.evidence)?
+                                );
+                                continue;
+                            }
+                        }
+                        println!(
+                            "    {id}: {selection}; managed authority for frozen/pinned plans"
+                        );
+                    }
+                }
+            }
+        }
+        let decision = if osdk_core::execution::enabled(&source_context(app, &config)?) {
+            state::Decision::Stale(
+                "system tool policy: host execution is revalidated on every run".into(),
+            )
+        } else {
+            decide(app, schema, &project, &config, &plan, unit.as_ref())?
+        };
         resolved.push(Resolved {
             schema,
             rooted: Some(rooted),
@@ -262,19 +364,20 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                         unit.coverage()
                     );
                 }
-                println!("    command:   {}", command_line(&item.plan));
+                println!("    command:   {}", display_command(item));
             }
         }
         return Ok(());
     }
 
-    for item in &resolved {
+    for item in &mut resolved {
+        let system_policy = osdk_core::execution::enabled(&source_context(app, &item.config)?);
         if let Some(reason) = &item.plan.downgraded_reason {
             // Reported, never silent: a flag that does nothing is worse than an
             // error, because the run looks successful.
             println!("warning: {reason}");
         }
-        if item.decision.is_fresh() && !options.force {
+        if item.decision.is_fresh() && !options.force && !system_policy {
             println!("{} is up to date", item.label());
             continue;
         }
@@ -287,7 +390,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             println!(
                 "would run in {}: {}",
                 item.project.root.display(),
-                command_line(&item.plan)
+                display_command(item)
             );
             continue;
         }
@@ -310,6 +413,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 item.unit.as_ref(),
             )?
             .is_fresh()
+            && !system_policy
         {
             println!(
                 "{} is up to date after waiting for shared installation",
@@ -318,7 +422,27 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             continue;
         }
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
-        run_plan(item, &tools)?;
+        let source_env = item.plan.env.clone();
+        if item.config.run.is_none() {
+            let context = source_context(app, &item.config)?;
+            let evidence = osdk_core::package_sources::apply(
+                &context,
+                &item.plan.cwd,
+                &item.plan.program,
+                tools
+                    .iter()
+                    .find(|tool| tool.id == "yarn")
+                    .map(|tool| tool.version.as_str()),
+                &item.plan.args,
+                &mut item.plan.env,
+            )
+            .await?;
+            if options.explain {
+                println!("    sources: {evidence}");
+            }
+        }
+        run_plan(app, item, &tools)?;
+        item.plan.env = source_env;
         record(app, item, &tools)?;
     }
     Ok(())
@@ -336,6 +460,24 @@ impl Resolved {
             None => self.project.provider.to_string(),
         }
     }
+}
+
+fn source_context(app: &App, config: &ProviderConfig) -> anyhow::Result<osdk_core::backend::Ctx> {
+    let mut effective = match config.project_config.as_deref() {
+        Some(path) => app.config_for_project(path)?,
+        None => app.ctx.config.clone(),
+    };
+    if let Some(registries) = &config.registries {
+        effective.sources.registries = registries.clone();
+    }
+    Ok(osdk_core::backend::Ctx {
+        dirs: app.ctx.dirs.clone(),
+        platform: app.ctx.platform,
+        config: effective,
+        client: app.ctx.client.clone(),
+        cas: app.ctx.cas.clone(),
+        show_progress: false,
+    })
 }
 
 /// Sort providers so that everything a provider `depends` on runs before it.
@@ -492,6 +634,7 @@ struct ReadyTool {
     version: String,
     role: ToolRole,
     bin_dirs: Vec<PathBuf>,
+    system: Option<osdk_core::execution::SystemTarget>,
 }
 
 /// Resolve every tool a provider needs, installing the missing ones through
@@ -565,6 +708,37 @@ async fn ensure_tools_in_context(
             None,
         );
         let backend = app.registry.get(&request.backend)?;
+        // Frozen native plans and pinned installer choices retain managed
+        // replay authority. A host executable is never a portable lock entry.
+        if !item.plan.frozen && pinned.is_none() && osdk_core::execution::enabled(&app.ctx) {
+            if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+                osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &item.project.root)?
+                    .target
+            {
+                ready.push(ReadyTool {
+                    id: required.id.into(),
+                    version: String::new(),
+                    role: required.role,
+                    bin_dirs: vec![target.bin_dir().to_path_buf()],
+                    system: Some(target),
+                });
+                continue;
+            }
+        }
+        if required.role == ToolRole::Runtime {
+            if let Some(active) = osdk_core::version::resolver::resolve_active_config(
+                required.id,
+                &item.project.root,
+                &app.ctx.config,
+                backend.idiomatic_files(),
+            )? {
+                request.spec = if active.is_range {
+                    osdk_core::version::VersionSpec::parse_range(&active.spec)?
+                } else {
+                    osdk_core::version::VersionSpec::parse(&active.spec)
+                };
+            }
+        }
         let request = crate::commands::expand_request_alias(app, backend.as_ref(), &request)?;
 
         // Already installed means nothing is acquired, which is the distinction
@@ -616,7 +790,26 @@ async fn ensure_tools_in_context(
             version: version.version.clone(),
             role: required.role,
             bin_dirs,
+            system: None,
         });
+    }
+    let mut env = item.plan.env.clone();
+    env.insert(
+        "PATH".into(),
+        osdk_core::execution::path_with(
+            &app.ctx,
+            ready
+                .iter()
+                .filter(|t| t.role == ToolRole::Runtime)
+                .chain(ready.iter().filter(|t| t.role != ToolRole::Runtime))
+                .flat_map(|t| t.bin_dirs.clone()),
+        )?,
+    );
+    for tool in &mut ready {
+        if let Some(target) = &mut tool.system {
+            target.verify(&app.ctx, &env)?;
+            tool.version = target.version.clone().expect("verified");
+        }
     }
     Ok(ready)
 }
@@ -632,7 +825,12 @@ async fn ensure_tools_in_context(
 /// pnpm are node scripts and dependency lifecycle hooks invoke `node` directly,
 /// so an unrelated node earlier on PATH would win and the install would run
 /// under a runtime osdk did not choose.
-fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+    for tool in tools {
+        if let Some(target) = &tool.system {
+            target.command(&app.ctx, &target.tool)?;
+        }
+    }
     let program = resolve_program(&item.plan, tools).ok_or_else(|| {
         anyhow!(
             "could not find `{}` in the install for `{}`",
@@ -643,7 +841,12 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
 
     let separator = if cfg!(windows) { ";" } else { ":" };
     let mut path = OsString::new();
-    for dir in tools.iter().flat_map(|tool| &tool.bin_dirs) {
+    for dir in tools
+        .iter()
+        .filter(|t| t.role == ToolRole::Runtime)
+        .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
+        .flat_map(|tool| &tool.bin_dirs)
+    {
         if !path.is_empty() {
             path.push(separator);
         }
@@ -656,11 +859,32 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
         }
     }
 
+    if tools.iter().any(|t| t.system.is_some()) {
+        path = osdk_core::execution::path_with(
+            &app.ctx,
+            tools
+                .iter()
+                .filter(|t| t.role == ToolRole::Runtime)
+                .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
+                .flat_map(|t| t.bin_dirs.clone()),
+        )?
+        .into();
+    }
+
     // Already absolute: the provider resolved \[deps.<p>].dir\ against the project
     // root. Joining again would be a no-op for an absolute path but would quietly
     // change meaning if a provider ever returned a relative one.
     let cwd = &item.plan.cwd;
     let mut command = std::process::Command::new(&program);
+    let mut external_env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+    for tool in tools {
+        if let Some(target) = &tool.system {
+            target.restore_environment(&mut external_env);
+        }
+    }
+    if tools.iter().any(|t| t.system.is_some()) {
+        command.env_clear().envs(&external_env);
+    }
     command
         .args(&item.plan.args)
         .current_dir(cwd)
@@ -669,13 +893,16 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
         command.env(key, value);
     }
 
-    println!("{}", command_line(&item.plan));
+    println!("{}", display_command(item));
 
     // Prelude steps run first, with the same program, cwd and environment. A
     // failure here stops the run: continuing would hand the main command an
     // environment the tool already said it could not build.
     for step in &item.plan.prelude {
         let mut prelude = std::process::Command::new(&program);
+        if tools.iter().any(|t| t.system.is_some()) {
+            prelude.env_clear().envs(&external_env);
+        }
         prelude.args(step).current_dir(cwd).env("PATH", &path);
         for (key, value) in &item.plan.env {
             prelude.env(key, value);
@@ -705,6 +932,12 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
         .iter()
         .filter(|tool| tool.role == ToolRole::Installer || tool.id == plan.tool);
     for tool in installer_first.chain(tools.iter()) {
+        if let Some(target) = &tool.system {
+            if tool.id == plan.tool {
+                return Some(target.executable.clone());
+            }
+            continue;
+        }
         for candidate in &plan.program_candidates {
             if !cfg!(windows)
                 && [".exe", ".cmd", ".bat"]
@@ -739,11 +972,18 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// would make the next run report "up to date" for a tree that was never
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+    // External tools are host state, not managed receipts or portable lock
+    // entries. Conservatively rerun system-enabled deps instead of recording
+    // unverifiable freshness for a mutable host toolchain.
+    if tools.iter().any(|tool| tool.system.is_some()) {
+        return Ok(());
+    }
     let command = freshness_command(
+        app,
         &item.plan,
         &item.config,
         &resolved_tool_versions(app, &item.config),
-    );
+    )?;
     let sources = tracked_sources(item.schema, &item.config, item.unit.as_ref());
     let existing: Vec<PathBuf> = sources
         .iter()
@@ -797,8 +1037,8 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
             project_root: &item.project.root,
             manifest: &item.project.manifest,
             native_lock: item.project.native_lock.as_deref(),
-            run: command_line(&item.plan),
-            index: item.config.index.clone(),
+            run: display_command(item),
+            index: None,
             allow_build_from_source: item.config.allow_build_from_source,
         },
     )?;
@@ -963,7 +1203,7 @@ fn decide(
         .collect();
     let path = state::state_path(&app.ctx.dirs.cache, &project.root);
     let persisted = state::DepsState::load(&path)?;
-    let command = freshness_command(plan, config, &resolved_tool_versions(app, config));
+    let command = freshness_command(app, plan, config, &resolved_tool_versions(app, config))?;
     let inputs = state::Inputs {
         sources: &existing,
         declared_sources: !sources.is_empty(),
@@ -1038,11 +1278,27 @@ fn effective_outputs(
 }
 
 fn freshness_command(
+    app: &App,
     plan: &RunPlan,
     config: &ProviderConfig,
     versions: &BTreeMap<String, String>,
-) -> String {
-    format!("{plan:?}|{config:?}|{versions:?}")
+) -> anyhow::Result<String> {
+    let mut paths = osdk_core::package_registry::managed_npm_config_files(&app.ctx);
+    paths.extend(osdk_core::package_sources::invocation_files(
+        &plan.cwd,
+        &plan.program,
+        &plan.args,
+    ));
+    paths.extend(app.ctx.config.global_config_path.iter().cloned());
+    Ok(osdk_core::package_sources::fingerprint(
+        &plan.cwd,
+        &plan.program,
+        &format!(
+            "{plan:?}|{config:?}|{versions:?}|{:?}",
+            app.ctx.config.settings.precedence
+        ),
+        &paths,
+    )?)
 }
 
 fn run_bounded(
@@ -1058,26 +1314,49 @@ fn run_bounded(
     }
 }
 
-/// The effective command, including env, because env is part of *what runs*:
-/// yarn berry disables build scripts through `YARN_ENABLE_SCRIPTS`, so a command
-/// string without env would hash two materially different runs the same.
+/// Safe diagnostic command. Freshness hashes execution material separately.
+fn display_command(item: &Resolved) -> String {
+    if item.config.run.is_some() {
+        return format!(
+            "custom command {} [arguments and environment redacted]",
+            item.project.provider
+        );
+    }
+    command_line(&item.plan)
+}
+
 fn command_line(plan: &RunPlan) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (key, value) in &plan.env {
-        parts.push(format!("{key}={value}"));
+        let safe = matches!(
+            (key.as_str(), value.as_str()),
+            ("UV_PYTHON_DOWNLOADS", "never")
+                | ("GOTOOLCHAIN", "local")
+                | ("YARN_ENABLE_SCRIPTS", "false" | "true")
+                | ("UV_INDEX_STRATEGY", "first-index")
+        );
+        parts.push(format!(
+            "{key}={}",
+            if safe { value.as_str() } else { "[redacted]" }
+        ));
     }
     let program = plan.program.clone();
-    // Prelude steps are part of *what runs*, so they belong in the string that
-    // gets hashed. Leaving them out would hash "create the environment, then
-    // sync" and "sync into whatever is already there" identically.
+    // Show prelude structure without exposing credential-bearing values.
     for step in &plan.prelude {
-        parts.push(format!("{program} {}", step.join(" ")));
+        parts.push(format!(
+            "{program} {}",
+            step.iter()
+                .map(|arg| osdk_core::package_sources::display_value(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         parts.push("&&".to_string());
     }
     parts.push(program);
     parts.extend(plan.args.iter().map(|arg| {
+        let arg = osdk_core::package_sources::display_value(arg);
         if arg.chars().any(char::is_whitespace) {
-            serde_json::to_string(arg).unwrap()
+            serde_json::to_string(&arg).unwrap()
         } else {
             arg.clone()
         }
@@ -1268,6 +1547,7 @@ mod tests {
             version: "1.22.22".into(),
             role: ToolRole::Installer,
             bin_dirs: vec![temp.path().to_path_buf()],
+            system: None,
         }];
         let expected = if cfg!(windows) { "yarn.cmd" } else { "yarn" };
         assert_eq!(

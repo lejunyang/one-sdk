@@ -1,5 +1,7 @@
 # Node.js
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#node), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#node).
+
 ```bash
 osdk install node@20
 osdk install node@20.19.0 -o corepack=true

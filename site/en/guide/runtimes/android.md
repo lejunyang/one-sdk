@@ -1,5 +1,7 @@
 # Android SDK tools
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#tool-order-reference), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#per-tool-environment).
+
 This page covers managing Android SDK packages through osdk: the NDK,
 platform-tools (`adb`, `fastboot`), build-tools, cmdline-tools, CMake, platforms
 and more.

@@ -1,5 +1,7 @@
 # Java 与 JVM 工具
 
+配置参考：[适用的 tool_order 来源](../config/tool-selection#java)、[项目来源诊断](../config/tool-selection#inspect-sources)、[本工具的选择器、托管变量与缓存覆盖](../config/tool-environment#java)。
+
 本页覆盖 Java JDK / JRE，以及 Maven、Gradle、Kotlin 等 JVM 工具。
 
 ## Java JDK 与 JRE

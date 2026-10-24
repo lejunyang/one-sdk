@@ -12,14 +12,7 @@ PowerShell 的包装会保留你已有的 `prompt`：激活时捕获当前 `prom
 
 ## 解析顺序与 shim 优先级
 
-活跃版本的解析顺序见 [`resolve_active`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs#L154)：
-
-1. 最近祖先中的项目配置。
-2. 对 npm、pnpm、Yarn，仅当项目配置没有适用的 package-manager 选择时，再看 `package.json#packageManager`，然后看 `devEngines.packageManager`。
-3. 最近祖先中的 `.tool-versions`。
-4. backend 声明的惯用版本文件。
-5. Node 的结构化 `package.json` 版本范围。
-6. 用户全局配置。
+活跃版本由共享 `resolve_active_config` / `resolve_selection` 路径选择。`settings.precedence.tool_order` 按来源类型排序，同类选最近声明；`tool_conflicts` 控制冲突检查。项目 `extends`、原生文件与全局配置的完整规则见[版本解析](./resolution#可配置的声明优先级)。显式版本与锁重放不参与重新排序。
 
 项目选择和全局选择分别以配置为入口。`osdk use <tool>` 写最近的项目配置，找不到时在当前目录创建 `osdk.toml`，并 upsert 实际工具和注入 runtime 的当前平台 lock 条目；`osdk use --global <tool>` 写用户配置目录的 `config.toml`，不修改当前项目 lock。对项目感知的 `npm:<package>`，本地 `use` 还会在真实 Node 项目根更新 package manifest、原生 lock 和筛选 launcher；`use --global npm:<package>` 则更新 `$OSDK_CONFIG_DIR/osdk.lock`，全局 `go:<path>` 也维护用户 lock。[`config_edit`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/config_edit.rs) 通过唯一临时文件、sync 与 replace 发布单个配置。项目 `use` 在按项目 identity 的进程锁下快照配置和 `osdk.lock`，任一步失败都恢复两者；已完成的共享工具安装不回滚。全局 npm 变更另用专用 global-state lock 串行发布用户 lock、shim 和配置；全局 Go 工具的配置与 lock 仍是两次独立原子替换。
 
@@ -92,6 +85,9 @@ task 专用实现。
 ## 需要记住的边界
 
 - “global” 指 osdk 控制的用户级选择；全局 npm 与 Go 工具 `use` 会写用户 `osdk.lock`，但不会改写当前项目 lock。npm 使用独立 global install scope；Go 工具在项目与全局选择间共用同一类身份指纹化原生安装根。
-- activation 只选择已经安装的版本；找不到匹配版本时跳过该 backend，不会自动安装。
+- 托管 activation 只选择已经安装的版本；找不到匹配版本时跳过该 backend，不会自动安装。
 - lockfile 记录保存的解析结果与 backend 专属复现身份；项目 `use` 会串行并事务化自己的配置/lock 发布，但其他项目 writer 之间尚无统一锁。全局 npm `use` 的用户 lock 写入位于专用状态锁内。Rust 浮动 channel 不是不可变版本。重装会应用当前可用或策略要求的验证；已完成安装不会重做 checksum 校验。
 - trust store 自身也采用临时文件加 rename，但没有 read-modify-write 锁、durability 或跨平台替换原子性保证；并发 trust/untrust 同样可能丢失更新。
+
+
+主动启用 `system` 时，activation/shim 使用共享的外部执行目标，外部路径不进入托管 receipt 或锁条目。prefer 下 current/命令所有权发现不探测。托管激活仍只选择已安装版本且不安装；显式托管版本及锁重放不会悄悄换成主机程序。参见[系统工具](../guide/config/tool-selection#system-tools)。

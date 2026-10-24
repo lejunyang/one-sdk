@@ -38,7 +38,7 @@ osdk deps //apps/api:uv
 
 原生启动器按宿主平台选择；Unix 不会执行安装包内的 `.exe`、`.cmd` 或 `.bat` 启动器。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧 `index` / `extra_index` 已移除。请使用 `registries`；规则见 configuration/registries.md。
 
 ### 按项目声明依赖
 
@@ -62,3 +62,6 @@ outputs = []
 pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式与排除规则决定成员范围，不自动合并无关嵌套项目。选择成员会明确说明扩大为一次共享根安装。uv workspace 使用 `uv sync --all-packages`，普通根 sync 不代表覆盖所有成员。共享选项（含 auto/disable、命令、索引）必须一致；冲突及成员独立锁文件报错。freshness 包含 workspace 定义、成员路径与清单、共享锁、有效配置和已安装工具版本。成功的原生安装覆盖范围记录在缓存 deps 状态中；自定义覆盖命令的范围无法验证。同一 osdk 缓存内按项目串行安装和记录状态。原生递归模式需要目录前缀（`packages/**`），拒绝裸 `**`。
 
 可用 `osdk run deps-monorepo-live` 或 `python scripts/test-deps-monorepo.py --bin target/debug/osdk` 运行真实项目验证；使用临时状态与小 npm/Python 包，检查实际产物、共享覆盖、成员变化、继承、auto/禁用及锁/离线失败。子配置可以用显式 `disable = []` 替换继承的禁用列表。
+
+
+显式配置 `tool_order=["system"]` 可使用受支持的已有 PATH/home 工具；默认不启用。显式版本及托管锁/frozen 仍保持权威。参见[system 配置、适配器和限制](../configuration/settings.md#system-执行来源)。

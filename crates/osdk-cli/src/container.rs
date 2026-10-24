@@ -613,9 +613,15 @@ fn discover_docker_prune(
             &output.stdout
         }
         _ => {
-            return Err(anyhow!(osdk_core::t!(
-                "err.container.docker_context_unavailable"
-            )))
+            let reason = match &outcome {
+                CommandOutcome::TimedOut { .. } => "probe timed out",
+                CommandOutcome::Exited { .. } => "probe exited unsuccessfully or truncated output",
+                _ => "probe could not execute",
+            };
+            return Err(anyhow!(
+                "{} ({reason})",
+                osdk_core::t!("err.container.docker_context_unavailable")
+            ));
         }
     };
     let discovered = osdk_core::container::docker::parse_docker_context(output)

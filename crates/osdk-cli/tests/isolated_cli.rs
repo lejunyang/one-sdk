@@ -6,6 +6,10 @@ use std::time::{Duration, Instant};
 use std::{io::Write, net::TcpListener, net::TcpStream};
 
 const ISOLATED_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+#[path = "support/source_diagnostics.rs"]
+mod source_diagnostics;
+#[path = "support/system_source.rs"]
+mod system_source;
 #[cfg(not(windows))]
 const FIXTURE_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -5707,7 +5711,7 @@ printf '%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_regis
             .collect::<Vec<_>>();
         assert_eq!(values.len(), 6);
         for (index, value) in values.iter().enumerate() {
-            if index == selected_index {
+            if index == selected_index || (manager == "pnpm" && index == 0) {
                 assert_eq!(value, &healthy, "{manager}@{version}");
             } else {
                 assert_eq!(value, "unset", "{manager}@{version}");
@@ -5780,7 +5784,7 @@ printf '%s|%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_re
         let fields = line.trim_end().split('|').collect::<Vec<_>>();
         assert_eq!(fields.len(), 7, "{alias}: {line}");
         for (index, value) in fields[..6].iter().enumerate() {
-            if index == registry_index {
+            if index == registry_index || (manager == "pnpm" && index == 0) {
                 assert_eq!(*value, healthy, "{alias}");
             } else {
                 assert_eq!(*value, "unset", "{alias}");
@@ -5948,6 +5952,12 @@ printf '%s\n' "${npm_config_registry-unset}"
 #[test]
 fn exec_registry_passes_through_non_fetch_commands_without_probing() {
     let temporary = tempfile::tempdir().unwrap();
+    // Explicit npm execution must not validate an unrelated Yarn declaration.
+    std::fs::write(
+        temporary.path().join("package.json"),
+        r#"{"packageManager":"yarn@https://unrelated.invalid/archive"}"#,
+    )
+    .unwrap();
     let dead = unused_loopback_registry();
     write_registry_config(temporary.path(), &[&dead]);
     write_fake_registry_manager(
@@ -6438,6 +6448,14 @@ fn explicit_containerd_pull_requires_and_forwards_target_selectors() {
 #[test]
 fn native_container_prune_previews_then_requires_exact_id_and_preserves_exit_code() {
     let temporary = tempfile::tempdir().unwrap();
+    // This tests preview identity and exit propagation, not probe latency.
+    // Parallel integration processes can exhaust the default 1.5-second budget.
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[container]\nprobe_timeout_ms = 10000\n",
+    )
+    .unwrap();
     let bin = temporary.path().join("native-bin");
     let calls = temporary.path().join("prune.calls");
     write_executable(
@@ -6463,7 +6481,11 @@ fn native_container_prune_previews_then_requires_exact_id_and_preserves_exit_cod
         ],
         &common_env,
     );
-    assert!(preview.status.success());
+    assert!(
+        preview.status.success(),
+        "preview failed: {}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
     assert!(!calls.exists());
     let preview_stdout = String::from_utf8(preview.stdout).unwrap();
     let preview_id = preview_stdout
@@ -7123,13 +7145,13 @@ fn deps_trust_gates_the_registry_but_not_the_declaration() {
 
     std::fs::write(
         project.join("osdk.toml"),
-        "[deps.pnpm]\nindex = \"https://registry.example.com/\"\n",
+        "[deps.pnpm.registries.npm]\ndefault = \"https://registry.example.com/\"\n",
     )
     .unwrap();
     let output = run_isolated_in(root, &project, &["deps", "--list"]);
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("deps.pnpm.index"), "{stderr}");
+    assert!(stderr.contains("deps.pnpm.registries"), "{stderr}");
 
     // Same untrusted config: dispatching a tool must still work.
     let output = run_isolated_in(root, &project, &["current"]);
@@ -7721,8 +7743,12 @@ fn depends_orders_providers_and_refuses_a_cycle() {
     let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let a_at = stdout.find(" A").unwrap_or_else(|| panic!("{stdout}"));
-    let b_at = stdout.find(" B").unwrap_or_else(|| panic!("{stdout}"));
+    let a_at = stdout
+        .find("custom command a ")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let b_at = stdout
+        .find("custom command b ")
+        .unwrap_or_else(|| panic!("{stdout}"));
     assert!(
         a_at < b_at,
         "`a` must be planned before `b` despite being declared second: {stdout}"
@@ -8715,4 +8741,226 @@ fn cache_clean_refuses_a_native_cache_parent_link_to_persistent_models() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in cache path"));
     assert_eq!(std::fs::read(&model).unwrap(), b"unique model data");
+}
+
+#[test]
+fn configurable_tool_order_and_conflict_evidence_are_shared_by_cli_selection() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path();
+    std::fs::write(
+        p.join("osdk.toml"),
+        "[tools]\nnode='20.0.0'\n[settings.precedence]\ntool_order=['.node-version','.nvmrc']\n",
+    )
+    .unwrap();
+    std::fs::write(p.join(".node-version"), "22.1.0\n").unwrap();
+    std::fs::write(p.join(".nvmrc"), "22\n").unwrap();
+    let result = run_isolated(p, &["current", "node"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("node 22.1.0"));
+    assert!(stdout.contains("\"status\":\"winner\""));
+    assert!(stdout.contains("\"status\":\"shadowed\""));
+    assert!(stdout.contains("tools.node"));
+    std::fs::write(p.join("osdk.toml"),"[tools]\nnode='20.0.0'\n[settings.precedence]\ntool_order=['.node-version']\ntool_conflicts='error'\n").unwrap();
+    let result = run_isolated(p, &["current", "node"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("incompatible requirements"));
+    // An explicitly versioned operand bypasses project conflict resolution.
+    let result = run_isolated(p, &["where", "node@20.0.0"]);
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("incompatible requirements"));
+}
+
+#[test]
+fn explicit_python_deps_does_not_validate_unrelated_native_tool_files() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path();
+    std::fs::write(p.join("osdk.toml"), "[deps.uv]\n").unwrap();
+    std::fs::write(
+        p.join("pyproject.toml"),
+        "[project]\nname='fixture'\nversion='1.0.0'\n",
+    )
+    .unwrap();
+    std::fs::write(p.join(".nvmrc"), "invalid multiple versions").unwrap();
+    std::fs::write(p.join("rust-toolchain.toml"), "invalid TOML").unwrap();
+    std::fs::write(p.join("package.json"), r#"{"packageManager":false}"#).unwrap();
+    let output = run_isolated(p, &["deps", "--list", "--explain"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("uv"));
+}
+
+#[test]
+fn current_reports_ignored_declarations_even_without_a_winner() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(
+        t.path().join("package.json"),
+        r#"{"packageManager":"yarn@https://user:SECRET@private.invalid/archive"}"#,
+    )
+    .unwrap();
+    let result = run_isolated(t.path(), &["current", "npm"]);
+    assert!(result.status.success());
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("\"status\":\"ignored\""));
+    assert!(stdout.contains("\"tool\":\"npm\""));
+    assert!(!stdout.contains("SECRET"));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_exec_version_bypasses_project_conflicts_during_shim_maintenance() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path();
+    write_fake_registry_manager(
+        p,
+        "npm",
+        "10.0.0",
+        "npm",
+        "#!/bin/sh\nprintf 'explicit-exec-ok\\n'\n",
+    );
+    std::fs::write(
+        p.join("osdk.toml"),
+        "[tools]\nnode='22.0.0'\n[settings.precedence]\ntool_conflicts='error'\n",
+    )
+    .unwrap();
+    std::fs::write(p.join(".nvmrc"), "24.0.0").unwrap();
+    let output = run_isolated(
+        p,
+        &[
+            "exec",
+            "--tool",
+            "npm@10.0.0",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+            "--version",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("explicit-exec-ok"));
+    let implicit = run_isolated(p, &["current", "node"]);
+    assert!(!implicit.status.success());
+    assert!(String::from_utf8_lossy(&implicit.stderr).contains("incompatible requirements"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_native_global_keeps_explicit_node_and_system_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for version in ["20.0.0", "22.0.0"] {
+        let install = root.join("installs/node").join(version);
+        write_executable(
+            &install.join("bin/node"),
+            &format!("#!/bin/sh\necho NODE_{version}\n"),
+        );
+        std::fs::write(install.join(".osdk-complete"), "").unwrap();
+    }
+    std::fs::write(root.join("osdk.toml"), "[tools]\nnode='20.0.0'\n").unwrap();
+    write_executable(
+        &root.join("data/global/npm/bin/global-probe"),
+        "#!/usr/bin/env node\n",
+    );
+    // No ambient shims or global bin are needed; exec selects the native entry.
+    let output = run_isolated_in(
+        root,
+        root,
+        &[
+            "--offline",
+            "exec",
+            "-t",
+            "node@22.0.0",
+            "--",
+            "global-probe",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("NODE_22.0.0"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("NODE_20.0.0"));
+    let bin = root.join("external/bin");
+    write_executable(
+        &bin.join("node"),
+        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo v24.0.0; else echo SYSTEM_NODE; fi\n",
+    );
+    std::fs::write(
+        root.join("osdk.toml"),
+        "[settings.precedence]\ntool_order=['system']\n",
+    )
+    .unwrap();
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["--offline", "exec", "-t", "node", "--", "global-probe"],
+        &[("PATH", bin.to_str().unwrap())],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("SYSTEM_NODE"));
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_native_global_windows_cmd_keeps_explicit_node() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("exec global with spaces");
+    std::fs::create_dir_all(&root).unwrap();
+    for version in ["20.0.0", "22.0.0"] {
+        let install = root.join("installs/node").join(version);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(
+            install.join("node.cmd"),
+            format!("@echo off\r\necho NODE_{version}\r\n"),
+        )
+        .unwrap();
+        std::fs::write(install.join(".osdk-complete"), "").unwrap();
+    }
+    std::fs::write(root.join("osdk.toml"), "[tools]\nnode='20.0.0'\n").unwrap();
+    let bin = root.join("data/global/npm");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("global-probe.cmd"),
+        "@echo off\r\ncall node.cmd\r\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(
+        &root,
+        &root,
+        &[
+            "--offline",
+            "exec",
+            "-t",
+            "node@22.0.0",
+            "--",
+            "global-probe",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("NODE_22.0.0"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("NODE_20.0.0"));
 }

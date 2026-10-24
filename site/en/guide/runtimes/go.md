@@ -1,5 +1,7 @@
 # Go
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#go), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#go).
+
 ```bash
 osdk install go@1.22
 osdk use -g golang@1.23

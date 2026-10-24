@@ -65,6 +65,7 @@ osdk 会同步移除该全局 pin 与对应用户 lock 条目；项目配置和�
 osdk list|ls [TOOL]
 osdk list-remote|lsr TOOL [FILTER]
 osdk current [TOOL]
+osdk current TOOL --sources [--project DIR] [--json] [--probe]
 osdk where TOOL[@VERSION]
 osdk reshim
 ```
@@ -92,7 +93,7 @@ osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
 单个子进程；不修改项目 pin，也不读取 lock。
 
 **不带 `@` 时继承当前生效的 pin。** `-t java` 表示「这个项目选定的那个 Java」，按
-[工作目录解析优先级](../../internals/resolution#工作目录解析优先级)向上查找
+[工作目录解析优先级](../config/tool-selection#可配置的声明优先级)向上查找
 `osdk.toml`、`.tool-versions` 与惯用版本文件；只有写成 `-t java@<选择器>` 才覆盖它，
 包括显式写 `@latest`。这条规则对 `install`、`exec`、`lock`、`outdated`、`upgrade`
 一致。什么都没配置时才回退到 `latest`。
@@ -148,3 +149,5 @@ npm 工具解析版本时都会展开它；它不会给可执行文件改名，�
 | `kotlinc` | `kotlin` |
 
 下一步可阅读[项目与配置](../config/files)，把个人命令变成可共享的项目环境。
+
+使用[来源诊断](../config/tool-selection#inspect-sources)查看支持、存在、缺失和不适用类型及有效排序；默认检查不执行系统工具。

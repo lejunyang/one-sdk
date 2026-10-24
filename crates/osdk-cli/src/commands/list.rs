@@ -145,17 +145,32 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     };
     let mut any = false;
     for backend in backends {
-        if let Some(av) = osdk_core::version::resolver::resolve_active(
-            backend.id(),
-            &cwd,
-            &app.ctx.config.tools,
-            backend.idiomatic_files(),
-        )
-        .map(|active| (active.spec, Some(active.source)))
-        .or_else(|| {
-            osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
-                .map(|request| (request.spec.to_string(), None))
-        }) {
+        let selection = osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &cwd)?;
+        if !selection.evidence.is_empty() {
+            println!("{}", serde_json::to_string(&selection.evidence)?);
+        }
+        if let Some(osdk_core::execution::ExecutionTarget::System(system)) = &selection.target {
+            any = true;
+            println!(
+                "{} {} (system: {})",
+                backend.id(),
+                system.version.as_deref().unwrap_or("unknown; not probed"),
+                system.executable.display()
+            );
+            continue;
+        }
+        if let Some(av) = selection
+            .target
+            .and_then(|target| match target {
+                osdk_core::execution::ExecutionTarget::Managed(active) => Some(active),
+                osdk_core::execution::ExecutionTarget::System(_) => None,
+            })
+            .map(|active| (active.spec, Some(active.source)))
+            .or_else(|| {
+                osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
+                    .map(|request| (request.spec.to_string(), None))
+            })
+        {
             any = true;
             println!(
                 "{} {} ({})",
@@ -186,6 +201,24 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
 
 pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()> {
     let explicit_spec = requested_spec_literal(&tool).is_some();
+    if !explicit_spec && !global && osdk_core::execution::enabled(&app.ctx) {
+        let backend = app.registry.get(&tool)?;
+        if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+            osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &std::env::current_dir()?)?
+                .target
+        {
+            println!(
+                "{}",
+                if bins {
+                    target.bin_dir()
+                } else {
+                    &target.executable
+                }
+                .display()
+            );
+            return Ok(());
+        }
+    }
     let req = if global {
         resolve_explicit_request(
             app,
@@ -250,12 +283,12 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
         let cwd = std::env::current_dir()?;
         let installed = backend.list_installed(&app.ctx)?;
         let dynamic_request = osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
-        let resolved = osdk_core::version::resolver::resolve_active(
+        let resolved = osdk_core::version::resolver::resolve_active_config(
             backend.id(),
             &cwd,
-            &app.ctx.config.tools,
+            &app.ctx.config,
             backend.idiomatic_files(),
-        )
+        )?
         .map(|active| (active.spec, active.is_range))
         .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
         match resolved {
@@ -350,6 +383,74 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
                 names[0]
             );
         }
+    }
+    Ok(())
+}
+
+/// Source discovery is explicit so existing `current` output stays compatible.
+pub fn current_sources(app: &App, tool: &str, json: bool, probe: bool) -> Result<()> {
+    let backend = app.registry.get(tool)?;
+    let cwd = std::env::current_dir()?;
+    let report =
+        osdk_core::execution::diagnostics::inspect(&app.ctx, backend.as_ref(), &cwd, probe);
+    let value = serde_json::to_value(&report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{} — {}", report.tool, report.project.display());
+        println!("Configured order: {}", value["configured_order"]);
+        println!("Effective order: {}", value["effective_order"]);
+        println!("Resolution: {}", report.resolution_status);
+        if let Some(selected) = value["selected"].as_object() {
+            println!("Selection: {}", serde_json::to_string(selected)?);
+        }
+        println!("\nSource inventory (file presence is not a declaration):");
+        for source in value["sources"].as_array().expect("serialized inventory") {
+            println!(
+                "  {} [{}; rank {}] {}",
+                source["source"].as_str().unwrap(),
+                source["state"].as_str().unwrap(),
+                source["rank"],
+                source["reason"].as_str().unwrap()
+            );
+            for location in source["locations"].as_array().unwrap() {
+                println!(
+                    "    {} {}",
+                    if location["file_exists"] == true {
+                        "file"
+                    } else {
+                        "absent"
+                    },
+                    location["path"].as_str().unwrap()
+                );
+            }
+        }
+        println!("\nResolution evidence:");
+        for evidence in &report.evidence {
+            println!(
+                "  {} {}#{} — {}",
+                evidence.status,
+                evidence
+                    .path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                evidence.field,
+                evidence.reason
+            );
+        }
+        for note in &report.notes {
+            println!("{note}");
+        }
+        if !report.inventory_complete {
+            println!("Inventory incomplete; unknown sources must not be read as missing.");
+        }
+        if let Some(error) = &report.error {
+            println!("Error: {error}");
+        }
+    }
+    if report.error.is_some() {
+        anyhow::bail!("tool source diagnostics failed; see the report");
     }
     Ok(())
 }

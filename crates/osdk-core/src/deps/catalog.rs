@@ -22,9 +22,6 @@ impl ProjectEntry {
 impl TryFrom<&DepsProviderEntry> for ProviderConfig {
     type Error = Error;
     fn try_from(entry: &DepsProviderEntry) -> Result<Self> {
-        if entry.extra_index.is_some() {
-            return Err(Error::config("deps.extra_index is unsupported; use native registry configuration; uv supports native named indexes and package bindings in pyproject.toml"));
-        }
         let timeout = entry
             .timeout
             .as_deref()
@@ -49,7 +46,7 @@ impl TryFrom<&DepsProviderEntry> for ProviderConfig {
             env: entry.env.clone(),
             dir: entry.dir.clone(),
             depends: entry.depends.clone(),
-            index: entry.index.clone(),
+            registries: entry.registries.clone(),
             allow_build_from_source: entry.allow_build_from_source,
         })
     }
@@ -285,6 +282,9 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
             })
             .map(|(id, entry)| {
                 let mut config = ProviderConfig::try_from(entry)?;
+                if let Some(registries) = &mut config.registries {
+                    crate::package_sources::validate_override(id, registries)?;
+                }
                 config.config_sources = config_sources.clone();
                 config.project_config = Some(
                     local_path

@@ -11,6 +11,10 @@
 当前 checkout；本地引用没有 semver `action_ref`，因此省略 `version` 时会用最新 Release
 做 bootstrap。这样 Action 改动可以在创建新 tag 之前先经过三平台验证。
 
+## 计划中的 0.0.7 patch
+
+本次 patch 准备发布可配置工具来源顺序、显式启用的系统已有工具、结构化选择证据，以及统一的项目包来源策略。双语配置指南说明各工具支持的来源和环境变量行为。 `current TOOL --sources` 新增项目来源清单、有效排序、JSON 输出、显式目录选择与可选版本探测。此处仅准备版本；本 PR 不创建 tag，也不发布版本。
+
 ## 一次发布会生成什么
 
 流水线先并行构建 Linux x64/arm64、macOS Intel/Apple Silicon 和 Windows x64 的三个

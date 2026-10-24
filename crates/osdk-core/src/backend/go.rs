@@ -210,7 +210,8 @@ impl Backend for GoBackend {
         Ok(env)
     }
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        let paths = self.bin_paths(ctx, tv)?;
+        // GOBIN applications are standalone global commands, not Go tools.
+        let paths = [ctx.dirs.install_path(self.id(), &tv.version).join("bin")];
         let discovered = crate::backend::bin_names_in_dirs(&paths);
         if discovered.is_empty() {
             Ok(vec!["go".into(), "gofmt".into()])

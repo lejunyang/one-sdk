@@ -68,7 +68,7 @@ the requested project page and injects the winner as uv/pip's default index.
 
 ## Project registry preflight
 
-The planner lives in [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs), called by [`apply_package_registry_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs). It handles only an explicit allow-list of commands that may fetch npm packages and first identifies the manager family. An unknown Yarn major is conservatively passed through.
+The planner lives in [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs), called by [`package_sources::apply`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_sources.rs). It handles only an explicit allow-list of commands that may fetch npm packages and first identifies the manager family. An unknown Yarn major is conservatively passed through.
 
 Direct-shim ownership and shim generation share one Corepack command mapping:
 `npm`/`npx`, `pnpm`/`pnpx`, and `yarn`/`yarnpkg`. A valid independent backend
@@ -79,22 +79,22 @@ a conflict. npm and pnpm reached through Node/Corepack still enter registry
 planning; a Yarn major cannot be inferred from the Node version, so it is passed
 through conservatively.
 
-Every eligible invocation performs fresh concurrent anonymous probes; it does not reuse the SDK-source probe cache. The endpoint is the standard npm-compatible `<base>/-/ping` and must return a successful status plus a non-empty JSON object no larger than 64 KiB. Each request has a bounded timeout. The redirect chain may contain at most three URLs, meaning at most two redirects are followed, and it must remain on the original HTTPS origin with no downgrade, cross-origin target, URL credentials, or loop. Probes send no registry token, cookie, or Authorization extracted from native configuration. Ordinary system HTTP(S) proxy settings still apply.
+Eligible invocations without a native source policy or explicit default perform fresh concurrent anonymous probes; it does not reuse the SDK-source probe cache. The endpoint is the standard npm-compatible `<base>/-/ping` and must return a successful status plus a non-empty JSON object no larger than 64 KiB. Each request has a bounded timeout. The redirect chain may contain at most three URLs, meaning at most two redirects are followed, and it must remain on the original HTTPS origin with no downgrade, cross-origin target, URL credentials, or loop. Probes send no registry token, cookie, or Authorization extracted from native configuration. Ordinary system HTTP(S) proxy settings still apply.
 
 Candidate selection is intentionally precise:
 
 - Explicit `[registries.npm].urls` is the complete candidate set. Project configuration replaces the user-level block, preserves order, and chooses the first healthy entry.
-- Without explicit URLs, a recognized anonymous public native registry precedes the built-in npmmirror/npmjs fallbacks.
+- Native source declarations, including public registries, bypass automatic mirror selection. An explicit `default` follows `settings.precedence.packages`; process environment and CLI source choices remain authoritative.
 - Only a purely built-in set chooses the lowest-latency healthy endpoint.
 - URLs are normalized and deduplicated.
 
-The selected URL is injected only into the single child process using its native variable: npm `npm_config_registry`, pnpm `pnpm_config_registry`, Yarn Classic `YARN_REGISTRY`, Yarn Berry `YARN_NPM_REGISTRY_SERVER`, Bun `BUN_CONFIG_REGISTRY`, or Deno `NPM_CONFIG_REGISTRY`.
+The selected URL is injected only into the single child process using its native variable: npm `npm_config_registry`, pnpm 10/11 `npm_config_registry` + `pnpm_config_registry`, Yarn Classic `YARN_REGISTRY`, Yarn Berry `YARN_NPM_REGISTRY_SERVER`, Bun `BUN_CONFIG_REGISTRY`, or Deno `NPM_CONFIG_REGISTRY`.
 
 ## Single-launch and fail-closed behavior
 
 For an eligible invocation that actually enters registry preflight, osdk makes at most one manager launch attempt after selecting a healthy candidate and never retries after launch; if every candidate is unhealthy, no launch is attempted. Process creation itself can still fail. Conservative pass-through invocations do not enter this fail-closed preflight path.
 
-In the control flow, [`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) calls `apply_package_registry_plan` before its single `Command::status()` call. The direct-shim path likewise invokes the same planner before the sole `exec` in [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs). `RegistryPlan::Unavailable` becomes an error before startup. A non-zero exit after manager startup is returned directly, without selecting another registry or replaying lifecycle scripts. Unix `osdk exec` integration tests cover:
+In the control flow, [`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) calls `package_sources::apply` before its single `Command::status()` call. The direct-shim path likewise invokes the same planner before the sole `exec` in [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs). `RegistryPlan::Unavailable` becomes an error before startup. A non-zero exit after manager startup is returned directly, without selecting another registry or replaying lifecycle scripts. Unix `osdk exec` integration tests cover:
 
 - [`exec_registry_fallback_injects_only_the_manager_variable_and_runs_once`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs): with an unhealthy primary and healthy fallback, each manager writes exactly one call marker;
 - [`exec_registry_never_retries_a_failed_manager_command`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs): a manager exiting 42 still writes one marker only;
@@ -103,6 +103,11 @@ In the control flow, [`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main
 
 ## Conservative pass-through and limits
 
-The manager is passed through without probing, injection, or argument/config rewriting when there is an explicit registry CLI argument, an existing relevant registry environment variable, a strict offline flag, a command outside the network allow-list, an explicit cwd/config argument whose context cannot be reproduced safely, unreadable native configuration, a private or unknown registry, any scoped registry, authentication/TLS/native-proxy policy, or an unknown Yarn major. If osdk cannot establish “anonymous, public, and free of scope/auth policy,” it does not optimize.
+For automatic mirror selection, the manager is passed through without probing, injection, or argument/config rewriting when there is an explicit registry CLI argument, an existing relevant registry environment variable, a strict offline flag, a command outside the network allow-list, an explicit cwd/config argument whose context cannot be reproduced safely, unreadable native configuration, a private or unknown registry, any scoped registry, authentication/TLS/native-proxy policy, or an unknown Yarn major. If osdk cannot establish “anonymous, public, and free of scope/auth policy,” it does not optimize.
 
 A healthy registry proves only that its anonymous metadata endpoint works. Absolute tarball or Git URLs in lockfiles or metadata, local files, workspaces, Git dependencies, Deno JSR, and ordinary URL imports may bypass the selected default registry. osdk neither parses nor rewrites lockfiles and does not proxy credentials. An install pinned to a dead absolute URL may therefore fail, and it is never rerun after the manager starts even if another registry is healthy. The complete design boundary is documented in [`docs/package-registry-design.md`](https://github.com/lejunyang/one-sdk/blob/main/docs/package-registry-design.md).
+
+Explicit canonical overrides use the shared adapter across exec, shim and deps. The `osdk` policy changes only supported default/index values; it leaves scope routing, native authentication and interpolation to the manager. Native attribution is deliberately reported as delegated when the exact winning file cannot be established. See [package source configuration](/en/guide/project/deps#package-sources-and-native-precedence).
+
+
+Tool source ordering, conflict handling, per-ecosystem overrides and uv discovery boundaries are defined in [package-manager precedence](../guide/tools/package-managers#configurable-declaration-precedence). Explain output reuses tool selection evidence; fingerprint input files are not an effective native discovery chain.

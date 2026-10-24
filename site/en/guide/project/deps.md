@@ -356,8 +356,8 @@ allow_build_from_source = true
 ## Changing the registry
 
 ```toml
-[deps.pnpm]
-index = "https://registry.example.com/"
+[registries.npm]
+default = "https://registry.example.com/"
 ```
 
 Redirecting where bytes come from requires approving the config -- because the
@@ -378,7 +378,7 @@ outputs = ["node_modules"]  # missing means stale (replaces the default)
 dir = "apps/api"            # run in a subdirectory
 depends = ["npm"]           # materialize another provider first
 timeout = "10m"
-index = "https://registry.npmjs.org/"
+registries.npm.default = "https://registry.npmjs.org/"
 allow_build_from_source = false
 env = { CI = "1" }
 ```
@@ -458,7 +458,7 @@ Undeclared `sources`, or declared sources that match no files at all, never coun
 as fresh: a predicate that matches nothing is vacuously true, which would dress
 up "nothing was checked" as "nothing changed".
 
-`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
+`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. Legacy source fields have been removed; see migration below.
 
 ### Per-project dependencies
 
@@ -488,3 +488,47 @@ Migration: explicit `sources`/`outputs` paths now belong to their declaring conf
 
 Bare `depends` names order providers in the same project or shared workspace; use `//path:provider` for a different installation unit. Selection does not implicitly enable omitted dependencies. Shared member package-manager version conflicts fail.
 Run the opt-in real-project smoke with `osdk run deps-monorepo-live`, or `python scripts/test-deps-monorepo.py --bin target/debug/osdk`. It uses temporary state and small npm/Python packages; it checks actual artifacts, shared coverage, member changes, inheritance, auto/disable and locked/offline failure paths. A discovered child may explicitly replace an inherited `disable` list with `[]`.
+
+## Package sources and native precedence
+
+`tools` declares tools and versions, `sources` downloads tool artifacts, and `registries` is the canonical project package-source configuration.
+Exec, shims and deps share adapters. They never rewrite `.npmrc`, `pyproject.toml` or other native files.
+
+```toml
+[settings.precedence]
+tools = "osdk"       # or "native"; default: osdk
+packages = "native"  # or "osdk"; preserve explicit native configuration by default
+
+[registries.npm]
+default = "https://registry.npmjs.org/"
+
+[registries.python]
+default = "https://pypi.org/simple/"
+indexes = ["https://packages.example.org/simple/"]
+
+[registries.go]
+proxy = "https://proxy.golang.org,direct"
+```
+
+- Invocation CLI source options and explicit process source variables win; `deps.env` supplies that process environment. `packages` orders explicit osdk settings against native files, never authentication.
+- `packages = "native"` preserves native registries, scopes, credentials, proxies and TLS configuration. `"osdk"` overrides only declared default/index settings; scopes and authentication stay native. Missing overrides preserve native behavior. Automatic mirrors never replace explicit native configuration. Complex uv native tables are conservatively preserved as a group, without rewriting named indexes or package bindings.
+- npm, pnpm, Yarn Classic, Yarn Berry and Bun use their own variables: `npm_config_registry`, `npm_config_registry` + `pnpm_config_registry` (pnpm 10/11), `YARN_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`, `BUN_CONFIG_REGISTRY`. Yarn's major must be known; a Node version is never interpreted as Yarn's major. pnpm resolves workspace configuration itself.
+- Both Python deps providers use uv. `default` is the lowest-priority default index; `indexes` supplies explicitly ordered additional indexes with `first-index` safety. These are not failure fallback mirrors. Keep named indexes, package bindings and credential interpolation in native configuration.
+- `urls` remains an anonymous mirror candidate list for the default source only. All-source failure stops before the manager starts. Installation failures never trigger automatic lifecycle-script retries. Offline mode skips probes; native offline flags constrain installation.
+- `default = ""` clears an inherited osdk default override and disables automatic mirrors for that item; `indexes = []` clears osdk additional indexes. Neither deletes native settings. `urls = []` retains its built-in-candidate meaning.
+- Project `registries` replaces the user section. Explicit `extends` merges fields and replaces arrays. `[deps.<provider>.registries]` uses the same schema as a whole-section local replacement. Cargo, Deno and custom deps reject this local field; use native configuration or `env`. Go preserves GOPROXY comma/pipe behavior rather than inventing URL retries.
+- `osdk current` displays tool candidates and policy; `osdk deps --dry-run --explain` reports package decisions, discovered native candidate files and tool selection. The native manager resolves its effective configuration; unknown attribution is stated rather than invented. Native files, source environment and configuration participate in opaque freshness hashes. Credentials are excluded from displayed commands and osdk.lock; custom command arguments/environment are hidden entirely. Native subprocesses remain responsible for redacting their own output.
+
+### Migration
+
+Remove `[deps.<provider>].index` / `extra_index`; there are no compatibility aliases.
+Move defaults to `registries.npm.default` or `registries.python.default`. Use `registries.python.indexes` only for intentional additional Python indexes.
+For a local exception, use `deps.uv.registries.python.default = "https://example.org/simple/"`.
+Unknown fields fail normally, including invented generic Cargo/Deno source fields.
+
+Tool source ordering, conflict handling, per-ecosystem overrides and uv discovery boundaries are defined in [package-manager precedence](../tools/package-managers#configurable-declaration-precedence). Explain output reuses tool selection evidence; fingerprint input files are not an effective native discovery chain.
+
+
+### Opt-in external execution
+
+`tool_order` also accepts `system`, only when explicitly listed. Defaults and `[]` keep it disabled. The [system-tool reference](../config/tool-selection#system-tools) defines supported adapters, home-before-PATH search, Windows `.exe` limits, probing and examples. External tools are absolute execution targets rather than managed versions or installations. Explicit CLI versions, managed lock replay and frozen deps retain authority. Non-frozen deps can use unpinned external tools, revalidates each run under this policy and does not write portable receipts for external paths. Dynamic package-tool runtime receipts remain managed; mixing them with system execution is rejected.

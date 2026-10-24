@@ -74,6 +74,7 @@ system PATH.
 osdk list|ls [TOOL]
 osdk list-remote|lsr TOOL [FILTER]
 osdk current [TOOL]
+osdk current TOOL --sources [--project DIR] [--json] [--probe]
 osdk where TOOL[@VERSION]
 osdk reshim
 ```
@@ -105,7 +106,7 @@ process. It neither changes project pins nor reads the lock.
 **Without `@`, the operand inherits the pin in effect.** `-t java` means "the Java
 this project selected": osdk walks up for `osdk.toml`, `.tool-versions` and the
 idiomatic version files following the
-[working-directory precedence](../../internals/resolution#working-directory-precedence).
+[working-directory precedence](../config/tool-selection#configurable-declaration-precedence).
 Only `-t java@<selector>` overrides it -- including an explicit `@latest`. The rule
 is the same for `install`, `exec`, `lock`, `outdated` and `upgrade`, and `latest`
 remains the fallback when nothing is configured.
@@ -165,3 +166,5 @@ explicitly.
 
 Next, read [Projects and Configuration](../config/files) to turn individual commands
 into a shared project environment.
+
+Use [source diagnostics](../config/tool-selection#inspect-sources) to list supported, present, missing and inapplicable kinds with effective order; default inspection does not execute system tools.

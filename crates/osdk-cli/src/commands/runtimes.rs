@@ -1567,12 +1567,12 @@ pub(crate) fn rust_override(app: &App, command: RustOverrideCommand) -> Result<(
         }
         RustOverrideCommand::Export { path } => {
             let directory = path.unwrap_or(cwd);
-            let active = osdk_core::version::resolver::resolve_active(
+            let active = osdk_core::version::resolver::resolve_active_config(
                 "rust",
                 &directory,
-                &app.ctx.config.tools,
+                &app.ctx.config,
                 &["rust-toolchain.toml", "rust-toolchain"],
-            )
+            )?
             .ok_or_else(|| anyhow!("no active osdk Rust version for {}", directory.display()))?;
             let canonical = dunce_path(&directory)?;
             let path_arg = canonical.display().to_string();

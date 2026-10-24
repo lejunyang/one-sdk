@@ -188,8 +188,28 @@ jobs:
           components: clippy
           targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
+      - name: refresh mingw package index
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'phase_status=$?; printf "APT update ended at %s (exit=%s)\n" "$(date -u +%FT%TZ)" "$phase_status"' EXIT
+          printf 'APT update started at %s\n' "$(date -u +%FT%TZ)"
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 --error-on=any update
       - name: install mingw-w64
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'phase_status=$?; printf "mingw install ended at %s (exit=%s)\n" "$(date -u +%FT%TZ)" "$phase_status"' EXIT
+          printf 'mingw install started at %s\n' "$(date -u +%FT%TZ)"
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 install -y mingw-w64
       - name: cross clippy (windows-gnu)
         run: >-
           cargo clippy --locked --workspace --all-targets

@@ -1,5 +1,7 @@
 # Python
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#python), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#python).
+
 `python@3.14` is shorthand for default CPython. The complete request form is
 `python@IMPLEMENTATION-VERSION+VARIANT`:
 

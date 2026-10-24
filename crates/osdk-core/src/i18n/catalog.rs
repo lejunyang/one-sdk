@@ -2673,6 +2673,34 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.current.sources",
+        (
+            "Inspect applicable sources, effective order and discovery evidence",
+            "检查适用来源、有效排序与发现证据",
+        ),
+    );
+    m.insert(
+        "help.current.json",
+        (
+            "Emit one diagnostic JSON object (requires --sources)",
+            "输出单个诊断 JSON 对象（需要 --sources）",
+        ),
+    );
+    m.insert(
+        "help.current.project",
+        (
+            "Inspect this project directory (requires --sources)",
+            "检查指定项目目录（需要 --sources）",
+        ),
+    );
+    m.insert(
+        "help.current.probe",
+        (
+            "Run bounded native version probes; never install missing runtimes",
+            "运行有时限的原生版本探测；不安装缺失的运行时",
+        ),
+    );
+    m.insert(
         "help.current.about",
         (
             "Show the active version of each tool for the current directory",

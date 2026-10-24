@@ -281,6 +281,9 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
 }
 
 pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
+    if super::system_exec::try_exec(app, &tools, &command).await? {
+        return Ok(());
+    }
     let requests = gather_requests(app, tools)?;
     let resolved = install_requests(app, requests, Vec::new(), false, false).await?;
     let mut paths = Vec::new();
@@ -307,8 +310,8 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         && !osdk_core::shim::process_java_home_is_user_owned()
     {
         let cwd = std::env::current_dir()?;
-        if let Some((jdk_env, jdk_paths)) =
-            osdk_core::shim::managed_jdk_env(&app.ctx, &app.registry, &cwd)
+        if let Some((jdk_paths, jdk_env)) =
+            osdk_core::execution::jdk_environment(&app.ctx, &app.registry, &cwd)?
         {
             env.extend(jdk_env);
             paths.extend(jdk_paths);
@@ -333,6 +336,13 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
     // (the NDK's per-API clang wrappers, for one) would not be found even
     // though it is on the PATH we just built. Resolve it ourselves first.
     let managed_program = resolve_program_in_dirs(&managed_program, &managed_paths);
+    let hosts: Vec<_> = resolved
+        .iter()
+        .map(|(_, version)| version.backend.as_str())
+        .collect();
+    let managed_program =
+        resolve_native_global_for_exec(app, &managed_program, &hosts, &managed_paths, &mut env)?
+            .unwrap_or(managed_program);
     apply_package_registry_plan(app, &resolved, program, args, &mut env).await?;
     let status = command_for_program(&managed_program)
         .args(&managed_args)
@@ -422,6 +432,65 @@ pub(crate) fn resolve_managed_launcher_alias(
         .chain(args.iter().cloned())
         .collect();
     Ok((executable, rewritten))
+}
+
+/// Launch a known native global directly when this exec plan already supplies
+/// its host. Re-entering a shim would discard explicit CLI runtime authority.
+/// Explicit paths and managed tool/receipt commands retain priority.
+pub(crate) fn resolve_native_global_for_exec(
+    app: &App,
+    program: &std::path::Path,
+    hosts: &[&str],
+    runtime_paths: &[std::path::PathBuf],
+    env: &mut std::collections::BTreeMap<String, String>,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(name) = program.to_str().filter(|s| !s.contains(['/', '\\'])) else {
+        return Ok(None);
+    };
+    if app.registry.get(name).is_ok() || find_managed_executable(runtime_paths, name).is_some() {
+        return Ok(None);
+    }
+    for source in osdk_core::shim::global_bin_sources(&app.ctx) {
+        if !source.names.iter().any(|n| n == name) {
+            continue;
+        }
+        let Some(launcher) = find_managed_executable(std::slice::from_ref(&source.bin_dir), name)
+        else {
+            continue;
+        };
+        if let Some(host) = osdk_core::shim::native_global_runtime(&launcher, source.owner) {
+            if !hosts.contains(&host) {
+                return Ok(None);
+            }
+            let available = find_managed_executable(runtime_paths, host).is_some_and(|path| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = path;
+                    true
+                }
+            });
+            if !available {
+                anyhow::bail!("selected {host} runtime executable is missing or not executable");
+            }
+        }
+        // Native sibling commands must see the same selected runtime too.
+        let mut paths: Vec<_> = env
+            .get("PATH")
+            .map(|p| std::env::split_paths(p).collect())
+            .unwrap_or_default();
+        paths.insert(runtime_paths.len().min(paths.len()), source.bin_dir);
+        env.insert(
+            "PATH".into(),
+            std::env::join_paths(paths)?.to_string_lossy().into_owned(),
+        );
+        return Ok(Some(launcher));
+    }
+    Ok(None)
 }
 
 pub(crate) fn find_managed_executable(
@@ -519,41 +588,30 @@ pub(crate) async fn apply_package_registry_plan_at(
     cwd: &std::path::Path,
 ) -> Result<()> {
     let executable_alias = executable_basename(program);
-    let project_yarn_version = project_yarn_version(cwd);
+    let project_yarn_version = if matches!(executable_alias.as_str(), "yarn" | "yarnpkg")
+        && !resolved
+            .iter()
+            .any(|(_, version)| version.backend == "yarn")
+    {
+        project_yarn_version(app, cwd)?
+    } else {
+        None
+    };
     let yarn_version = resolved
         .iter()
         .find(|(_, version)| version.backend == "yarn")
         .map(|(_, version)| version.version.as_str())
         .or(project_yarn_version.as_deref());
-    let Some(manager) = package_registry::manager_for_command(&executable_alias, yarn_version)
-    else {
-        if matches!(executable_alias.as_str(), "yarn" | "yarnpkg") {
-            tracing::info!(
-                executable = %executable_alias,
-                "dependency registry pass-through: Yarn major is unknown; use --tool yarn@<version> or declare packageManager"
-            );
-        }
-        return Ok(());
-    };
-    if !package_registry::should_plan(manager, &executable_alias, args) {
-        return Ok(());
-    }
-    let registry_env = package_registry::registry_env(manager);
-    match package_registry::plan(&app.ctx, cwd, manager, &executable_alias, args, |key| {
-        std::env::var(key).ok()
-    })
-    .await?
-    {
-        RegistryPlan::PassThrough { reason } => {
-            tracing::info!(manager = %manager, %reason, "dependency registry pass-through");
-        }
-        RegistryPlan::Selected { url, .. } => {
-            env.insert(registry_env.to_string(), url);
-        }
-        RegistryPlan::Unavailable { probes } => {
-            return Err(unavailable_registry_error(manager, &probes));
-        }
-    }
+    let evidence = osdk_core::package_sources::apply(
+        &app.ctx,
+        cwd,
+        &executable_alias,
+        yarn_version,
+        args,
+        env,
+    )
+    .await?;
+    tracing::info!(%evidence, "package source resolution");
     Ok(())
 }
 
@@ -571,35 +629,11 @@ pub(crate) fn executable_basename(program: &str) -> String {
     basename
 }
 
-pub(crate) fn project_yarn_version(cwd: &std::path::Path) -> Option<String> {
-    osdk_core::version::resolver::resolve_package_manager(cwd)
-        .ok()
-        .flatten()
-        .filter(|request| request.manager == "yarn")
-        .map(|request| request.version)
-}
-
-pub(crate) fn unavailable_registry_error(
-    manager: PackageManager,
-    probes: &[RegistryProbe],
-) -> anyhow::Error {
-    let details = probes
-        .iter()
-        .map(|probe| {
-            let reason = probe.error.as_deref().unwrap_or("unreachable");
-            format!("{} ({reason})", probe.url)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    if details.is_empty() {
-        anyhow!(t!("err.registry_command_not_started", manager = manager))
-    } else {
-        anyhow!(t!(
-            "err.registry_command_not_started_details",
-            manager = manager,
-            details = details
-        ))
-    }
+pub(crate) fn project_yarn_version(app: &App, cwd: &std::path::Path) -> Result<Option<String>> {
+    Ok(
+        osdk_core::version::resolver::resolve_active_config("yarn", cwd, &app.ctx.config, &[])?
+            .map(|request| request.spec),
+    )
 }
 
 pub(crate) fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
@@ -1589,6 +1623,36 @@ pub(crate) fn report_shell_split_operands(tools: &[String]) -> Result<()> {
 }
 
 pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
+    let requests = gather_requests_unchecked(app, tools.clone())?;
+    if osdk_core::execution::enabled(&app.ctx) {
+        let cwd = std::env::current_dir()?;
+        for request in &requests {
+            let explicit = tools.iter().any(|operand| {
+                requested_spec_literal(operand).is_some()
+                    && resolve_explicit_request(
+                        app,
+                        operand,
+                        &app.ctx.config.tool_configs,
+                        &app.ctx.config.tools,
+                    )
+                    .is_ok_and(|r| r.backend == request.backend)
+            });
+            if explicit {
+                continue;
+            }
+            let backend = app.registry.get(&request.backend)?;
+            if matches!(
+                osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &cwd)?.target,
+                Some(osdk_core::execution::ExecutionTarget::System(_))
+            ) {
+                anyhow::bail!("{} selects an external system tool; use exec for that target or specify an explicit managed version for install/lock", request.backend);
+            }
+        }
+    }
+    Ok(requests)
+}
+
+pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
         // A shell that split one operand into several is worth naming before
         // anything else: the resulting fragments fail as "unterminated option
@@ -1629,22 +1693,34 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
                 // `VersionSpec::Latest`, which is indistinguishable from an
                 // explicit `tool@latest` -- so the configured spec is bound here,
                 // where the original operand text is still available.
-                bind_configured_spec_for_bare_operand(app, s, &mut request);
+                bind_configured_spec_for_bare_operand(app, s, &mut request)?;
                 Ok(request)
             })
             .collect::<Result<Vec<_>>>()?;
         return Ok(requests);
     }
     // From config pins.
+    let cwd = std::env::current_dir()?;
     let mut out = Vec::new();
     for (tool, spec) in &app.ctx.config.tools {
         if tool == "node" {
             continue;
         }
-        if app.registry.get(tool).is_ok() {
+        if let Ok(backend) = app.registry.get(tool) {
+            let active = osdk_core::version::resolver::resolve_active_config(
+                tool,
+                &cwd,
+                &app.ctx.config,
+                backend.idiomatic_files(),
+            )?;
+            let selected = active.as_ref().map(|a| a.spec.as_str()).unwrap_or(spec);
             out.push(ToolRequest {
                 backend: tool.clone(),
-                spec: VersionSpec::parse(spec),
+                spec: if active.as_ref().is_some_and(|a| a.is_range) {
+                    VersionSpec::parse_range(selected)?
+                } else {
+                    VersionSpec::parse(selected)
+                },
                 options: app
                     .ctx
                     .config
@@ -1665,7 +1741,7 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
     }
     let cwd = std::env::current_dir()?;
     if let Some(package_manager) =
-        osdk_core::version::resolver::resolve_package_manager(&cwd).map_err(anyhow::Error::msg)?
+        osdk_core::version::resolver::resolve_package_manager_config(&cwd, &app.ctx.config)?
     {
         if out
             .iter()
@@ -1673,7 +1749,8 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
         {
             out.push(ToolRequest {
                 backend: package_manager.manager.clone(),
-                spec: VersionSpec::Exact(package_manager.version),
+                spec: VersionSpec::parse_range(&package_manager.version)
+                    .unwrap_or_else(|_| VersionSpec::parse(&package_manager.version)),
                 options: app
                     .ctx
                     .config
@@ -1685,12 +1762,12 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
         }
     }
     let backend = app.registry.get("node")?;
-    if let Some(active) = osdk_core::version::resolver::resolve_active(
+    if let Some(active) = osdk_core::version::resolver::resolve_active_config(
         backend.id(),
         &cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    ) {
+    )? {
         let spec = if active.is_range {
             VersionSpec::parse_range(&active.spec)?
         } else {
@@ -1765,11 +1842,11 @@ pub(crate) fn bind_configured_spec_for_bare_operand(
     app: &App,
     operand: &str,
     request: &mut ToolRequest,
-) {
+) -> Result<()> {
     // Ancestor discovery starts at the working directory, exactly as the shim
     // and `osdk current` do, so all three agree on what is active.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    bind_configured_spec_for_bare_operand_at(app, operand, request, &cwd);
+    bind_configured_spec_for_bare_operand_at(app, operand, request, &cwd)
 }
 
 /// As [`bind_configured_spec_for_bare_operand`], with the start directory given.
@@ -1781,20 +1858,21 @@ pub(crate) fn bind_configured_spec_for_bare_operand_at(
     operand: &str,
     request: &mut ToolRequest,
     cwd: &std::path::Path,
-) {
+) -> Result<()> {
     if requested_spec_literal(operand).is_some() {
-        return;
+        return Ok(());
     }
     let Ok(backend) = app.registry.get(&request.backend) else {
-        return;
+        return Ok(());
     };
-    let Some(active) = osdk_core::version::resolver::resolve_active(
+    let Some(active) = osdk_core::version::resolver::resolve_active_config(
         backend.id(),
         cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    ) else {
-        return;
+    )?
+    else {
+        return Ok(());
     };
     let expanded = app
         .ctx
@@ -1802,14 +1880,12 @@ pub(crate) fn bind_configured_spec_for_bare_operand_at(
         .expand_alias(backend.id(), &active.spec)
         .unwrap_or(active.spec);
     let spec = if active.is_range {
-        match VersionSpec::parse_range(&expanded) {
-            Ok(spec) => spec,
-            Err(_) => return,
-        }
+        VersionSpec::parse_range(&expanded)?
     } else {
         VersionSpec::parse(&expanded)
     };
     request.spec = spec;
+    Ok(())
 }
 
 /// Fail with a list of namespaces when a bare tool name owns no backend.
@@ -1974,12 +2050,12 @@ pub(crate) fn inject_node_dependency(
     }
     let cwd = std::env::current_dir()?;
     let backend = app.registry.get("node")?;
-    let spec = osdk_core::version::resolver::resolve_active(
+    let spec = osdk_core::version::resolver::resolve_active_config(
         "node",
         &cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .map(|active| {
         if active.is_range {
             VersionSpec::parse_range(&active.spec)
@@ -2131,12 +2207,12 @@ pub(crate) fn inject_go_dependency_at(
     }
 
     let backend = app.registry.get("go")?;
-    let active = osdk_core::version::resolver::resolve_active(
+    let active = osdk_core::version::resolver::resolve_active_config(
         "go",
         cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .ok_or_else(|| {
         anyhow!(
             "Go tools require a managed Go selection; configure `go = \"1.24\"` or include `go@1.24`"
@@ -2197,12 +2273,12 @@ pub(crate) fn inject_rust_dependency_at(
     }
 
     let backend = app.registry.get("rust")?;
-    let active = osdk_core::version::resolver::resolve_active(
+    let active = osdk_core::version::resolver::resolve_active_config(
         "rust",
         cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .ok_or_else(|| {
         anyhow!(
             "Cargo tools require one exact managed Rust version; configure `rust = \"1.91.1\"` or include `rust@1.91.1`"

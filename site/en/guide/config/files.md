@@ -6,7 +6,7 @@ osdk combines user defaults, project declarations, environment variables, and CL
 
 - User configuration: `$OSDK_CONFIG_DIR/config.toml`; on Linux the default is `~/.config/osdk/config.toml`.
 - Project configuration: `osdk.toml` or `.osdk.toml`. osdk walks upward and uses the nearest file; `osdk.toml` wins when both exist in one directory.
-- `.tool-versions`: discovered independently by walking upward; it fills tool keys still absent after project/user `[tools]` are merged.
+- `.tool-versions`: discovered independently by walking upward; its declarations participate in the shared [tool-version precedence](#configurable-declaration-precedence), above global tool defaults in the default order.
 
 ```text
 osdk config path
@@ -160,6 +160,15 @@ offline = false
 lang = "en"                 # optional; en|zh
 prerelease = "if-explicit"  # never|if-explicit|allow
 
+[settings.precedence]
+tools = "osdk"            # osdk|native; default order for tool versions
+packages = "native"       # osdk|native; default package-source policy
+tool_order = []            # shared source-kind order for all tools; [] uses defaults
+tool_conflicts = "prefer"  # prefer|error
+npm = "inherit"           # osdk|native|inherit; package-source override only
+python = "inherit"
+go = "inherit"
+
 [settings.shims]
 include = []                # global allowlist; when non-empty, nothing else is shimmed
 exclude = []                # skipped names; applied last
@@ -214,7 +223,6 @@ platform = "runtime"          # runtime or OS/ARCH[/VARIANT]
 probe_timeout_ms = 1500
 
 [tools]
-node = "20"
 python = "3.12"
 pnpm = "10"
 "npm:prettier" = "3"
@@ -225,7 +233,6 @@ lazy = true                    # skipped by bare install unless --include-lazy
 installer = "npm"             # auto|npm|pnpm; auto is the implicit default
 allow_builds = ["@scope/native-tool", "esbuild"]
 
-[tools."npm:only-on-windows-arm"]
 [tools."npm:only-on-windows-arm"]
 version = "1.0.0"
 when = { os = "windows", arch = "arm64" }   # single token or a list; both must match
@@ -289,7 +296,7 @@ form above when you need one.
 
 ## Exact override and merge semantics
 
-The overall precedence is:
+For ordinary configuration fields, the overall precedence is (tool-version selection has its own policy below):
 
 ```text
 CLI > OSDK_* environment > nearest project config > user config > built-in defaults
@@ -299,7 +306,8 @@ File layers do not use one universal field-by-field merge:
 
 | Area | Effect of the higher-precedence file |
 | --- | --- |
-| `[settings]` | **Replace the whole section**; omitted fields become built-in `Settings` defaults instead of inheriting the user file |
+| `[settings]` | **Replace the whole section**, except `precedence`; other omitted fields become built-in `Settings` defaults instead of inheriting the user file |
+| `[settings.precedence]` | Merge by field across user, explicit `extends`, and project layers; omitted fields inherit, arrays replace, `tool_order = []` clears custom ordering, and ecosystem `"inherit"` clears its package-policy override |
 | `[sources]` top level | Replace `selection`, `probe_timeout_ms`, and `cache_ttl` as a group; omissions become defaults |
 | `[sources.<tool>]` | Merge by tool key; the higher layer replaces the entire same-tool value (`pin`, `disable`, `custom`, and so on) |
 | Model `env` / `env_force` | Project files cannot change them; user-global values are retained to prevent a repository from silently changing credential environment |
@@ -307,7 +315,7 @@ File layers do not use one universal field-by-field merge:
 | `[container]` | Replace the whole section; omitted runtime, builder, platform, timeout, and registry-policy fields use built-in defaults |
 | `[tools]` | Merge by backend key; higher same-name key wins |
 | `[alias.tools.<tool>]` | Merge by tool and alias key; higher same-name alias wins |
-| `.tool-versions` | Fill only tool keys still missing after `[tools]` is merged |
+| Native tool declarations (including `.tool-versions`) | Rank against project/global `[tools]` using `settings.precedence`; see the source-kind order below |
 
 For example, if user configuration sets `verify_signatures = false` and a
 project contains only:
@@ -324,3 +332,28 @@ non-default combination in the higher layer when you need to preserve it.
 `[settings.download_cache]` has `max_size_bytes` (default 2147483648; 0 retains none; `"unlimited"` disables size limit) and `max_age_secs` (default 604800; 0 disables expiry). `OSDK_DOWNLOAD_CACHE_MAX_SIZE` overrides size. See [Caches and Cleanup](../maintenance/cache).
 
 Explicit inheritance: a child `osdk.toml` can set `extends = "../../osdk.toml"`. Directory nesting alone does not inherit configuration. Priority is CLI/environment, child fields, explicitly inherited ancestor fields, user configuration, then defaults. Maps merge by key (including env); scalar values and arrays replace, so `false` and `[]` are meaningful. Inherited dependency sources/outputs/dir and task dir/file paths belong to their declaring file. Keep discovery roots/projects in the catalog root; a discovered child cannot redefine the catalog. Per-project declarations supply defaults to an inheriting child, whose explicit provider fields take precedence. An independent child config declares its own providers. Root and child dependency calls use the same catalog and effective provider/tool options. Each executable or source-changing config file in the chain needs its own trust; trusting a child file does not trust its parent. Self cycles, non-ancestor references and repository-boundary escapes fail. Task aggregation stays separate in `[task].roots`; inherited runner defaults are materialized into rooted task definitions.
+
+## Configurable declaration precedence
+
+See [Tool Selection](./tool-selection) for common order/conflict rules, [per-tool source kinds](./tool-selection#tool-order-reference), [project diagnostics](./tool-selection#inspect-sources), and [tool environments](./tool-environment).
+
+`npm`, `python`, and `go` under `[settings.precedence]` override **package-source** policy for that ecosystem, not tool-version policy. They accept `osdk`, `native`, or `inherit` (use `packages` again); for example, `python="native"` preserves Python package indexes, not `.python-version` priority. They do not reorder native credentials, scope routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
+user/first-system candidates. Complex settings (named indexes, bindings and other unmodeled fields)
+remain native as a group; injecting explicit osdk indexes into them under osdk precedence fails. An invocation environment override that prevents injection does not cause this error.
+A possible uv workspace delegates the group intact, including membership/exclusions, without osdk
+index injection; uv may still validate member metadata. Candidate files are not per-field winners. Requirements/constraint inputs with native options or unreadable context, positional `uv pip sync`/`compile` inputs, and explicit config/directory (`-C` included)/offline/dotenv invocation options, including options before subcommands, are delegated to uv;
+false-like UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX values do not disable injection merely by existing.
+Native files are not rewritten and failed execution is never retried with a different installer.
+
+
+### tool_order reference {#tool-order-reference}
+
+The complete enum and tool applicability matrix now live in [Tool Selection](./tool-selection#tool-order-reference).
+
+### Existing system tools {#system-tools}
+
+See [system selection and limits](./tool-selection#system-tools) and [per-tool environment behavior](./tool-environment).
+
+### Examples: Node, Python and JavaScript managers
+
+See the [Node, Python and manager examples](./tool-selection#examples-node-python-and-javascript-managers) in Tool Selection.

@@ -315,15 +315,15 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 加入版本控制忽略规则。请把包管理器的原生 lock 与 `osdk.lock` 一起提交；后者不能替代
 传递依赖图。
 
-全局 npm 与 pnpm 都会在 osdk 控制的前缀中调用各自真正的 global-add，不修改环境中
-的 Node 安装。即使直接运行 `npm i -g` / `pnpm add -g`（不经 `osdk use --global`），
-osdk 也会把全局前缀（`npm_config_prefix` / `PNPM_HOME`）重定向到受控目录，并在命令
-退出后自动对账：新装的全局命令立即得到 shim、卸载的命令自动清理，无需手动
-`osdk reshim`，直接输入命令名就能在受控环境下运行。Yarn、Bun、Deno 的全局安装同样
-自动纳管；Go/Cargo 这类自包含原生工具则把输出目录直接放到 PATH。
-若系统里残留旧的 pnpm/node 持久环境变量，安装时 osdk 会告警提示清除，或用
-`[settings.<tool>] override_env = true`（顶层 `override_tools_env = true` 则对所有工具
-生效）让 osdk 强制覆盖这些变量。
+托管 `npm i -g` 等命令使用共享全局目录，因此切换 Node 不会删除包文件。
+经 osdk shim 运行的受支持 JS 包管理器会在退出后对账全局命令入口。全局命令使用
+所选运行时，不要求另装独立 npm；项目外可主动用 `osdk use --global node@22`
+设置默认版本。缺少运行时会给出提示，不会任取一个已安装版本。
+`osdk reshim` 也能发布原生 Cargo/Go 应用，不要求选择编译器。native addon、
+固定宿主的 wrapper 与 Python 环境仍有运行时兼容要求。系统管理器与原生输出覆盖
+保留各自位置，详见[全局安装边界](site/guide/tools/package-managers.md#全局安装自动纳管)
+及[环境变量](site/guide/config/tool-environment.md)。
+
 `where --global` 与 `uninstall --global` 会显式操作配置精确匹配的用户级 npm 安装；不带
 该标志时继续保持原有项目/隔离行为。卸载只删除选中的身份根，同一包版本的其他身份仍然
 保留。全局卸载还会同步删除对应的用户配置、锁条目，以及不再有其他 owner 的 shim。
@@ -369,7 +369,7 @@ auto = false
 
 先用 `osdk deps --list --all --explain` 查看项目与命令，再用 `osdk deps` 一键初始化。`auto = false` 保留显式安装；`disable` 移除 provider。pnpm/uv 原生 workspace 只在共享根安装一次，选择成员时会说明扩大的覆盖范围。独立子配置可用 `extends = "../../osdk.toml"` 显式继承。
 
-覆盖命令支持 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，需要 trust，且不能保证 frozen 或禁脚本。不支持的 `extra_index` 会报迁移错误，不再替换默认索引。显式输入/输出路径属于声明文件（如 `sources = ["apps/api/package.json"]`）。workspace、继承与迁移细节见[依赖指南](site/guide/project/deps.md)。
+覆盖命令支持 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，需要 trust，且不能保证 frozen 或禁脚本。包源统一使用 `registries`，`[settings.precedence]` 支持工具声明来源排序、可选冲突报错，以及分生态的包源优先级；用 `osdk current TOOL --sources --project DIR` 检查适用来源、缺失声明及有效排序，自动化可加 `--json`；选择器和缓存覆盖见[工具环境变量](site/guide/config/tool-environment.md)；旧 deps 包源字段已移除。显式输入/输出路径属于声明文件（如 `sources = ["apps/api/package.json"]`）。workspace、继承与迁移细节见[依赖指南](site/guide/project/deps.md)。 设置 `tool_order=["system","osdk"]` 可主动使用已有 PATH/home 工具，默认仍保持托管选择。见[系统工具支持范围与示例](site/guide/config/tool-selection.md#system-tools)。
 
 
 

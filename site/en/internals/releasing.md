@@ -15,6 +15,10 @@ from the latest release because a local reference has no semver `action_ref`
 and the job omits `version`. Action changes are therefore covered on all three
 platforms before a new tag exists.
 
+## Planned 0.0.7 patch
+
+This patch prepares configurable tool source precedence and opt-in existing system tools, structured selection evidence, and unified project package source policy. The bilingual configuration guides describe supported source kinds and environment behavior. `current TOOL --sources` adds project source inventory, effective ordering, JSON output, explicit directory targeting and opt-in version probes. This is a version preparation; the PR does not create a tag or publish a release.
+
 ## What one release publishes
 
 The workflow first builds both programs for Linux x64/arm64, macOS

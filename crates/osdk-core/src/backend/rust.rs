@@ -503,25 +503,54 @@ impl Backend for RustBackend {
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        // Always advertise the core launchers so they resolve even while the
-        // bin dirs are absent (before install, or in offline tests), then add
-        // every executable the selected toolchain and the isolated cargo home
-        // actually provide. This exposes rustdoc, rust-analyzer, cargo-miri and
-        // similar rustup proxies, plus any CLI installed later with
-        // `cargo install`, as routable shims after a reshim -- not just the five
-        // core commands.
-        const CORE_LAUNCHERS: &[&str] = &["rustc", "cargo", "rustup", "clippy-driver", "rustfmt"];
-        let mut names: std::collections::BTreeSet<String> = CORE_LAUNCHERS
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
-        names.extend(crate::backend::bin_names_in_dirs(&self.bin_paths(ctx, tv)?));
+        // Cargo-installed applications are global commands, not Rust tools.
+        // Only toolchain binaries and rustup proxies require a Rust selection.
+        let mut names: std::collections::BTreeSet<String> =
+            ["rustc", "cargo", "rustup", "clippy-driver", "rustfmt"]
+                .iter()
+                .map(|n| (*n).into())
+                .collect();
+        let paths = self.bin_paths(ctx, tv)?;
+        names.extend(crate::backend::bin_names_in_dirs(&paths[..1]));
+        let cargo_bin = ctx.dirs.cargo_home().join("bin");
+        names.extend(
+            crate::backend::bin_names_in_dirs(std::slice::from_ref(&cargo_bin))
+                .into_iter()
+                .filter(|name| is_rustup_proxy(&cargo_bin, name)),
+        );
         Ok(names.into_iter().collect())
     }
 
     fn idiomatic_files(&self) -> &[&str] {
         &["rust-toolchain.toml", "rust-toolchain"]
     }
+}
+
+const RUSTUP_PROXIES: &[&str] = &[
+    "rustc",
+    "rustdoc",
+    "cargo",
+    "rustup",
+    "rust-lldb",
+    "rust-gdb",
+    "rust-gdbgui",
+    "rls",
+    "cargo-clippy",
+    "clippy-driver",
+    "cargo-miri",
+    "rustfmt",
+    "cargo-fmt",
+    "rust-analyzer",
+];
+
+pub(crate) fn is_rustup_proxy(bin: &std::path::Path, name: &str) -> bool {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    RUSTUP_PROXIES.contains(&name)
+        || same_file::is_same_file(
+            bin.join(format!("{name}{suffix}")),
+            bin.join(format!("rustup{suffix}")),
+        )
+        .unwrap_or(false)
 }
 
 impl RustBackend {
@@ -741,9 +770,16 @@ mod tests {
             cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
             show_progress: false,
         };
+        std::fs::hard_link(
+            cargo_bin.join(format!("rustup{exe}")),
+            cargo_bin.join(format!("future-rustup-proxy{exe}")),
+        )
+        .unwrap();
         let names = RustBackend
             .bin_names(&ctx, &ToolVersion::new("rust", "1.98.0"))
             .unwrap();
+        assert!(!names.contains(&"cargo-tauri".to_string()));
+        assert!(names.contains(&"future-rustup-proxy".to_string()));
         for expected in [
             "rustc",
             "cargo",
@@ -751,7 +787,6 @@ mod tests {
             "clippy-driver",
             "rustfmt",
             "rustdoc",
-            "cargo-tauri",
         ] {
             assert!(
                 names.contains(&expected.to_string()),

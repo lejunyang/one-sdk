@@ -1,5 +1,7 @@
 # npm Developer Tools
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#tool-order-reference), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#per-tool-environment).
+
 osdk accepts command-line packages from an npm registry through the
 `npm:<package>` namespace. `osdk use` is context-aware: it can add a tool to a
 real Node project, install it as a user-wide global tool, or retain the original
@@ -191,8 +193,8 @@ failure.
 
 ## Direct `npm i -g` / `pnpm add -g` are managed too
 
-Even without `osdk use --global`, running the package manager's own global install
-command in an activated shell redirects it into a controlled directory (npm's
+Even without `osdk use --global`, running the managed package manager's own global install
+command through an osdk shim redirects it into a controlled directory (npm's
 `npm_config_prefix` points at `data/global/npm`, pnpm's `PNPM_HOME` at
 `data/global/pnpm`) and **reconciles automatically after the command exits**: newly
 installed commands get shims immediately and removed commands are cleaned up -- no
@@ -207,7 +209,7 @@ pnpm add -g cowsay
 The unified global-install coverage (including Yarn, Bun, Deno, and self-contained
 native tools such as Go/Cargo) is described under
 [JavaScript package managers → Automatic global-install management](./package-managers#automatic-global-install-management),
-along with the handling of leftover persistent variables.
+including storage persistence across Node switches, runtime selection outside projects, native-addon rebuilding, system managers and native output overrides.
 
 ## Package and version syntax
 

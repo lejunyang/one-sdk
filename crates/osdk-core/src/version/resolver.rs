@@ -1,18 +1,14 @@
-//! Active-version resolution for a working directory.
-//!
-//! Resolution order for a tool, walking up from the start dir:
-//! 1. project config (`osdk.toml`) `[tools]` entry
-//! 2. `.tool-versions` entry
-//! 3. idiomatic version files (`.nvmrc`, `.node-version`, ...) — per backend
-//! 4. structured project metadata (`package.json` for Node)
-//! 5. user global config `[tools]` entry
-//!
-//! This module is intentionally synchronous and dependency-light so the
-//! `osdk-shim` launcher can use it on the hot path without a tokio runtime.
+//! Active tool resolution shared by CLI, shim and dependency execution.
+//! Source-kind priority is configurable; each kind chooses its nearest entry.
+//! Explicit requests and lock replay bypass this project-selection policy.
 
+pub mod selection;
+
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use crate::config::{parse_tool_versions, PROJECT_CONFIG_NAMES};
 
 /// A resolved active version for a tool, plus where it came from.
@@ -100,6 +96,7 @@ pub fn package_manager_from_package_json(
     parse_package_manager_declaration_parts(manager, version, path.to_path_buf()).map(Some)
 }
 
+#[cfg(test)]
 pub fn resolve_package_manager(start_dir: &Path) -> Result<Option<PackageManagerRequest>, String> {
     for directory in start_dir.ancestors() {
         for name in PROJECT_CONFIG_NAMES {
@@ -123,6 +120,7 @@ pub fn resolve_package_manager(start_dir: &Path) -> Result<Option<PackageManager
     Ok(None)
 }
 
+#[cfg(test)]
 fn read_project_package_manager(path: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
@@ -150,6 +148,7 @@ fn parse_package_manager_declaration(
     parse_package_manager_declaration_parts(manager, version, source)
 }
 
+#[cfg(test)]
 fn configured_package_manager(
     manager: &str,
     version: &str,
@@ -171,6 +170,7 @@ fn configured_package_manager(
     })
 }
 
+#[cfg(test)]
 fn validate_supported_package_manager(
     request: PackageManagerRequest,
 ) -> Result<PackageManagerRequest, String> {
@@ -225,6 +225,7 @@ fn parse_package_manager_declaration_parts(
 /// Resolve the active spec for `tool`, walking up from `start_dir`. Global
 /// config pins are consulted last. `idiomatic` maps a tool to its idiomatic
 /// filenames.
+#[cfg(test)]
 pub fn resolve_active(
     tool: &str,
     start_dir: &Path,
@@ -323,12 +324,161 @@ pub fn resolve_active(
     })
 }
 
+/// Apply one shared policy to tool selection. Explicit CLI requests and lock
+/// replay bypass this resolver and retain their authority.
+pub fn resolve_active_config(
+    tool: &str,
+    start_dir: &Path,
+    config: &crate::config::Config,
+    idiomatic_files: &[&str],
+) -> crate::Result<Option<ActiveVersion>> {
+    Ok(resolve_selection(tool, start_dir, config, idiomatic_files)?.winner)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SelectionEvidence {
+    pub tool: String,
+    pub path: Option<PathBuf>,
+    pub field: String,
+    pub category: crate::config::ToolSource,
+    pub status: String,
+    pub reason: String,
+}
+#[derive(Debug, Clone)]
+pub struct ToolSelection {
+    pub winner: Option<ActiveVersion>,
+    pub evidence: Vec<SelectionEvidence>,
+}
+impl ToolSelection {
+    pub fn explain(&self) -> String {
+        serde_json::to_string(&self.evidence).expect("selection evidence serializes")
+    }
+}
+pub fn resolve_selection(
+    tool: &str,
+    cwd: &Path,
+    config: &crate::config::Config,
+    files: &[&str],
+) -> crate::Result<ToolSelection> {
+    let candidates = selection::candidates(tool, cwd, config, files)?;
+    let selected = candidates
+        .iter()
+        .position(|c| !c.shadowed_layer && !c.ignored);
+    let winner = selected.map(|i| candidates[i].active.clone());
+    let evidence = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| SelectionEvidence {
+            tool: tool.to_string(),
+            path: c.path.clone(),
+            field: c.field.clone(),
+            category: c.kind,
+            status: if c.ignored {
+                "ignored"
+            } else if Some(i) == selected {
+                "winner"
+            } else {
+                "shadowed"
+            }
+            .into(),
+            reason: if c.ignored {
+                "declaration belongs to another tool; value not interpreted"
+            } else if Some(i) == selected {
+                "highest-priority applicable declaration"
+            } else if c.shadowed_layer {
+                "nearer declaration or explicit osdk layer overrides this entry"
+            } else {
+                "lower source priority"
+            }
+            .into(),
+        })
+        .collect();
+    Ok(ToolSelection { winner, evidence })
+}
+
+/// Project manager auto-selection uses the same ordered candidates as version
+/// selection. Explicit deps provider/installer and native lock semantics remain
+/// with their callers, rather than being reinterpreted here.
+pub fn resolve_package_manager_config(
+    cwd: &Path,
+    config: &crate::config::Config,
+) -> crate::Result<Option<PackageManagerRequest>> {
+    let mut candidates = Vec::new();
+    for tool in ["npm", "pnpm", "yarn"] {
+        candidates.extend(
+            selection::manager_candidates(tool, cwd, config)?
+                .into_iter()
+                .filter(|c| {
+                    !c.shadowed_layer && !c.ignored && c.kind != crate::config::ToolSource::Global
+                }),
+        );
+    }
+    let order = config.settings.precedence.ordered_tool_sources();
+    candidates.sort_by_key(|c| {
+        (
+            order.iter().position(|k| *k == c.kind).unwrap(),
+            c.path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .and_then(|p| cwd.ancestors().position(|a| a == p))
+                .unwrap_or(usize::MAX),
+        )
+    });
+    // Native manager fields have one nearest identity across all manager names.
+    // A parent's pnpm declaration is not a competing identity for a child's yarn.
+    let mut native_kinds = Vec::new();
+    candidates.retain(|c| {
+        if matches!(
+            c.kind,
+            crate::config::ToolSource::PackageManager
+                | crate::config::ToolSource::DevPackageManager
+        ) {
+            if native_kinds.contains(&c.kind) {
+                return false;
+            }
+            native_kinds.push(c.kind);
+        }
+        true
+    });
+    if config.settings.precedence.tool_conflicts == crate::config::ToolConflictPolicy::Error {
+        let native: Vec<_> = candidates
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    crate::config::ToolSource::PackageManager
+                        | crate::config::ToolSource::DevPackageManager
+                )
+            })
+            .collect();
+        if native.iter().any(|c| {
+            native
+                .first()
+                .is_some_and(|first| first.active.tool != c.active.tool)
+        }) {
+            return Err(crate::Error::config(
+                "conflicting package manager identities in package.json declarations",
+            ));
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .next()
+        .map(|c| PackageManagerRequest {
+            manager: c.active.tool,
+            version: c.active.spec,
+            source: c.path.unwrap_or_else(|| cwd.to_path_buf()),
+        }))
+}
+
+#[cfg(test)]
 fn read_project_tool(path: &Path, tool: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
     read_tool_value(value.get("tools")?.get(tool)?)
 }
 
+#[cfg(test)]
 fn read_tool_value(value: &toml::Value) -> Option<String> {
     value.as_str().map(str::to_string).or_else(|| {
         value
@@ -403,6 +553,7 @@ fn read_idiomatic(path: &Path) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn read_node_package(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -714,4 +865,87 @@ mod tests {
         let av = resolve_active("go", td.path(), &global, &["go.mod"]).unwrap();
         assert_eq!(av.spec, "1.22");
     }
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    use super::*;
+    use crate::config::{Config, SourcePrecedence};
+    #[test]
+    fn precedence_preserves_origins_and_explicit_inheritance() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let child = root.join("app");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(
+            root.join("osdk.toml"),
+            "[tools]\nnode='22'\n[settings.precedence]\ntools='native'\n",
+        )
+        .unwrap();
+        std::fs::write(child.join("osdk.toml"), "extends='../osdk.toml'\n").unwrap();
+        std::fs::write(child.join(".nvmrc"), "20.11.1\n").unwrap();
+        let mut config = Config::load(&temp.path().join("absent"), &child).unwrap();
+        let native = resolve_active_config("node", &child, &config, &[".nvmrc"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.spec, "20.11.1");
+        assert!(matches!(native.source, VersionOrigin::IdiomaticFile(_)));
+        config.settings.precedence.tools = SourcePrecedence::Osdk;
+        let osdk = resolve_active_config("node", &child, &config, &[".nvmrc"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(osdk.spec, "22");
+        assert!(matches!(osdk.source, VersionOrigin::ProjectConfig(_)));
+    }
+    #[test]
+    fn node_runtime_and_package_manager_are_separate_native_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"engines":{"node":">=20 <23"},"packageManager":"pnpm@10.5.0"}"#,
+        )
+        .unwrap();
+        let config = Config::default();
+        let node = resolve_active_config("node", temp.path(), &config, &[])
+            .unwrap()
+            .unwrap();
+        assert!(node.is_range);
+        assert_eq!(node.spec, ">=20 <23");
+        let pnpm = resolve_active_config("pnpm", temp.path(), &config, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(pnpm.spec, "10.5.0");
+        assert!(!pnpm.is_range);
+    }
+    #[test]
+    fn invalid_native_declarations_are_errors_under_both_policies() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".nvmrc"), "two versions\n").unwrap();
+        let mut config = Config::default();
+        for policy in [SourcePrecedence::Native, SourcePrecedence::Osdk] {
+            config.settings.precedence.tools = policy;
+            assert!(resolve_active_config("node", temp.path(), &config, &[".nvmrc"]).is_err());
+        }
+        std::fs::remove_file(temp.path().join(".nvmrc")).unwrap();
+        std::fs::write(temp.path().join("package.json"), "{invalid").unwrap();
+        assert!(resolve_active_config("node", temp.path(), &config, &[]).is_err());
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"engines":{"node":22}}"#,
+        )
+        .unwrap();
+        assert!(resolve_active_config("node", temp.path(), &config, &[]).is_err());
+        std::fs::remove_file(temp.path().join("package.json")).unwrap();
+        std::fs::write(temp.path().join(".tool-versions"), "node # missing version").unwrap();
+        assert!(resolve_active_config("node", temp.path(), &config, &[]).is_err());
+    }
+}
+
+pub fn explain_selection(
+    tool: &str,
+    cwd: &Path,
+    config: &crate::config::Config,
+    files: &[&str],
+) -> crate::Result<String> {
+    Ok(resolve_selection(tool, cwd, config, files)?.explain())
 }

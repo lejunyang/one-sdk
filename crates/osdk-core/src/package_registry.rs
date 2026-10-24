@@ -149,6 +149,16 @@ pub fn registry_env(manager: PackageManager) -> &'static str {
     }
 }
 
+/// pnpm 10 consumes npm's key; pnpm 11 consumes its own. Set both to the
+/// same value only after the planner has ruled out explicit process overrides.
+pub fn registry_envs(manager: PackageManager) -> Vec<&'static str> {
+    let mut names = vec![registry_env(manager)];
+    if manager == PackageManager::Pnpm {
+        names.push("npm_config_registry");
+    }
+    names
+}
+
 /// Return whether this invocation may resolve or fetch npm packages. This is a
 /// deliberately explicit allow-list so routine commands never make probes.
 pub fn should_plan(manager: PackageManager, executable_alias: &str, args: &[String]) -> bool {
@@ -557,66 +567,54 @@ where
             reason: reason.into(),
         });
     }
+    if let Some(name) = explicit_registry_env(manager, getenv) {
+        return Ok(RegistryPlan::PassThrough {
+            reason: format!("native environment {name} has invocation priority"),
+        });
+    }
+    if ctx.config.sources.mode == SourceMode::Env {
+        return Err(Error::config(format!(
+            "{manager}: registry environment requested but not configured"
+        )));
+    }
+    let configured = &ctx.config.registries().npm;
+    if ctx.config.settings.precedence.package_policy("npm") == crate::config::SourcePrecedence::Osdk
+    {
+        if let Some(url) = configured.default.as_ref().filter(|url| !url.is_empty()) {
+            return Ok(RegistryPlan::Selected {
+                url: url.clone(),
+                probes: vec![],
+            });
+        }
+    }
+    let native = match native_registry_candidates(ctx, cwd, manager, getenv)? {
+        NativeDecision::PassThrough(reason) => return Ok(RegistryPlan::PassThrough { reason }),
+        NativeDecision::Candidates(native) => native,
+    };
+    if !native.is_empty() {
+        return Ok(RegistryPlan::PassThrough {
+            reason: "native registry declaration has priority over mirror fallback".into(),
+        });
+    }
+    if let Some(url) = &configured.default {
+        return Ok(if url.is_empty() {
+            RegistryPlan::PassThrough {
+                reason: "osdk registry override cleared".into(),
+            }
+        } else {
+            RegistryPlan::Selected {
+                url: url.clone(),
+                probes: vec![],
+            }
+        });
+    }
     if ctx.config.settings.offline {
         return Ok(RegistryPlan::PassThrough {
             reason: "osdk is offline".into(),
         });
     }
-    // An ambient registry variable used to end planning outright. It is now one
-    // more candidate to rank, because an unreachable or wrong mirror in the
-    // environment should lose to a working one rather than win by default. Under
-    // `--source-mode env` the old behaviour is what the user explicitly asked
-    // for, so the variable is still obeyed as-is.
-    let ambient = explicit_registry_env(manager, getenv);
-    if ctx.config.sources.mode == SourceMode::Env {
-        return match ambient {
-            Some(name) => Ok(RegistryPlan::PassThrough {
-                reason: format!("registry is explicitly configured by environment variable {name}"),
-            }),
-            None => Err(Error::config(crate::i18n::trf(
-                "err.env_source_missing",
-                &[("tool", &manager.to_string())],
-            ))),
-        };
-    }
-    let ambient = ambient.and_then(|name| {
-        let value = getenv(name)?;
-        match normalize_registry_url(&value) {
-            Ok(url) => Some(url),
-            Err(error) => {
-                // Dropping this silently is what made a stale variable so hard to
-                // notice, so say so and continue with the built-in candidates.
-                tracing::warn!(
-                    "{}",
-                    crate::i18n::trf(
-                        "warn.env_source_invalid",
-                        &[
-                            ("variable", name),
-                            ("tool", &manager.to_string()),
-                            ("reason", &error.to_string()),
-                        ],
-                    )
-                );
-                None
-            }
-        }
-    });
-
-    let native = match native_registry_candidates(ctx, cwd, manager, getenv)? {
-        NativeDecision::PassThrough(reason) => return Ok(RegistryPlan::PassThrough { reason }),
-        NativeDecision::Candidates(native) => native,
-    };
-    let preserve_order = !native.is_empty() || !ctx.config.registries().npm.urls.is_empty();
-    let mut candidates = effective_candidates(ctx, native)?;
-    if let Some(ambient) = ambient {
-        // Prepended so `preserve_order` (a deliberate native or configured
-        // registry) still decides first; when nothing was deliberate, the probe
-        // ranks it against the defaults on measured latency.
-        if !candidates.contains(&ambient) {
-            candidates.insert(0, ambient);
-        }
-    }
-    let candidates = candidates;
+    let preserve_order = !configured.urls.is_empty();
+    let candidates = effective_candidates(ctx, native)?;
     let probes = probe_all(&candidates, ctx.config.registries().npm.probe_timeout_ms).await;
     let selected = select_probe(&probes, preserve_order);
     if let Some(selected) = selected {
@@ -754,6 +752,20 @@ where
             }
         }
     }
+    let extra_names: &[&str] = match manager {
+        PackageManager::Pnpm => &[".npmrc", "pnpm-workspace.yaml"],
+        PackageManager::YarnClassic => &[".npmrc", ".yarnrc"],
+        PackageManager::YarnBerry => &[".yarnrc.yml"],
+        PackageManager::Bun => &[".npmrc", "bunfig.toml"],
+        _ => &[".npmrc"],
+    };
+    for directory in cwd.ancestors() {
+        for name in extra_names {
+            if let Err(path) = push_if_present(directory.join(name), &mut files) {
+                return Ok(unreadable_native_config(path));
+            }
+        }
+    }
     let reads_npm_config = matches!(
         manager,
         PackageManager::Npm
@@ -870,6 +882,17 @@ where
                 )));
             }
         };
+        if file
+            .file_name()
+            .is_some_and(|name| name == "pnpm-workspace.yaml")
+        {
+            let _: serde_yaml::Value = serde_yaml::from_str(&text)
+                .map_err(|_| Error::config("invalid pnpm-workspace.yaml"))?;
+            return Ok(NativeDecision::PassThrough(format!(
+                "native pnpm workspace configuration in {}; effective registry resolved by pnpm",
+                file.display()
+            )));
+        }
         let analysis = match analyze_native_file(&file, &text) {
             Ok(analysis) => analysis,
             Err(_) => {
@@ -953,7 +976,7 @@ where
     Ok(NativeDecision::Candidates(Vec::new()))
 }
 
-fn managed_npm_config_files(ctx: &Ctx) -> Vec<PathBuf> {
+pub fn managed_npm_config_files(ctx: &Ctx) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let Ok(entries) = std::fs::read_dir(ctx.dirs.installs.join("node")) else {
         return files;
@@ -2532,11 +2555,8 @@ npmRegistries:
     }
 
     #[tokio::test]
-    /// The default mode no longer lets an ambient registry win unchallenged: a
-    /// deliberately configured registry (`npm.urls`, here an unused loopback
-    /// port) still sets `preserve_order`, so the ambient value cannot outrank it
-    /// merely by existing. This is the npm-side equivalent of "pin beats env".
-    async fn an_ambient_registry_does_not_outrank_a_configured_one() {
+    /// Explicit process configuration remains authoritative over mirror probes.
+    async fn an_ambient_registry_is_preserved_for_native_execution() {
         let temp = tempfile::tempdir().unwrap();
         let (url, _guard) = unused_loopback();
         let ctx = test_ctx(temp.path(), vec![url], false);
@@ -2547,18 +2567,16 @@ npmRegistries:
         })
         .await
         .unwrap();
-        // Neither endpoint answers in the test environment, so the interesting
-        // assertion is that planning actually ran instead of short-circuiting.
+        // No request is needed to honor the native process environment.
         assert!(
-            !matches!(plan, RegistryPlan::PassThrough { .. }),
-            "an ambient registry must be planned, not passed through: {plan:?}"
+            matches!(plan, RegistryPlan::PassThrough { .. }),
+            "an ambient registry must be preserved: {plan:?}"
         );
     }
 
     #[tokio::test]
-    /// A malformed ambient value must not be handed to the package manager, and
-    /// must not silently disappear either; planning continues with the built-ins.
-    async fn a_malformed_ambient_registry_is_dropped_rather_than_obeyed() {
+    /// Native validation owns ambient values, including malformed ones.
+    async fn a_malformed_ambient_registry_is_left_to_native_validation() {
         let temp = tempfile::tempdir().unwrap();
         let (url, _guard) = unused_loopback();
         let ctx = test_ctx(temp.path(), vec![url], false);
@@ -2570,8 +2588,8 @@ npmRegistries:
         .await
         .unwrap();
         assert!(
-            !matches!(plan, RegistryPlan::PassThrough { .. }),
-            "a malformed ambient registry must not become a pass-through: {plan:?}"
+            matches!(plan, RegistryPlan::PassThrough { .. }),
+            "native validation must receive the ambient registry: {plan:?}"
         );
     }
 

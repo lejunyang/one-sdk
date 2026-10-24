@@ -801,12 +801,12 @@ pub(crate) fn project_node_request(
     project_root: &std::path::Path,
 ) -> Result<ToolRequest> {
     let backend = app.registry.get("node")?;
-    let spec = osdk_core::version::resolver::resolve_active(
+    let spec = osdk_core::version::resolver::resolve_active_config(
         "node",
         project_root,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .map(|active| {
         if active.is_range {
             VersionSpec::parse_range(&active.spec)
@@ -888,12 +888,12 @@ pub(crate) fn project_manager_request(
     project_root: &std::path::Path,
 ) -> Result<ToolRequest> {
     let backend = app.registry.get(manager)?;
-    let spec = osdk_core::version::resolver::resolve_active(
+    let spec = osdk_core::version::resolver::resolve_active_config(
         manager,
         project_root,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .map(|active| {
         if active.is_range {
             VersionSpec::parse_range(&active.spec)

@@ -237,7 +237,21 @@ pub enum Command {
     },
 
     /// Show the active version of each tool for the current directory.
-    Current { tool: Option<String> },
+    Current {
+        tool: Option<String>,
+        /// Inspect applicable sources, effective ordering and discovery evidence.
+        #[arg(long, requires = "tool")]
+        sources: bool,
+        /// Emit one diagnostic JSON object (requires --sources).
+        #[arg(long, requires = "sources")]
+        json: bool,
+        /// Inspect this project directory (requires --sources).
+        #[arg(long, requires = "sources")]
+        project: Option<std::path::PathBuf>,
+        /// Run bounded native version probes; never install missing runtimes.
+        #[arg(long, requires = "sources")]
+        probe: bool,
+    },
 
     /// Print the install directory of a tool version.
     Where {

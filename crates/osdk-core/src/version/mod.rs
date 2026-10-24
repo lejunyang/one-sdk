@@ -66,6 +66,16 @@ impl VersionSpec {
                 return VersionSpec::Pinned(rest.to_string());
             }
         }
+        // Preserve explicit range semantics through config/deps string transport.
+        // Bare numbers remain component prefixes; aliases/channels stay opaque.
+        if (s.starts_with(['^', '~', '>', '<', '*'])
+            || s.split('.').any(|part| matches!(part, "x" | "X" | "*"))
+            || s.contains("||")
+            || s.contains(char::is_whitespace))
+            && npm_range_requirements(s).is_ok()
+        {
+            return VersionSpec::Range(s.to_string());
+        }
         // A fully-specified semver (x.y.z, possibly with pre/build) is exact;
         // anything shorter is treated as a prefix.
         let core = s.strip_prefix('v').unwrap_or(s);
@@ -813,5 +823,24 @@ mod tests {
                 .version,
             "18.20.0"
         );
+    }
+}
+
+#[cfg(test)]
+mod precedence_range_transport_tests {
+    use super::*;
+    #[test]
+    fn explicit_ranges_survive_tool_and_deps_string_transport() {
+        for text in [
+            ">=20 <23", "^22.0.0", "20 || 22", "~22.1.0", "22.x", "22.*", "22.1.X",
+        ] {
+            assert!(matches!(VersionSpec::parse(text), VersionSpec::Range(_)));
+            assert_eq!(
+                VersionSpec::parse(text),
+                VersionSpec::parse_range(text).unwrap()
+            );
+        }
+        assert_eq!(VersionSpec::parse("22"), VersionSpec::Prefix("22".into()));
+        assert_eq!(VersionSpec::parse("lts/*"), VersionSpec::Lts(None));
     }
 }

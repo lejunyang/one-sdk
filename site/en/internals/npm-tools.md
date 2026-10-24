@@ -382,3 +382,11 @@ validation, legacy `.osdk-tool.json` detection without execution, and
 lock-schema-1 npm-migration rejection boundaries. Cross-platform changes remain
 subject to the repository's Linux workspace tests and full Windows GNU Wine
 suite.
+
+## Native global-command routing
+
+Direct native global installs are separate from dynamic npm receipts. The shim scans known shared bin directories; npm/pnpm/Yarn applications use the shared Managed/System Node resolver, without resolving or requiring the package-manager installation. Missing selection or a broken selected host fails before executing the launcher; installed-version inventory is never a default. System hosts restore injected locator variables using a complete child environment. Selected host bins precede global bins. Recognized native executable headers skip runtime selection, and direct env shebangs can select Bun/Deno. Native wrappers and absolute interpreters are preserved, not parsed into a replacement install plan.
+
+Yarn Classic discovery scans `node_modules/.bin`. Go/Cargo output directories also participate in global discovery; their application shims do not resolve compiler versions. Rust SDK binaries and reserved/identity-verified rustup proxies stay in toolchain ownership. `reshim` discovers these native applications without creating managed receipts or portable locks. Native package removal remains the native manager's responsibility.
+
+Exec resolves a known native global entry directly when its execution plan supplies the required host; this prevents shim re-entry from replacing an explicit CLI version with the project selection. Native global entries remain outside receipt and lock authority.
