@@ -41,13 +41,13 @@ osdk project remove ~/tmp/old-checkout
 
 ## 外置配置存放位置
 
-每个绑定在配置目录下占一个子目录。`add` 成功时（非 dry-run）立即生成最小合法的三件套：
+每个绑定在配置目录下占一个子目录。`add` 成功时（非 dry-run）立即生成三件套：
 
 ```text
 <OSDK_CONFIG_DIR>/projects/<root-id>/
   project.toml    # 锚点文件；root 记录真实项目根的绝对路径
   osdk.toml       # 外置项目的工具与任务声明（初始为占位注释，直接编辑即可）
-  osdk.lock       # 外置项目的锁文件（初始为最小合法内容 schema = 3）
+  osdk.lock       # 外置项目的锁文件；初始内容即当前普通锁的 schema（与普通 writer 同一 schema_version 权威值）
 ```
 
 - `root-id` 由真实项目根路径经 OS canonicalize 解析后的完整 BLAKE3 决定：

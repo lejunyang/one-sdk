@@ -6,7 +6,7 @@
 
 | 子命令 | 参数 | 语义 |
 | --- | --- | --- |
-| `add [PATH]` | `--dry-run`、`--json` | 绑定给定目录（默认 cwd）；经 OS canonicalize 计入真实路径；不猜 Git 根、不安装、不改目录；成功即原子生成最小合法三件套 `project.toml`/`osdk.toml`/`osdk.lock`（内容 `schema = 3`）；重复 add 不覆盖；目录已有本地配置时允许绑定但运行时本地胜出（stderr shadowed 警告） |
+| `add [PATH]` | `--dry-run`、`--json` | 绑定给定目录（默认 cwd）；经 OS canonicalize 计入真实路径；不猜 Git 根、不安装、不改目录；成功即原子生成三件套 `project.toml`/`osdk.toml`/`osdk.lock`，锁初始内容即当前普通锁的 schema（与普通 writer 同一 `schema_version` 权威值，不硬编码版本）；重复 add 不覆盖；目录已有本地配置时允许绑定但运行时本地胜出（stderr shadowed 警告） |
 | `show [PATH]` | `--json`（仅） | 文本打印 `selected: local / external binding / none`、生效 `config:`/`lock:`、绑定目录与 WARNING 状态行；`--json` 输出 `root`、`source`、`config_path`、`lock_path`、`binding_dir`、`shadowed_local_config`、`missing` |
 | `list` | `--json`（数组） | 无位置参。纯文本每块打印根目录、`source: external binding`、`status: active`（或 `project root missing`; `config missing`; `shadowed by local osdk.toml`）、`config:`/`lock:` 路径；`--json` 另给 `root`、`binding_dir`、`root_exists`、`config_exists`、`shadowed_by_local` |
 | `relocate OLD NEW` | `--dry-run`、`--json` | OLD 与 NEW 必填；外置 `osdk.toml` 与 `osdk.lock` 保留；旧根 missing 不自动删 |
@@ -28,8 +28,9 @@ osdk project remove ~/tmp/checkout
 
 - 从 cwd 逐祖先向上：最近项目胜出；同一项目根本地 `osdk.toml` /
   `.osdk.toml` 优先于外置配置；近的外置子项目可胜远的本地父项目。
-- 配置与锁成套选择：绑定出生即带最小合法锁；日后锁缺失按当前来源在同目录
-  重建，绝不跨来源借锁；选中配置损坏直接报错，不回退；shadowed 的外置正文不读。
+- 配置与锁成套选择：绑定出生即带锁（初始为当前普通锁 schema，同一
+  `schema_version` 权威值）；日后锁缺失按当前来源在同目录重建，绝不跨来源
+  借锁；选中配置损坏直接报错，不回退；shadowed 的外置正文不读。
 - `current` / `where` / `exec` / shim / shell hook / `use` / `config` /
   `source` 共用这套解析；`--global` 仍是用户全局默认，与绑定无关。
 

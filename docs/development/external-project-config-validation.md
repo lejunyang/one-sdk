@@ -14,13 +14,16 @@ result, and its log.
 - Discovery priority: the nearest ancestor wins. A same-root local `osdk.toml`
   shadows the external bundle; a nearer external child beats a far local parent.
 - Binding integrity: `project.toml` manifest (schema 1) plus `osdk.toml` and
-  `osdk.lock` are created by `add`. The bundle lock is initialised with the
-  legacy empty-lock body `schema = 3` (`project_cmd.rs:128`), while the
-  production lock writer currently emits `schema = 4`
-  (`lockfile/read.rs:9`, serialised at `lockfile/write.rs:1048`). The bundle
-  lock reuses the ordinary parser and schema machinery — it is not an
-  external-only schema — but its initialiser is pinned to the older version and
-  will be normalised/migrated on the next ordinary write.
+  `osdk.lock` are created by `add`. The bundle lock reuses the ordinary parser
+  and schema machinery — it is not an external-only schema. Historical
+  deviation (found during review): the initialiser was pinned to the legacy
+  empty-lock body `schema = 3` (`project_cmd.rs:128`), while the ordinary
+  writer emits `schema = 4` (`lockfile/read.rs:9`, serialised at
+  `lockfile/write.rs:1048`). Fixed in `3488fb1` (`empty_lock_contents` /
+  shared `schema_version`); test hardening in `aa91294` removed the public
+  literal-4 tests and derives the expected schema from `schema_version`, with
+  bindings observable. The bundle lock's initial body is now the current
+  ordinary lock schema from the same authority as the normal writer.
 - Trust gate: untrusted bundle refuses gated installs; rewriting a governed key
   invalidates the record; relocate moves the bundle and the new path is reviewed
   again from scratch.
@@ -66,6 +69,19 @@ result, and its log.
 - `cargo fmt --check` at `5495518`: exit 0. No raw log saved; observation-only.
 - `cargo clippy --workspace --all-targets -- -D warnings` at `5495518`: exit 0.
   No raw log saved; observation-only.
+
+## Schema-version fix checks (run by the implementer at `aa91294`; worktree clean before this docs change)
+
+- `cargo test -p osdk-cli --bin osdk empty_lock`: 1 passed, 0 failed. No raw log
+  saved; observation-only.
+- `cargo test -p osdk-cli --test project_bindings`: 9 passed, 0 failed. No raw
+  log saved; observation-only.
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0. No raw log
+  saved; observation-only.
+- `cargo fmt --all -- --check`: exit 0. No raw log saved; observation-only.
+- The full Linux (`5495518`) and Wine (`2fb869d`) suites above have **not** been
+  re-run on top of `3488fb1`/`aa91294`; the documented diff gap stands and is
+  not extended to these commits.
 
 ## Metrics
 

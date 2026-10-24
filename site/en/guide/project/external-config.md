@@ -49,13 +49,13 @@ osdk project remove ~/tmp/old-checkout
 ## Where external configuration lives
 
 Every binding occupies one subdirectory under the config directory. A successful
-`add` (not `--dry-run`) immediately generates the minimal legal bundle:
+`add` (not `--dry-run`) atomically writes the bundle:
 
 ```text
 <OSDK_CONFIG_DIR>/projects/<root-id>/
   project.toml    # anchor file; root records the project root's real absolute path
   osdk.toml       # external project tool/task declarations (placeholder comment to start; edit it)
-  osdk.lock       # the external project's lockfile (starts at minimal legal content schema = 3)
+  osdk.lock       # the external project's lockfile; its initial body is the current ordinary lock schema, from the same schema_version authority as the normal writer
 ```
 
 - `root-id` is the full BLAKE3 of the real project-root path after OS

@@ -25,7 +25,7 @@ While walking up from cwd, candidates include both a local `osdk.toml` and bound
 
 Once a source is chosen, **`osdk.toml` and `osdk.lock` are always used as a set**:
 
-- A binding is born with a minimal legal lock: `add` atomically writes `osdk.lock` (content `schema = 3`). If a lock later goes missing (e.g. deleted by hand), it is rebuilt from the currently selected source inside that same directory — never borrowed from another source. Mixing the two would produce an environment whose "configuration came from A, resolution came from B" — harder to debug than a missing lock.
+- A binding is born with a lock: `add` atomically writes `osdk.lock`; its initial body is the current ordinary lock schema — the same `schema_version` authority as the normal writer, with no hard-coded version. If a lock later goes missing (e.g. deleted by hand), it is rebuilt from the currently selected source inside that same directory — never borrowed from another source. Mixing the two would produce an environment whose "configuration came from A, resolution came from B" — harder to debug than a missing lock.
 - A corrupted selected configuration or lock fails explicitly instead of falling back to another source; a silent fallback would make the user believe the external configuration was in effect.
 - The body of a shadowed external configuration is never read. The most dangerous silent fork is "the local file exists but is incomplete, so osdk quietly backfills the external body"; the rule is shadowed = not read at all, with a stderr warning naming the adopted and ignored sources.
 - `current`, `where`, `exec`, shims, the shell hook, and `use`/`config`/`source` share the same source resolution, so activation and lock writing cannot pick different sources.
