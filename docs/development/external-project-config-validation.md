@@ -14,9 +14,13 @@ result, and its log.
 - Discovery priority: the nearest ancestor wins. A same-root local `osdk.toml`
   shadows the external bundle; a nearer external child beats a far local parent.
 - Binding integrity: `project.toml` manifest (schema 1) plus `osdk.toml` and
-  `osdk.lock` are created by `add`. The lock writes `schema = 3`
-  (`crates/osdk-cli/src/lockfile/mod.rs:2147`), the same value the ordinary
-  lockfile uses — not an external-only schema.
+  `osdk.lock` are created by `add`. The bundle lock is initialised with the
+  legacy empty-lock body `schema = 3` (`project_cmd.rs:128`), while the
+  production lock writer currently emits `schema = 4`
+  (`lockfile/read.rs:9`, serialised at `lockfile/write.rs:1048`). The bundle
+  lock reuses the ordinary parser and schema machinery — it is not an
+  external-only schema — but its initialiser is pinned to the older version and
+  will be normalised/migrated on the next ordinary write.
 - Trust gate: untrusted bundle refuses gated installs; rewriting a governed key
   invalidates the record; relocate moves the bundle and the new path is reviewed
   again from scratch.
