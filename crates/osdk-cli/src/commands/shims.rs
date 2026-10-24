@@ -5,6 +5,31 @@ use super::*;
 pub fn reshim(app: &App) -> Result<()> {
     let mut total = 0;
     for backend in all_display_backends(app)? {
+        if osdk_core::execution::enabled(&app.ctx) {
+            if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+                osdk_core::execution::resolve_without_probes(
+                    &app.ctx,
+                    backend.as_ref(),
+                    &std::env::current_dir()?,
+                )?
+                .target
+            {
+                if let Some(shim) = osdk_core::shim::find_shim_binary(&app.ctx.dirs) {
+                    for name in target.published_names(&app.ctx) {
+                        if osdk_core::shim::shim_is_enabled_for(
+                            &app.ctx.config.settings.shims,
+                            backend.id(),
+                            &name,
+                            true,
+                        ) {
+                            osdk_core::shim::generate_shim(&app.ctx.dirs, &name, &shim)?;
+                            total += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
         let dynamic_request = osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
         let installed = match backend.list_installed(&app.ctx) {
             Ok(installed) => installed,
@@ -450,6 +475,25 @@ pub(crate) fn installed_shim_owners(
     for backend in all_display_backends(app)? {
         if backend.id().contains(':') {
             continue;
+        }
+        if osdk_core::execution::enabled(&app.ctx) {
+            if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+                osdk_core::execution::resolve_without_probes(&app.ctx, backend.as_ref(), &cwd)
+                    .ok()
+                    .and_then(|s| s.target)
+            {
+                for name in target.published_names(&app.ctx) {
+                    if osdk_core::shim::shim_is_enabled_for(
+                        &app.ctx.config.settings.shims,
+                        backend.id(),
+                        &name,
+                        true,
+                    ) {
+                        owners.entry(name).or_default().insert(backend.id().into());
+                    }
+                }
+                continue;
+            }
         }
         let mut selected_versions = std::collections::BTreeSet::new();
         let installed = backend.list_installed(&app.ctx)?;

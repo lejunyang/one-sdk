@@ -316,11 +316,11 @@ python = "native"
 ```
 
 `tool_order` is one shared source-kind order for all tools, highest first; it is not a per-tool map. Only kinds applicable to the requested tool participate. For each filename, the nearest declaration is considered; `idiomatic` also preserves the fixed backend filename order below.
-Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
+Accepted kinds: `system` (opt-in), `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
 `package.json#packageManager`, `package.json#devEngines.packageManager`,
-`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
-_default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
-order. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
+`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted declaration kinds are appended in
+_default_ order, not disabled. `system` is the exception: it is enabled only when explicitly listed. Unknown or duplicate entries fail. `[]` clears an inherited custom
+order and disables inherited `system`. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
 The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
 packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
 `tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
@@ -348,3 +348,8 @@ A possible uv workspace delegates the group intact, including membership/exclusi
 index injection; uv may still validate member metadata. Candidate files are not per-field winners. Requirements/constraint inputs with native options or unreadable context, positional `uv pip sync`/`compile` inputs, and explicit config/directory (`-C` included)/offline/dotenv invocation options, including options before subcommands, are delegated to uv;
 false-like UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX values do not disable injection merely by existing.
 Native files are not rewritten and failed execution is never retried with a different installer.
+
+
+### Opt-in external execution
+
+`tool_order` also accepts `system`, only when explicitly listed. Defaults and `[]` keep it disabled. The [system-tool reference](../config/files#system-tools) defines supported adapters, home-before-PATH search, Windows `.exe` limits, probing and examples. External tools are absolute execution targets rather than managed versions or installations. Explicit CLI versions, managed lock replay and frozen deps retain authority. Non-frozen deps can use unpinned external tools, revalidates each run under this policy and does not write portable receipts for external paths. Dynamic package-tool runtime receipts remain managed; mixing them with system execution is rejected.

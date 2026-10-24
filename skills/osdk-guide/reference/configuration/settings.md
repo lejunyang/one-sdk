@@ -69,7 +69,7 @@ expose = ["make"]
 
 ## 可配置的声明优先级
 
-完整 10 值及各工具适用矩阵见 [tool_order 集中参考](https://lejunyang.github.io/one-sdk/guide/config/files#tool-order-reference)。Node 的 `.nvmrc` / `.node-version` 各有独立类型，不属于 `idiomatic`；Python/Go/Rust/Java/Bun/Deno/Zig/Maven/Gradle/Kotlin 的 backend 文件归入 `idiomatic`，其他内置/动态 backend 无此类文件。声明式插件可用 `idiomatic_files` 声明，但不会增加枚举值。
+完整 11 值及各工具适用矩阵见 [tool_order 集中参考](https://lejunyang.github.io/one-sdk/guide/config/files#tool-order-reference)。Node 的 `.nvmrc` / `.node-version` 各有独立类型，不属于 `idiomatic`；Python/Go/Rust/Java/Bun/Deno/Zig/Maven/Gradle/Kotlin 的 backend 文件归入 `idiomatic`，其他内置/动态 backend 无此类文件。声明式插件可用 `idiomatic_files` 声明，但不会增加枚举值。
 
 ```toml
 [settings.precedence]
@@ -81,11 +81,11 @@ npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆�
 python = "native"
 ```
 
-`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `osdk`、`global`、
+`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `system`（需主动启用）、`osdk`、`global`、
 `.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
 `package.json#packageManager`、`package.json#devEngines.packageManager`、
-`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏项按默认顺序补齐，
-不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
+`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏的声明来源按默认顺序补齐；`system` 是例外，仅在数组中明确列出时启用。
+未知值和重复值报错；`[]` 清除继承的自定义顺序并禁用继承的 `system`。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
 .tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
 devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
 把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
@@ -109,3 +109,8 @@ devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数�
 实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
 不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
 的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。
+
+
+### system 执行来源
+
+`tool_order=["system","osdk"]` 主动选择机器上已有工具，默认及 `[]` 不启用 system；与其他遗漏声明类型不同，system 不会自动追加。支持 Node/Python/Go/Java/npm/pnpm/Yarn/Bun/Deno/Zig。仅 `VIRTUAL_ENV`、`GOROOT`、`JAVA_HOME` 是 home 选择器，优先 PATH；`PNPM_HOME` 和缓存变量不是。Windows 仅 `.exe`，不支持 `.cmd`/`.bat` 包装器。prefer 的 current/发现不探测，执行前有界验证；error 检查外部版本与声明兼容，不可证明的别名报错。显式 CLI 版本、托管锁/frozen 保持权威，外部路径不写托管 receipt/锁、不由 uninstall/cache 删除。非 frozen deps 只允许未固定工具使用 system，并重新验证、不记录外部工具新鲜度。无 OSDK_NODE_VERSION 等新版本环境变量；override_env 不是开关。完整边界与例子见[系统工具](https://lejunyang.github.io/one-sdk/guide/config/files#system-tools)。

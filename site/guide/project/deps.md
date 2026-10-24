@@ -467,3 +467,8 @@ proxy = "https://proxy.golang.org,direct"
 未知字段正常报错，不能静默接受 Cargo/Deno 的虚构通用源字段。
 
 工具来源排序、冲突处理、分生态覆盖及 uv 配置边界见[包管理器优先级](../tools/package-managers#可配置的声明优先级)。explain 复用工具选择证据；freshness 输入文件不等于原生有效配置发现链。
+
+
+### 主动启用外部工具执行
+
+`tool_order` 还接受 `system`，但必须明确列出；默认值和 `[]` 都禁用它。[系统工具参考](../config/files#system-tools) 列出适配器、home 优先于 PATH、Windows 仅 `.exe` 的限制、探测及示例。外部工具是绝对执行目标，不伪装成托管版本或安装。显式 CLI 版本、托管锁重放及 frozen deps 保持权威；非 frozen deps 可使用未固定的外部工具，该策略下每次重新验证，不为外部路径写可移植 receipt。动态包工具的运行时 receipt 仍保持托管，不允许与 system 执行混用。

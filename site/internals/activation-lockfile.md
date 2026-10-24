@@ -85,6 +85,9 @@ task 专用实现。
 ## 需要记住的边界
 
 - “global” 指 osdk 控制的用户级选择；全局 npm 与 Go 工具 `use` 会写用户 `osdk.lock`，但不会改写当前项目 lock。npm 使用独立 global install scope；Go 工具在项目与全局选择间共用同一类身份指纹化原生安装根。
-- activation 只选择已经安装的版本；找不到匹配版本时跳过该 backend，不会自动安装。
+- 托管 activation 只选择已经安装的版本；找不到匹配版本时跳过该 backend，不会自动安装。
 - lockfile 记录保存的解析结果与 backend 专属复现身份；项目 `use` 会串行并事务化自己的配置/lock 发布，但其他项目 writer 之间尚无统一锁。全局 npm `use` 的用户 lock 写入位于专用状态锁内。Rust 浮动 channel 不是不可变版本。重装会应用当前可用或策略要求的验证；已完成安装不会重做 checksum 校验。
 - trust store 自身也采用临时文件加 rename，但没有 read-modify-write 锁、durability 或跨平台替换原子性保证；并发 trust/untrust 同样可能丢失更新。
+
+
+主动启用 `system` 时，activation/shim 使用共享的外部执行目标，外部路径不进入托管 receipt 或锁条目。prefer 下 current/命令所有权发现不探测。托管激活仍只选择已安装版本且不安装；显式托管版本及锁重放不会悄悄换成主机程序。参见[系统工具](../guide/config/files#system-tools)。

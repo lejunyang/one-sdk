@@ -18,3 +18,6 @@ osdk-shim 会在该工具进程退出后自动对账其全局 bin 目录：为�
 `osdk reshim`。reshim 仍可作为手动兜底，例如恢复了安装目录、批量重建入口，或更改
 `[settings.shims]` 暴露策略后。Go/Cargo 这类自包含原生工具不生成 shim：其输出目录
 （`GOBIN` / `CARGO_HOME/bin`）直接放在 PATH。
+
+
+显式配置 `tool_order=["system"]` 可使用受支持的已有 PATH/home 工具；默认不启用。显式版本及托管锁/frozen 仍保持权威。参见[system 配置、适配器和限制](../configuration/settings.md#system-执行来源)。

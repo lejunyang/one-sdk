@@ -52,11 +52,11 @@ python = "native"
 ```
 
 `tool_order` is one shared source-kind order for all tools, highest first; it is not a per-tool map. Only kinds applicable to the requested tool participate. For each filename, the nearest declaration is considered; `idiomatic` also preserves the fixed backend filename order below.
-Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
+Accepted kinds: `system` (opt-in), `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
 `package.json#packageManager`, `package.json#devEngines.packageManager`,
-`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
-_default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
-order. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
+`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted declaration kinds are appended in
+_default_ order, not disabled. `system` is the exception: it is enabled only when explicitly listed. Unknown or duplicate entries fail. `[]` clears an inherited custom
+order and disables inherited `system`. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
 The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
 packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
 `tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
@@ -112,3 +112,8 @@ The lock records a resolution and artifact identity, not a claim that existing b
 - Package-manager auto-selection, Node injection, and lock restoration are covered by [`isolated_cli.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs) and [`lockfile.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs).
 
 The shared execution adapter is `package_sources.rs`; version policy is in `version/resolver.rs`. Native file discovery is candidate evidence, not a claim about the native effective winner. See [package managers](../guide/tools/package-managers.md).
+
+
+### Opt-in external execution
+
+`tool_order` also accepts `system`, only when explicitly listed. Defaults and `[]` keep it disabled. The [system-tool reference](../guide/config/files#system-tools) defines supported adapters, home-before-PATH search, Windows `.exe` limits, probing and examples. External tools are absolute execution targets rather than managed versions or installations. Explicit CLI versions, managed lock replay and frozen deps retain authority. Non-frozen deps can use unpinned external tools, revalidates each run under this policy and does not write portable receipts for external paths. Dynamic package-tool runtime receipts remain managed; mixing them with system execution is rejected.

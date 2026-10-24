@@ -348,11 +348,11 @@ python = "native"
 ```
 
 `tool_order` is one shared source-kind order for all tools, highest first; it is not a per-tool map. Only kinds applicable to the requested tool participate. For each filename, the nearest declaration is considered; `idiomatic` also preserves the fixed backend filename order below.
-Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
+Accepted kinds: `system` (opt-in), `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
 `package.json#packageManager`, `package.json#devEngines.packageManager`,
-`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
-_default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
-order. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
+`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted declaration kinds are appended in
+_default_ order, not disabled. `system` is the exception: it is enabled only when explicitly listed. Unknown or duplicate entries fail. `[]` clears an inherited custom
+order and disables inherited `system`. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
 The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
 packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
 `tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
@@ -383,10 +383,11 @@ Native files are not rewritten and failed execution is never retried with a diff
 
 ### tool_order values and tool applicability {#tool-order-reference}
 
-`tool_order` is an array of the following **10 exact strings**. It orders declaration sources, not tool names, executable names, download mirrors, or registries. The same array applies to every tool; a valid kind with no candidate for a tool simply has no effect on that tool. There is no `[settings.precedence.node]` or per-tool `tool_order`.
+`tool_order` is an array of the following **11 exact strings**. It orders declaration sources and the opt-in external execution source, not tool names, executable names, download mirrors, or registries. The same array applies to every tool; a valid kind with no candidate for a tool simply has no effect on that tool. There is no `[settings.precedence.node]` or per-tool `tool_order`.
 
 | Value | Candidate source | Built-in tools |
 | --- | --- | --- |
+| `system` | Existing executable from the adapter home or PATH; explicitly enabled only | Node, Python, Go, Java, npm, pnpm, Yarn, Bun, Deno, Zig; see [system tools](#system-tools) |
 | `osdk` | `[tools]` in the nearest project `osdk.toml` / `.osdk.toml`, including explicit `extends` | All tools with a matching backend key |
 | `global` | `[tools]` in osdk user configuration `$OSDK_CONFIG_DIR/config.toml`; locate it with `osdk config path` | All tools with a matching backend key |
 | `.tool-versions` | Matching tool line in the nearest applicable `.tool-versions` | All tools with a matching backend key |
@@ -408,30 +409,30 @@ tool_conflicts = "prefer"
 
 Changing `tool_conflicts` to `"error"` rejects the incompatible `20` and `22` declarations instead of selecting either. Without the custom order, the default project-first policy selects `22`. Explicit CLI versions and lock replay remain authoritative.
 
-There is currently no `env` or `system` source kind, and no universal `OSDK_<TOOL>_VERSION` override: `OSDK_NODE_VERSION` and `OSDK_PYTHON_VERSION` are not implemented. The ordinary `CLI > OSDK_* > project` settings summary applies only to implemented environment settings, not arbitrary tool-version variables. Nor is PATH/system selection a unified fallback: a shim with no selected version reports an error. Preserving an existing `JAVA_HOME` for external JDK consumers is a separate, narrower mechanism; it does not add a `tool_order` candidate.
+There is no `env` source kind and no universal `OSDK_<TOOL>_VERSION` override: `OSDK_NODE_VERSION` and `OSDK_PYTHON_VERSION` are not implemented. `CLI > OSDK_* > project` applies only to implemented settings. Existing PATH/home tools use the separate opt-in [`system` execution source](#system-tools). Without that opt-in, a shim with no selected version still errors.
 
 Every row below also supports `osdk`, `global`, and `.tool-versions` for its backend key. A file's presence does not automatically request installation of its tool; this table describes version selection when that tool is requested or activated.
 
 | Tool / backend key | Additional applicable `tool_order` values | Files within `idiomatic`, in priority order |
 | --- | --- | --- |
-| `node` | `.nvmrc`, `.node-version`, `package.json#engines.node`, `package.json#devEngines.runtime` | None: `.nvmrc` and `.node-version` have their own kinds; moving `idiomatic` does not move them |
-| `python` | `idiomatic` | `.python-version` |
-| `go` | `idiomatic` | `go.mod` (`go` directive), then `.go-version` |
+| `node` | `system`, `.nvmrc`, `.node-version`, `package.json#engines.node`, `package.json#devEngines.runtime` | None: `.nvmrc` and `.node-version` have their own kinds; moving `idiomatic` does not move them |
+| `python` | `system`, `idiomatic` | `.python-version` |
+| `go` | `system`, `idiomatic` | `go.mod` (`go` directive), then `.go-version` |
 | `rust` | `idiomatic` | `rust-toolchain.toml`, then `rust-toolchain` |
-| `java` | `idiomatic` | `.java-version`, then `.sdkmanrc` |
-| `bun` | `idiomatic` | `.bun-version` |
-| `deno` | `idiomatic` | `.dvmrc` |
-| `zig` | `idiomatic` | `.zig-version` |
+| `java` | `system`, `idiomatic` | `.java-version`, then `.sdkmanrc` |
+| `bun` | `system`, `idiomatic` | `.bun-version` |
+| `deno` | `system`, `idiomatic` | `.dvmrc` |
+| `zig` | `system`, `idiomatic` | `.zig-version` |
 | `maven` | `idiomatic` | `.mvn-version` |
 | `gradle` | `idiomatic` | `.gradle-version` |
 | `kotlin` | `idiomatic` | `.kotlin-version` |
-| `npm`, `pnpm`, `yarn` | `package.json#packageManager`, `package.json#devEngines.packageManager` | None |
+| `npm`, `pnpm`, `yarn` | `system`, `package.json#packageManager`, `package.json#devEngines.packageManager` | None |
 | Other built-in and dynamic backends | None | None |
 | Declarative plugin backends | `idiomatic` if the definition declares files | The definition's `idiomatic_files` order for other filenames; reserved `.nvmrc` / `.node-version` retain their separate kinds; no new enum values |
 
 Plain version files accept one version line (with optional comments); this is not arbitrary native-manager configuration parsing. In particular, the registered `.sdkmanrc` path currently uses the plain-version reader, not SDKMAN's multi-key `java=...` format. Rust toolchain files and the Go `go` directive have dedicated parsing.
 
-Unknown strings and duplicate entries are errors: `"node"`, `".python-version"`, and `"go.mod"` are not valid `tool_order` values. Omitted kinds are appended in the default relative order determined by `tools`; omission does not disable a source. `[]` clears an inherited custom order. For `idiomatic`, backend filename priority is fixed before directory distance, so an ancestor `go.mod` declaration can outrank a nearer `.go-version`; `tool_order` cannot reverse those two files. See the [three runnable examples](#examples-node-python-and-javascript-managers) below.
+Unknown strings and duplicate entries are errors: `"node"`, `".python-version"`, and `"go.mod"` are not valid `tool_order` values. Omitted declaration kinds are appended in the default relative order determined by `tools`; omission does not disable those sources. `system` is never appended: omission disables it. `[]` clears an inherited custom order and disables inherited `system`. For `idiomatic`, backend filename priority is fixed before directory distance, so an ancestor `go.mod` declaration can outrank a nearer `.go-version`; `tool_order` cannot reverse those two files. See the [three runnable examples](#examples-node-python-and-javascript-managers) below.
 
 ### Examples: Node, Python and JavaScript managers
 
@@ -474,3 +475,43 @@ npm = "native"
 ```
 
 With the [package.json example](../tools/package-managers#package-manager-version-discovery), pnpm selects `>=10 <11`; the exact `10.15.0` declaration is compatible, but does not pin the winning range. `npm="native"` controls package registries for the npm ecosystem, including pnpm/Yarn, not their executable versions. For an exact manager selection, leave `packageManager` first or pass an explicit version such as `osdk exec -t pnpm@10.15.0 -- pnpm --version`.
+
+### Existing system tools {#system-tools}
+
+To use an existing executable without installing it into osdk:
+
+```toml
+[settings.precedence]
+tool_order = ["system", "osdk"]
+tool_conflicts = "prefer"
+```
+
+This is one policy for all supported tools. `osdk current node` shows the absolute executable and its origin; `osdk exec -t node -- node --version` validates and runs it. `osdk reshim` publishes eligible companion shims, and activation uses the same selection. Under `prefer`, discovery/current/activation do not execute version probes; the version is honestly reported as unknown until execution. Under `error`, selection probes the external version and checks compatibility with active declarations, including ranges. Opaque selectors such as `lts` cannot be proven compatible and fail. JS manager probes use the selected Node; a required managed Node must already be installed for a strict selection check.
+
+`system` is **off by default**. It is never appended when omitted; replacing an inherited order with `[]` disables it. Other omitted declaration kinds still append in their default order. For example, `["osdk", "system"]` prefers a project declaration, then system, then omitted native/global sources. To make system the last fallback, list all declaration kinds first:
+
+```toml
+[settings.precedence]
+tool_order = [
+  "osdk", ".tool-versions", ".nvmrc", ".node-version", "idiomatic",
+  "package.json#packageManager", "package.json#devEngines.packageManager",
+  "package.json#engines.node", "package.json#devEngines.runtime", "global", "system",
+]
+```
+
+| Tool | Search before PATH | Executable / validation |
+| --- | --- | --- |
+| Node | None | `node`; `vMAJOR.MINOR.PATCH` |
+| Python | `VIRTUAL_ENV/bin` (Windows: `Scripts`) | `python3`, then `python`; stable `Python MAJOR.MINOR.PATCH`; an explicit venv must match `sys.prefix` |
+| Go | `GOROOT/bin` | `go`; stable `go version goMAJOR.MINOR[.PATCH]` |
+| Java | `JAVA_HOME/bin` | `java`; numeric Java version, JDK with `javac` required; companions come from that JDK, not a different alternatives link |
+| npm, pnpm, Yarn | None | Corresponding command; semver output; Node runtime selected through the same policy |
+| Bun, Deno, Zig | None | Corresponding command; stable semver output (Deno's native banner is recognized) |
+
+Only these adapters participate. Rust/rustup, Maven, Gradle, Kotlin, uv, dynamic package tools and plugin backends have no system adapter. `PNPM_HOME`, `NVM_DIR`, cache variables and other homes do not become selectors. Existing unrelated environment/cache policies remain intact; `override_env` is not a selection switch. For Python venv-first or JDK-first selection, set the ordinary `VIRTUAL_ENV` or `JAVA_HOME`, then use `tool_order=["system"]`; do not add new osdk version variables. For mixed managed pnpm and external Node, use `osdk exec -t pnpm@10.15.0 -- pnpm --version`: the explicit manager stays managed while the implicit Node follows the policy.
+
+PATH search accepts absolute entries (including spaces), ignores empty/relative entries, and excludes osdk data/install/store paths, canonical aliases, known shim executable identities/copies and generated wrappers. Home selectors must be absolute; an explicitly set invalid home fails instead of silently choosing PATH. osdk activation's injected locator/PATH values are restored to their saved ambient values before discovery. On Windows only `.exe` targets are supported, case-insensitively; `.cmd`, `.bat`, PowerShell and arbitrary PATHEXT wrappers are not selected. This means a normal `pnpm.cmd` or `npm.cmd` installation needs a managed manager or a real external executable. Paths/homes used to construct this execution environment must be Unicode.
+
+No eligible candidate allows lower declaration sources to win. Once an external candidate is chosen, a failed/unrecognized/overlong version probe stops execution; probes are limited to three seconds and 8 KiB per output stream. It never installs a replacement after a failed probe or retries after execution starts. Unsupported prerelease banners, Java 8 underscore versions and custom launchers are not claimed as verified adapters.
+
+Explicit CLI versions and managed lock replay stay authoritative. `install`/`lock` reject an unversioned request selecting system; give an explicit managed version when creating a reproducible installation. External paths never become managed receipts or portable lock entries, and uninstall/cache cleanup do not own them. Non-frozen deps may use an unpinned external installer/runtime; a pinned installer and frozen plan remain managed. Any deps plan using external tools writes no portable tool/freshness record; with system policy enabled deps revalidates on each run. `deps --dry-run --explain` shows discovery evidence without probing and labels deferred validation. Mixing system execution with dynamic package-tool receipts is rejected; their recorded runtime contracts remain managed.

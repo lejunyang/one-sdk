@@ -18,6 +18,73 @@ fn shim() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_osdk-shim"))
 }
 
+#[cfg(unix)]
+#[test]
+fn system_target_shim_executes_external_node_once_and_preserves_exit() {
+    use std::os::unix::process::CommandExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("external/bin");
+    let log = root.join("calls");
+    write_executable(&bin.join("node"), &format!("#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo v22.3.0; exit 0; fi\necho entered >> '{}'\nexit 7\n", log.display()));
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        "[settings.precedence]\ntool_order=['system']\n",
+    )
+    .unwrap();
+    let output = isolated_command(root, root)
+        .arg0("node")
+        .arg("run-once")
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "entered\n");
+    assert!(!root.join("installs/node").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn system_target_pnpm_shim_selects_external_node_and_keeps_native_home() {
+    use std::os::unix::process::CommandExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("external/bin");
+    write_executable(&bin.join("node"), "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo v22.3.0; else echo EXTERNAL_NODE; echo \"$PNPM_HOME\"; fi\n");
+    write_executable(
+        &bin.join("pnpm"),
+        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 10.0.0; else exec node run; fi\n",
+    );
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        "[settings.precedence]\ntool_order=['system']\n",
+    )
+    .unwrap();
+    let output = isolated_command(root, root)
+        .arg0("pnpm")
+        .arg("run")
+        .env("PATH", &bin)
+        .env("PNPM_HOME", root.join("native-home"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("EXTERNAL_NODE"));
+    assert!(stdout.contains("native-home"));
+    assert!(!root.join("installs").exists());
+}
+
 fn isolated_command(root: &Path, cwd: &Path) -> Command {
     let mut command = Command::new(shim());
     command

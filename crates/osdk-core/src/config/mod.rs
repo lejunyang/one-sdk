@@ -326,6 +326,9 @@ pub struct PrecedenceSettings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolSource {
+    /// Existing host executable; enabled only when explicitly listed.
+    #[serde(rename = "system")]
+    System,
     #[serde(rename = "osdk")]
     Osdk,
     #[serde(rename = "global")]

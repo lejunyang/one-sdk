@@ -274,6 +274,7 @@ pub fn compute_env_delta(
     cwd: &std::path::Path,
 ) -> crate::Result<EnvDelta> {
     let mut path_prepend = Vec::new();
+    let mut system_paths = Vec::new();
     let mut set_vars = BTreeMap::new();
     let mut has_generated_shim = false;
     let dynamic_report = crate::shim::scan_dynamic_installs(ctx)?;
@@ -294,6 +295,22 @@ pub fn compute_env_delta(
         let Ok(backend) = registry.get(&backend_id) else {
             continue;
         };
+        if crate::execution::enabled(ctx) {
+            if let Some(crate::execution::ExecutionTarget::System(system)) =
+                crate::execution::resolve(ctx, backend.as_ref(), cwd)?.target
+            {
+                if system
+                    .published_names(ctx)
+                    .iter()
+                    .any(|name| shim_exists(&ctx.dirs.shims(), name))
+                {
+                    has_generated_shim = true;
+                }
+                system_paths.push(system.bin_dir().to_path_buf());
+                set_vars.extend(system.env);
+                continue;
+            }
+        }
         let dynamic_request = crate::shim::dynamic_request_from_config(ctx, backend.id());
         // Project-aware npm `use` is owned by the real project's package
         // manager and its curated `.osdk/npm-bin` generation below. It has no
@@ -409,7 +426,14 @@ pub fn compute_env_delta(
         }
     }
 
+    // A broad external directory can contain unrelated tools. Keep selected
+    // managed directories ahead of it; generated shims remain first so they
+    // dispatch each tool through its own selection/preflight.
     prioritize_managed_paths(&mut path_prepend, &ctx.dirs.shims(), has_generated_shim);
+    path_prepend.extend(system_paths);
+    if has_generated_shim && !path_prepend.contains(&ctx.dirs.shims()) {
+        path_prepend.insert(0, ctx.dirs.shims());
+    }
     if let Some(project_bin) = project_npm_bin {
         prioritize_project_bin(&mut path_prepend, project_bin);
     }

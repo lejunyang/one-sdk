@@ -27,6 +27,7 @@ pub(crate) mod maintenance;
 mod registry;
 mod runtimes;
 mod shims;
+mod system_exec;
 mod uninstall;
 mod use_cmd;
 

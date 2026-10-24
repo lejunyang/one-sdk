@@ -145,18 +145,26 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     };
     let mut any = false;
     for backend in backends {
-        let selection = osdk_core::version::resolver::resolve_selection(
-            backend.id(),
-            &cwd,
-            &app.ctx.config,
-            backend.idiomatic_files(),
-        )?;
+        let selection = osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &cwd)?;
         if !selection.evidence.is_empty() {
-            println!("{}", selection.explain());
+            println!("{}", serde_json::to_string(&selection.evidence)?);
+        }
+        if let Some(osdk_core::execution::ExecutionTarget::System(system)) = &selection.target {
+            any = true;
+            println!(
+                "{} {} (system: {})",
+                backend.id(),
+                system.version.as_deref().unwrap_or("unknown; not probed"),
+                system.executable.display()
+            );
+            continue;
         }
         if let Some(av) = selection
-            .winner
-            .clone()
+            .target
+            .and_then(|target| match target {
+                osdk_core::execution::ExecutionTarget::Managed(active) => Some(active),
+                osdk_core::execution::ExecutionTarget::System(_) => None,
+            })
             .map(|active| (active.spec, Some(active.source)))
             .or_else(|| {
                 osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
@@ -193,6 +201,24 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
 
 pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()> {
     let explicit_spec = requested_spec_literal(&tool).is_some();
+    if !explicit_spec && !global && osdk_core::execution::enabled(&app.ctx) {
+        let backend = app.registry.get(&tool)?;
+        if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+            osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &std::env::current_dir()?)?
+                .target
+        {
+            println!(
+                "{}",
+                if bins {
+                    target.bin_dir()
+                } else {
+                    &target.executable
+                }
+                .display()
+            );
+            return Ok(());
+        }
+    }
     let req = if global {
         resolve_explicit_request(
             app,

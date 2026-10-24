@@ -47,11 +47,11 @@ npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆�
 python = "native"
 ```
 
-`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `osdk`、`global`、
+`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `system`（需主动启用）、`osdk`、`global`、
 `.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
 `package.json#packageManager`、`package.json#devEngines.packageManager`、
-`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏项按默认顺序补齐，
-不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
+`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏的声明来源按默认顺序补齐；`system` 是例外，仅在数组中明确列出时启用。
+未知值和重复值报错；`[]` 清除继承的自定义顺序并禁用继承的 `system`。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
 .tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
 devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
 把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
@@ -100,3 +100,8 @@ CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolv
 - CLI 的 package-manager 自动选择、Node 注入和 lock 恢复由 [`isolated_cli.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs) 与 [`lockfile.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs) 覆盖。
 
 执行适配器位于 `package_sources.rs`；版本策略位于 `version/resolver.rs`。原生解析的来源无法确定时只报告候选，不把文件扫描顺序当作包管理器优先级。详见[包管理器](../guide/tools/package-managers.md)。
+
+
+### 主动启用外部工具执行
+
+`tool_order` 还接受 `system`，但必须明确列出；默认值和 `[]` 都禁用它。[系统工具参考](../guide/config/files#system-tools) 列出适配器、home 优先于 PATH、Windows 仅 `.exe` 的限制、探测及示例。外部工具是绝对执行目标，不伪装成托管版本或安装。显式 CLI 版本、托管锁重放及 frozen deps 保持权威；非 frozen deps 可使用未固定的外部工具，该策略下每次重新验证，不为外部路径写可移植 receipt。动态包工具的运行时 receipt 仍保持托管，不允许与 system 执行混用。

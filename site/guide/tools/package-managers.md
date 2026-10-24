@@ -292,11 +292,11 @@ npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆�
 python = "native"
 ```
 
-`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `osdk`、`global`、
+`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `system`（需主动启用）、`osdk`、`global`、
 `.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
 `package.json#packageManager`、`package.json#devEngines.packageManager`、
-`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏项按默认顺序补齐，
-不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
+`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏的声明来源按默认顺序补齐；`system` 是例外，仅在数组中明确列出时启用。
+未知值和重复值报错；`[]` 清除继承的自定义顺序并禁用继承的 `system`。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
 .tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
 devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
 把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
@@ -320,3 +320,8 @@ devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数�
 实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
 不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
 的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。
+
+
+### 主动启用外部工具执行
+
+`tool_order` 还接受 `system`，但必须明确列出；默认值和 `[]` 都禁用它。[系统工具参考](../config/files#system-tools) 列出适配器、home 优先于 PATH、Windows 仅 `.exe` 的限制、探测及示例。外部工具是绝对执行目标，不伪装成托管版本或安装。显式 CLI 版本、托管锁重放及 frozen deps 保持权威；非 frozen deps 可使用未固定的外部工具，该策略下每次重新验证，不为外部路径写可移植 receipt。动态包工具的运行时 receipt 仍保持托管，不允许与 system 执行混用。

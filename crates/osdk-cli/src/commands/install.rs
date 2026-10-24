@@ -281,6 +281,9 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
 }
 
 pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
+    if super::system_exec::try_exec(app, &tools, &command).await? {
+        return Ok(());
+    }
     let requests = gather_requests(app, tools)?;
     let resolved = install_requests(app, requests, Vec::new(), false, false).await?;
     let mut paths = Vec::new();
@@ -307,8 +310,8 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         && !osdk_core::shim::process_java_home_is_user_owned()
     {
         let cwd = std::env::current_dir()?;
-        if let Some((jdk_env, jdk_paths)) =
-            osdk_core::shim::managed_jdk_env(&app.ctx, &app.registry, &cwd)
+        if let Some((jdk_paths, jdk_env)) =
+            osdk_core::execution::jdk_environment(&app.ctx, &app.registry, &cwd)?
         {
             env.extend(jdk_env);
             paths.extend(jdk_paths);
@@ -1554,6 +1557,36 @@ pub(crate) fn report_shell_split_operands(tools: &[String]) -> Result<()> {
 }
 
 pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
+    let requests = gather_requests_unchecked(app, tools.clone())?;
+    if osdk_core::execution::enabled(&app.ctx) {
+        let cwd = std::env::current_dir()?;
+        for request in &requests {
+            let explicit = tools.iter().any(|operand| {
+                requested_spec_literal(operand).is_some()
+                    && resolve_explicit_request(
+                        app,
+                        operand,
+                        &app.ctx.config.tool_configs,
+                        &app.ctx.config.tools,
+                    )
+                    .is_ok_and(|r| r.backend == request.backend)
+            });
+            if explicit {
+                continue;
+            }
+            let backend = app.registry.get(&request.backend)?;
+            if matches!(
+                osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &cwd)?.target,
+                Some(osdk_core::execution::ExecutionTarget::System(_))
+            ) {
+                anyhow::bail!("{} selects an external system tool; use exec for that target or specify an explicit managed version for install/lock", request.backend);
+            }
+        }
+    }
+    Ok(requests)
+}
+
+pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
         // A shell that split one operand into several is worth naming before
         // anything else: the resulting fragments fail as "unterminated option

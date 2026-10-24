@@ -269,12 +269,38 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 println!("    fingerprint inputs: {candidates:?}; not an effective discovery chain; native winner and interpolation delegated to manager");
                 if let Some(evidence) = tool_evidence.get(&rooted.0) {
                     for (id, selection) in evidence {
-                        println!("    {id}: {selection}");
+                        let pinned_installer = id == &plan.tool && choice.version.is_some();
+                        if !plan.frozen
+                            && !pinned_installer
+                            && osdk_core::execution::enabled(&context)
+                        {
+                            if let Ok(backend) = app.registry.get(id) {
+                                let actual = osdk_core::execution::resolve_without_probes(
+                                    &context,
+                                    backend.as_ref(),
+                                    &plan.cwd,
+                                )?;
+                                println!(
+                                    "    {id}: {}; verification deferred until execution",
+                                    serde_json::to_string(&actual.evidence)?
+                                );
+                                continue;
+                            }
+                        }
+                        println!(
+                            "    {id}: {selection}; managed authority for frozen/pinned plans"
+                        );
                     }
                 }
             }
         }
-        let decision = decide(app, schema, &project, &config, &plan, unit.as_ref())?;
+        let decision = if osdk_core::execution::enabled(&source_context(app, &config)?) {
+            state::Decision::Stale(
+                "system tool policy: host execution is revalidated on every run".into(),
+            )
+        } else {
+            decide(app, schema, &project, &config, &plan, unit.as_ref())?
+        };
         resolved.push(Resolved {
             schema,
             rooted: Some(rooted),
@@ -345,12 +371,13 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     }
 
     for item in &mut resolved {
+        let system_policy = osdk_core::execution::enabled(&source_context(app, &item.config)?);
         if let Some(reason) = &item.plan.downgraded_reason {
             // Reported, never silent: a flag that does nothing is worse than an
             // error, because the run looks successful.
             println!("warning: {reason}");
         }
-        if item.decision.is_fresh() && !options.force {
+        if item.decision.is_fresh() && !options.force && !system_policy {
             println!("{} is up to date", item.label());
             continue;
         }
@@ -386,6 +413,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 item.unit.as_ref(),
             )?
             .is_fresh()
+            && !system_policy
         {
             println!(
                 "{} is up to date after waiting for shared installation",
@@ -413,7 +441,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 println!("    sources: {evidence}");
             }
         }
-        run_plan(item, &tools)?;
+        run_plan(app, item, &tools)?;
         item.plan.env = source_env;
         record(app, item, &tools)?;
     }
@@ -606,6 +634,7 @@ struct ReadyTool {
     version: String,
     role: ToolRole,
     bin_dirs: Vec<PathBuf>,
+    system: Option<osdk_core::execution::SystemTarget>,
 }
 
 /// Resolve every tool a provider needs, installing the missing ones through
@@ -679,6 +708,23 @@ async fn ensure_tools_in_context(
             None,
         );
         let backend = app.registry.get(&request.backend)?;
+        // Frozen native plans and pinned installer choices retain managed
+        // replay authority. A host executable is never a portable lock entry.
+        if !item.plan.frozen && pinned.is_none() && osdk_core::execution::enabled(&app.ctx) {
+            if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+                osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &item.project.root)?
+                    .target
+            {
+                ready.push(ReadyTool {
+                    id: required.id.into(),
+                    version: String::new(),
+                    role: required.role,
+                    bin_dirs: vec![target.bin_dir().to_path_buf()],
+                    system: Some(target),
+                });
+                continue;
+            }
+        }
         if required.role == ToolRole::Runtime {
             if let Some(active) = osdk_core::version::resolver::resolve_active_config(
                 required.id,
@@ -744,7 +790,26 @@ async fn ensure_tools_in_context(
             version: version.version.clone(),
             role: required.role,
             bin_dirs,
+            system: None,
         });
+    }
+    let mut env = item.plan.env.clone();
+    env.insert(
+        "PATH".into(),
+        osdk_core::execution::path_with(
+            &app.ctx,
+            ready
+                .iter()
+                .filter(|t| t.role == ToolRole::Runtime)
+                .chain(ready.iter().filter(|t| t.role != ToolRole::Runtime))
+                .flat_map(|t| t.bin_dirs.clone()),
+        )?,
+    );
+    for tool in &mut ready {
+        if let Some(target) = &mut tool.system {
+            target.verify(&app.ctx, &env)?;
+            tool.version = target.version.clone().expect("verified");
+        }
     }
     Ok(ready)
 }
@@ -760,7 +825,12 @@ async fn ensure_tools_in_context(
 /// pnpm are node scripts and dependency lifecycle hooks invoke `node` directly,
 /// so an unrelated node earlier on PATH would win and the install would run
 /// under a runtime osdk did not choose.
-fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+    for tool in tools {
+        if let Some(target) = &tool.system {
+            target.command(&app.ctx, &target.tool)?;
+        }
+    }
     let program = resolve_program(&item.plan, tools).ok_or_else(|| {
         anyhow!(
             "could not find `{}` in the install for `{}`",
@@ -771,7 +841,12 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
 
     let separator = if cfg!(windows) { ";" } else { ":" };
     let mut path = OsString::new();
-    for dir in tools.iter().flat_map(|tool| &tool.bin_dirs) {
+    for dir in tools
+        .iter()
+        .filter(|t| t.role == ToolRole::Runtime)
+        .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
+        .flat_map(|tool| &tool.bin_dirs)
+    {
         if !path.is_empty() {
             path.push(separator);
         }
@@ -784,11 +859,32 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
         }
     }
 
+    if tools.iter().any(|t| t.system.is_some()) {
+        path = osdk_core::execution::path_with(
+            &app.ctx,
+            tools
+                .iter()
+                .filter(|t| t.role == ToolRole::Runtime)
+                .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
+                .flat_map(|t| t.bin_dirs.clone()),
+        )?
+        .into();
+    }
+
     // Already absolute: the provider resolved \[deps.<p>].dir\ against the project
     // root. Joining again would be a no-op for an absolute path but would quietly
     // change meaning if a provider ever returned a relative one.
     let cwd = &item.plan.cwd;
     let mut command = std::process::Command::new(&program);
+    let mut external_env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+    for tool in tools {
+        if let Some(target) = &tool.system {
+            target.restore_environment(&mut external_env);
+        }
+    }
+    if tools.iter().any(|t| t.system.is_some()) {
+        command.env_clear().envs(&external_env);
+    }
     command
         .args(&item.plan.args)
         .current_dir(cwd)
@@ -804,6 +900,9 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
     // environment the tool already said it could not build.
     for step in &item.plan.prelude {
         let mut prelude = std::process::Command::new(&program);
+        if tools.iter().any(|t| t.system.is_some()) {
+            prelude.env_clear().envs(&external_env);
+        }
         prelude.args(step).current_dir(cwd).env("PATH", &path);
         for (key, value) in &item.plan.env {
             prelude.env(key, value);
@@ -833,6 +932,12 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
         .iter()
         .filter(|tool| tool.role == ToolRole::Installer || tool.id == plan.tool);
     for tool in installer_first.chain(tools.iter()) {
+        if let Some(target) = &tool.system {
+            if tool.id == plan.tool {
+                return Some(target.executable.clone());
+            }
+            continue;
+        }
         for candidate in &plan.program_candidates {
             if !cfg!(windows)
                 && [".exe", ".cmd", ".bat"]
@@ -867,6 +972,12 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// would make the next run report "up to date" for a tree that was never
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+    // External tools are host state, not managed receipts or portable lock
+    // entries. Conservatively rerun system-enabled deps instead of recording
+    // unverifiable freshness for a mutable host toolchain.
+    if tools.iter().any(|tool| tool.system.is_some()) {
+        return Ok(());
+    }
     let command = freshness_command(
         app,
         &item.plan,
@@ -1436,6 +1547,7 @@ mod tests {
             version: "1.22.22".into(),
             role: ToolRole::Installer,
             bin_dirs: vec![temp.path().to_path_buf()],
+            system: None,
         }];
         let expected = if cfg!(windows) { "yarn.cmd" } else { "yarn" };
         assert_eq!(

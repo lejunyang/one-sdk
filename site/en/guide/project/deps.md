@@ -527,3 +527,8 @@ For a local exception, use `deps.uv.registries.python.default = "https://example
 Unknown fields fail normally, including invented generic Cargo/Deno source fields.
 
 Tool source ordering, conflict handling, per-ecosystem overrides and uv discovery boundaries are defined in [package-manager precedence](../tools/package-managers#configurable-declaration-precedence). Explain output reuses tool selection evidence; fingerprint input files are not an effective native discovery chain.
+
+
+### Opt-in external execution
+
+`tool_order` also accepts `system`, only when explicitly listed. Defaults and `[]` keep it disabled. The [system-tool reference](../config/files#system-tools) defines supported adapters, home-before-PATH search, Windows `.exe` limits, probing and examples. External tools are absolute execution targets rather than managed versions or installations. Explicit CLI versions, managed lock replay and frozen deps retain authority. Non-frozen deps can use unpinned external tools, revalidates each run under this policy and does not write portable receipts for external paths. Dynamic package-tool runtime receipts remain managed; mixing them with system execution is rejected.
