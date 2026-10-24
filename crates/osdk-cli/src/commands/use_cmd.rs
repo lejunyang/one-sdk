@@ -1014,6 +1014,14 @@ pub(crate) fn record_project_npm_metadata(
 }
 
 pub(crate) fn project_config_path(app: &App, project_root: &std::path::Path) -> std::path::PathBuf {
+    // An external binding's config lives in the bundle, never in the project
+    // tree: a recorded tool spec must go to the bundle so the real repo stays
+    // untouched (no checked-in osdk.toml suddenly shadowing the binding).
+    if let Some(ctx) = &app.ctx.config.project {
+        if ctx.is_external() {
+            return ctx.config_path.clone();
+        }
+    }
     app.ctx
         .config
         .project_config_path

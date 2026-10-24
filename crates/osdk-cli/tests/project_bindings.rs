@@ -201,3 +201,78 @@ fn broken_binding_is_reported_not_silently_ignored() {
         "broken selected binding must hard-fail"
     );
 }
+
+#[test]
+fn relocate_into_an_already_bound_target_is_refused_and_leaves_both_intact() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let a = root.join("alpha");
+    let b = root.join("beta");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    for p in [&a, &b] {
+        assert!(isolated(root)
+            .arg("project")
+            .arg("add")
+            .arg(p)
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+
+    // alpha -> beta: beta is already bound, so this must fail and touch nothing.
+    let rel = isolated(root)
+        .arg("project")
+        .arg("relocate")
+        .arg(&a)
+        .arg(&b)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        !rel.status.success(),
+        "must refuse a colliding relocate: {rel:?}"
+    );
+
+    // Both bindings survive; their recorded roots are unchanged.
+    let list = isolated(root)
+        .arg("project")
+        .arg("list")
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let items: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(items.len(), 2, "refused relocate must not drop a binding");
+}
+
+#[test]
+fn bind_under_a_long_chinese_path_still_resolves() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let deep = root
+        .join("非常长的项目路径")
+        .join("一层")
+        .join("二层")
+        .join("我的服务 svc");
+    std::fs::create_dir_all(&deep).unwrap();
+    let add = isolated(root)
+        .arg("project")
+        .arg("add")
+        .arg(&deep)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let show = isolated(root)
+        .arg("project")
+        .arg("show")
+        .current_dir(&deep)
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "{show:?}");
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(text.contains("external"), "must select the binding: {text}");
+}
