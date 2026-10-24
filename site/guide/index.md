@@ -36,6 +36,7 @@ osdk 用一套命令管理语言运行时、开发工具、项目依赖、模型
 | 页面 | 内容 |
 | --- | --- |
 | [项目工具链](./project/discovery) | 版本声明的查找顺序与生态原生版本文件 |
+| [外置项目配置](./project/external-config) | 把目录绑定为项目，而不在项目目录里写 `osdk.toml` |
 | [可复现锁文件](./project/lockfiles) | `lock`、`install`、`outdated`、`upgrade` 与陈旧状态 |
 | [项目任务](./project/tasks) | 用 `[tasks]` 替代 Makefile，含依赖、并行与平台变体 |
 | [应用依赖](./project/deps) | 用 `osdk deps` 驱动包管理器安装项目自己的依赖 |

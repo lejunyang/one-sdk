@@ -6,6 +6,11 @@ osdk combines user defaults, project declarations, environment variables, and CL
 
 - User configuration: `$OSDK_CONFIG_DIR/config.toml`; on Linux the default is `~/.config/osdk/config.toml`.
 - Project configuration: `osdk.toml` or `.osdk.toml`. osdk walks upward and uses the nearest file; `osdk.toml` wins when both exist in one directory.
+- External project configuration: a bound directory without a local file keeps its
+  `osdk.toml` and `osdk.lock` under `<OSDK_CONFIG_DIR>/projects/<root-id>/`; a local
+  file on the same project root still outranks it. See
+  [External Project Configuration](../project/external-config) for the binding
+  commands and full semantics.
 - `.tool-versions`: discovered independently by walking upward; its declarations participate in the shared [tool-version precedence](#configurable-declaration-precedence), above global tool defaults in the default order.
 
 ```text

@@ -107,6 +107,11 @@ osdk trust prune                 # 清理配置文件已不存在的记录
 使记录变为 `changed`；改动受管键会，移动仓库则使其变为 `missing` 或 `unreachable`。
 软链接解析到真实目标。trust store 位于 `$OSDK_CONFIG_DIR/trusted-configs.toml`。
 
+外置项目配置（见[外置项目配置](../project/external-config)）的信任对象仍是外置目录里
+那份真实 `osdk.toml`：信任按它的真实路径、项目根与受管内容审批。外置项目根被移动
+后用 `osdk project relocate` 更新绑定，物理配置路径随之变化，信任记录需要重新
+`osdk trust` 审批，不会自动跟随。
+
 CI 可设置 `OSDK_TRUSTED_CONFIG_PATHS`，值是操作系统路径分隔符连接的已审阅文件或
 目录。匹配文件或位于匹配目录下的项目配置会在本次进程中视为 trusted，不写本地
 trust store。`trust`/`untrust` 自身只加载用户配置，防止未信任项目影响自己的审批。

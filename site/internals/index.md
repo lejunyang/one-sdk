@@ -26,6 +26,7 @@ CLI 与分层配置
 | 页面 | 重点 |
 | --- | --- |
 | [版本解析](./resolution) | 配置发现优先级、别名、范围、预发布版本与 package manager 发现 |
+| [外置项目配置绑定](./project-config) | 外置项目绑定、root-id 路径身份、配置/锁单写源选择与信任重审 |
 | [安装管线](./installation) | 并发编排、下载、验证、解压、提交与失败清理 |
 | [激活、shim 与锁文件](./activation-lockfile) | 热路径解析、可逆 shell 状态、项目信任与平台化 lock |
 | [下载源与项目 Registry](./sources-registries) | 两套控制面、测速排序、凭据边界和单次启动语义 |

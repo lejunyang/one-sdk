@@ -7,6 +7,9 @@ osdk 将用户默认值、项目声明、环境变量和 CLI 覆盖组合成当�
 - 用户配置：`$OSDK_CONFIG_DIR/config.toml`；Linux 默认是 `~/.config/osdk/config.toml`。
 - 项目配置：`osdk.toml` 或 `.osdk.toml`。从当前目录向上查找最近一份；同一目录
   同时存在时，`osdk.toml` 优先。
+- 外置项目配置：已绑定但目录里没有本地配置的项目，其 `osdk.toml` 与 `osdk.lock`
+  存放在 `<OSDK_CONFIG_DIR>/projects/<root-id>/` 下；同一项目根上的本地文件仍优先。
+  绑定命令与完整语义见[外置项目配置](../project/external-config)。
 - `.tool-versions`：独立向上查找，其声明参与共用的[工具版本优先级](#可配置的声明优先级)；默认顺序中优先于用户全局工具默认值。
 
 ```text

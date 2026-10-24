@@ -39,6 +39,7 @@ internally, read [Internals](/en/internals/).
 | Page | What it covers |
 | --- | --- |
 | [Project Toolchains](./project/discovery) | Where version declarations come from and native version files |
+| [External Project Configuration](./project/external-config) | Bind a directory as a project without writing `osdk.toml` into it |
 | [Reproducible Lockfiles](./project/lockfiles) | `lock`, `install`, `outdated`, `upgrade`, and stale states |
 | [Project Tasks](./project/tasks) | Replace Makefiles with `[tasks]`, including dependencies, parallelism, and platform variants |
 | [Application Dependencies](./project/deps) | Drive package managers with `osdk deps` to install a project's own dependencies |

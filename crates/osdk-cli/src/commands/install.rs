@@ -1118,7 +1118,7 @@ pub(crate) fn inherit_versions_from_other_platforms(
     requests: &mut [ToolRequest],
 ) -> Result<std::collections::BTreeMap<String, VersionSpec>> {
     let cwd = std::env::current_dir()?;
-    let Some(path) = crate::lockfile::find(&cwd) else {
+    let Some(path) = existing_lock_path(app, &cwd) else {
         return Ok(Default::default());
     };
     let Some(inherited) =
@@ -1172,13 +1172,29 @@ pub(crate) fn restore_inherited_request_specs(
 
 pub(crate) fn requests_from_lock(app: &App) -> Result<Option<Vec<ToolRequest>>> {
     let cwd = std::env::current_dir()?;
-    let Some(path) = crate::lockfile::find(&cwd) else {
+    let Some(path) = existing_lock_path(app, &cwd) else {
         return Ok(None);
     };
     crate::lockfile::locked_requests(&path, app.ctx.platform)
 }
 
+/// The lock that belongs to the currently selected project configuration, when
+/// one already exists. An external binding owns its lock exclusively -- locks
+/// are never borrowed across sources; a local project keeps the historical
+/// ancestor walk.
+pub(crate) fn existing_lock_path(app: &App, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Some(ctx) = &app.ctx.config.project {
+        if ctx.is_external() {
+            return ctx.lock_path.is_file().then(|| ctx.lock_path.clone());
+        }
+    }
+    crate::lockfile::find(cwd)
+}
+
 pub(crate) fn project_lock_path(app: &App, cwd: &std::path::Path) -> std::path::PathBuf {
+    if let Some(ctx) = &app.ctx.config.project {
+        return ctx.lock_path.clone();
+    }
     app.ctx
         .config
         .project_config_path

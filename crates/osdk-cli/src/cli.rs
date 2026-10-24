@@ -463,6 +463,17 @@ pub enum Command {
         command: SelfCommand,
     },
 
+    /// Manage external project configuration bindings.
+    ///
+    /// A checked-in project carries its own `osdk.toml`. When the tree must stay
+    /// clean or lives somewhere osdk cannot write, bind it here: the config and
+    /// its lock live under the osdk config directory while the project root
+    /// stays exactly where it is.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+
     /// Diagnostics: dirs, mirrors, same-fs, link mode.
     Doctor {
         /// Also re-hash every installed file and report what no longer matches
@@ -673,6 +684,81 @@ pub enum TrustCommand {
         /// Report what would be removed without writing anything.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    /// Bind a project directory to an external osdk configuration.
+    ///
+    /// The directory is bound exactly as given -- no git-root discovery, no
+    /// installation. A binding already recorded for this root is left as-is:
+    /// adding twice never overwrites the existing config or lock.
+    Add {
+        /// Project directory to bind; defaults to the current directory.
+        path: Option<std::path::PathBuf>,
+        /// Report what would be written without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the project configuration that applies to a directory.
+    ///
+    /// Reports the selected source, the physical paths in use, whether a same
+    /// root is shadowed, and when a recorded binding no longer points at an
+    /// existing directory.
+    Show {
+        /// Project directory; defaults to the current directory.
+        path: Option<std::path::PathBuf>,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List every external project binding on record.
+    ///
+    /// The only command that enumerates the binding store; discovery hashes one
+    /// root per ancestor and never walks it.
+    List {
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Move a binding from its old project root to a new one.
+    ///
+    /// The config and the lock travel with the binding; nothing in the project
+    /// tree is touched. A binding whose old directory has gone missing can still
+    /// be relocated -- it is not auto-deleted, it just needs a new home.
+    Relocate {
+        /// Project directory this binding currently points at.
+        old: std::path::PathBuf,
+        /// Project directory the binding should point at instead.
+        new: std::path::PathBuf,
+        /// Report what would change without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove the external binding for a project directory.
+    ///
+    /// Deletes only the binding directory under the osdk config directory. The
+    /// project itself and any installed tools are left alone.
+    Remove {
+        /// Project directory whose binding should be removed.
+        path: std::path::PathBuf,
+        /// Report what would be deleted without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
     },
 }
 

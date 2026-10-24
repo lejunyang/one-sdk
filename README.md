@@ -15,6 +15,8 @@ package managers, developer tools, and model snapshots. Use it to:
 - inspect Docker, containerd, Buildx, OCI registries, mirror benchmarks/plans,
   and native caches, then deliberately apply mirror config, pull images, or
   approve narrowly scoped native cleanup;
+- bind read-only or third-party directories as managed projects, keeping osdk's
+  configuration and locks outside the project itself;
 - inspect storage, caches, active versions, and environment health in English or
   Chinese.
 
@@ -212,6 +214,30 @@ legacy state and are never reused or executed.
 
 Guides: [Project toolchains](site/en/guide/config/files.md) ·
 [Lockfiles and repeatable environments](site/en/guide/project/lockfiles.md)
+
+## Scenario: bind a project without writing into it
+
+Some directories cannot be modified — read-only checkouts of third-party
+repositories, or workspaces where you want osdk's configuration centralized. Bind
+the directory instead: osdk keeps its `osdk.toml` and `osdk.lock` under
+`$OSDK_CONFIG_DIR/projects/`, and every command resolves it by walking up from
+the current directory.
+
+```bash
+osdk project add ~/repos/third-party-app   # binds exactly this directory; no Git-root guessing
+osdk project show .                        # which configuration this directory actually uses
+osdk use node@20                          # writes into the external config and its lock
+osdk project list                          # all bindings and their status
+osdk project remove ~/tmp/checkout --dry-run
+```
+
+The bound directory remains the logical project root: tasks and deps still
+resolve and write there, while the tool configuration stays out of the project.
+A local `osdk.toml` on the same root always wins over the external copy. Moving
+or removing a binding preserves or deletes only the external directory itself —
+project files and shared tool installations are never touched.
+
+Guide: [External project configuration](site/en/guide/project/external-config.md)
 
 ## Scenario: replace a Makefile with project tasks
 
@@ -1139,6 +1165,7 @@ Using osdk:
   [Shell activation](site/en/guide/basics/shell.md) ·
   [PATH control](site/en/guide/basics/path-control.md)
 - Projects: [Toolchains](site/en/guide/project/discovery.md) ·
+  [External project configuration](site/en/guide/project/external-config.md) ·
   [Lockfiles](site/en/guide/project/lockfiles.md) ·
   [Tasks](site/en/guide/project/tasks.md) ·
   [Application dependencies](site/en/guide/project/deps.md) ·

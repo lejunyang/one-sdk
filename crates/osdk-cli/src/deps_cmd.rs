@@ -76,7 +76,22 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         return Ok(());
     };
     let config_path = osdk_core::config::inheritance::deps_anchor(&config_path)?;
-    let root = config_path.parent().unwrap_or(&cwd);
+    // For an external binding the config file sits outside the project tree;
+    // deps roots, dir validation and native-file discovery anchor at the real
+    // recorded root, not at the config directory. When the [deps] section was
+    // inherited from an ancestor file (extends), relative entries were declared
+    // there, so keep anchoring at that file's directory -- the pre-existing
+    // behaviour for checked-in configs.
+    let root = if config_path == app.ctx.config.project_config_path.clone().unwrap_or_default() {
+        app.ctx
+            .config
+            .project_root
+            .as_deref()
+            .unwrap_or_else(|| config_path.parent().unwrap_or(&cwd))
+            .to_path_buf()
+    } else {
+        config_path.parent().unwrap_or(&cwd).to_path_buf()
+    };
     let deps_config = osdk_core::config::inheritance::deps_file(&config_path)?;
     let deps_config = if deps_config.providers.is_empty() && deps_config.projects.is_empty() {
         app.ctx.config.deps.clone()
@@ -87,7 +102,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         report_undeclared(&cwd)?;
         return Ok(());
     }
-    let mut entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
+    let mut entries = deps::catalog::catalog(&root, &config_path, &deps_config)?;
     let mut tool_evidence: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for entry in &mut entries {
         let mut effective = app.config_for_project(

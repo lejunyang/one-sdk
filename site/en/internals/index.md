@@ -26,6 +26,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 | Page | Focus |
 | --- | --- |
 | [Version resolution](./resolution) | Configuration discovery precedence, aliases, ranges, prereleases, and package-manager discovery |
+| [External project config bindings](./project-config) | External project bindings, root-id path identity, single-writer config/lock selection, and trust re-approval |
 | [Installation pipeline](./installation) | Concurrent orchestration, download, verification, extraction, commit, and failure cleanup |
 | [Activation, shims, and lockfiles](./activation-lockfile) | Hot-path resolution, reversible shell state, project trust, and platform-aware locks |
 | [Download sources and project registries](./sources-registries) | Two control planes, probe ranking, credential boundaries, and single-launch behavior |

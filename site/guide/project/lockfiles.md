@@ -96,6 +96,10 @@ osdk upgrade
 在特殊嵌套布局中，最近可读 lock 与项目配置决定的写入位置可能不同。建议把
 `osdk.toml` 与 `osdk.lock` 放在同一项目根目录。
 
+项目被[外置绑定](./external-config)时，配置与锁成套解析：外置项目的
+`osdk.lock` 读写都发生在 `<OSDK_CONFIG_DIR>/projects/<root-id>/` 下，不会写进
+项目目录。本地项目缺锁时不借外置项目的锁，外置项目缺锁时也不借本地锁。
+
 ## Schema 4
 
 ```toml

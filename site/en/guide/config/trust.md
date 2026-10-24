@@ -124,6 +124,13 @@ record intact; editing a governed key makes it `changed`, and moving the
 repository makes it `missing` or `unreachable`. Symlinks resolve to their real
 target. Records live in `$OSDK_CONFIG_DIR/trusted-configs.toml`.
 
+For external project configuration (see
+[External Project Configuration](../project/external-config)), the trusted object is
+still the real `osdk.toml` inside the external directory: approval binds that file's
+real path, project root, and governed content. After `osdk project relocate` moves
+a project root, the physical config path moves with it and the trust record must be
+re-approved with `osdk trust`; it never follows automatically.
+
 CI may set `OSDK_TRUSTED_CONFIG_PATHS` to an OS path-list of reviewed files or
 directories. Matching project files are trusted for that process without being
 written to the local store. `trust` and `untrust` themselves load only user

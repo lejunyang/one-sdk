@@ -38,6 +38,7 @@ const zhGuideSidebar: Item[] = [
   ]),
   group('项目工作流', zhGuide, [
     ['项目工具链', 'project/discovery'],
+    ['外置项目配置', 'project/external-config'],
     ['可复现锁文件', 'project/lockfiles'],
     ['项目任务', 'project/tasks'],
     ['应用依赖', 'project/deps'],
@@ -88,6 +89,7 @@ const zhInternalsSidebar: Item[] = [
   group('概览', zhInternals, [['实现总览', '']]),
   group('核心流程', zhInternals, [
     ['项目发现与版本解析', 'resolution'],
+    ['外置项目配置绑定', 'project-config'],
     ['安装管线与并发', 'installation'],
     ['Shim、激活与锁文件', 'activation-lockfile'],
     ['内容存储与原生缓存', 'storage-cache'],
@@ -138,6 +140,7 @@ const enGuideSidebar: Item[] = [
   ]),
   group('Project Workflows', enGuide, [
     ['Project Toolchains', 'project/discovery'],
+    ['External Project Configuration', 'project/external-config'],
     ['Reproducible Lockfiles', 'project/lockfiles'],
     ['Project Tasks', 'project/tasks'],
     ['Application Dependencies', 'project/deps'],
@@ -188,6 +191,7 @@ const enInternalsSidebar: Item[] = [
   group('Overview', enInternals, [['Implementation Overview', '']]),
   group('Core Flow', enInternals, [
     ['Project Discovery and Resolution', 'resolution'],
+    ['External Project Config Bindings', 'project-config'],
     ['Install Pipeline and Concurrency', 'installation'],
     ['Shims, Activation, and Lockfiles', 'activation-lockfile'],
     ['Content Store and Native Caches', 'storage-cache'],

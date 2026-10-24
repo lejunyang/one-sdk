@@ -27,6 +27,13 @@ Derived directories are:
 <cache>/pkg                  downstream tools' native caches
 ```
 
+The configuration directory also holds two derived states:
+`<config>/trusted-configs.toml` records project-configuration trust (see
+[Project Configuration Trust](./trust)), and
+`<config>/projects/<root-id>/` holds the `project.toml`, `osdk.toml`, and
+`osdk.lock` of each external project binding (see
+[External Project Configuration](../project/external-config)).
+
 `OSDK_BIN_DIR` belongs to the osdk executable installer; it is not an SDK state
 directory and must not be confused with `OSDK_INSTALL_DIR`.
 

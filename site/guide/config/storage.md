@@ -27,6 +27,10 @@ osdk 的状态都放在三个可覆盖的根目录下：数据、缓存和配置
 <cache>/pkg                  下游工具原生缓存
 ```
 
+配置目录下还有两类派生状态：`<config>/trusted-configs.toml` 保存项目配置的
+信任记录（见[项目配置信任](./trust)），`<config>/projects/<root-id>/` 保存外置
+项目绑定的 `project.toml`、`osdk.toml` 与 `osdk.lock`（见[外置项目配置](../project/external-config)）。
+
 `OSDK_BIN_DIR` 属于 osdk 二进制安装脚本，不是 SDK 状态目录；不要把它与
 `OSDK_INSTALL_DIR` 混用。
 

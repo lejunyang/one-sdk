@@ -64,6 +64,7 @@ GitHub Actions 中安装 osdk、恢复缓存并初始化项目环境时，读取
 | --- | --- |
 | `run` | [reference/run/guide.md](reference/run/guide.md)；Lua 直接读 [reference/run/lua.md](reference/run/lua.md) |
 | `task` | [reference/task/guide.md](reference/task/guide.md) |
+| `project` | [reference/project/guide.md](reference/project/guide.md) |
 | `deps` | [reference/deps/guide.md](reference/deps/guide.md) |
 
 ### 平台与生态工作流

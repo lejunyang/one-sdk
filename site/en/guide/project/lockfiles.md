@@ -111,6 +111,12 @@ In unusual nested layouts, the nearest readable lock and the project-determined
 write path can differ. Keep `osdk.toml` and `osdk.lock` together at the project
 root.
 
+When a project is bound as an [external project](./external-config), its
+configuration and lock resolve as one set: the external `osdk.lock` is read and
+written under `<OSDK_CONFIG_DIR>/projects/<root-id>/`, never inside the project
+directory. A local project with a missing lock does not borrow the external one,
+and vice versa.
+
 ## Schema 4
 
 ```toml

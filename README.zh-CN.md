@@ -14,6 +14,7 @@ osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时
 - 像管理开发工具一样管理 Hugging Face、ModelScope 和精确 Civitai LoRA 版本快照；
 - 检查 Docker、containerd、Buildx、OCI Registry、mirror 测速/计划与原生缓存，并按需
   安全应用 mirror 配置、直接拉取镜像或确认严格限定范围的原生清理；
+- 把只读或第三方目录绑定为 osdk 项目，配置与锁集中存放在你自己的配置目录，不改动项目文件；
 - 使用中文或英文查看存储、缓存、生效版本和环境诊断。
 
 从[快速上手](site/guide/start/quick-start.md)开始，或浏览按功能分组的
@@ -189,6 +190,27 @@ osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 
 指南：[项目工具链](site/guide/config/files.md) ·
 [锁文件与环境复现](site/guide/project/lockfiles.md)
+
+## 场景：不改动项目目录也能管理项目
+
+有些目录不能随便改——只读检出的第三方仓库，或者你希望把配置集中托管在自己
+配置目录里的项目。把目录绑定为外置项目即可：osdk 把 `osdk.toml` 与
+`osdk.lock` 存在 `$OSDK_CONFIG_DIR/projects/` 下，命令从当前目录向上查找时
+自动命中。
+
+```bash
+osdk project add ~/repos/third-party-app  # 精确绑定该目录，不猜 Git 根
+osdk project show .                        # 该目录实际走哪份配置
+osdk use node@20                           # 写进外置配置与锁
+osdk project list                          # 全部绑定及其状态
+osdk project remove ~/tmp/checkout --dry-run
+```
+
+被绑定的目录仍是逻辑项目根：任务与 deps 照常解析并写到那里，工具配置则
+留在项目之外。同一根上的本地 `osdk.toml` 永远优先于外置配置。移动或删除
+绑定时只保留或删除外置目录本身——项目文件与共享工具安装都不受影响。
+
+指南：[外置项目配置](site/guide/project/external-config.md)
 
 ## 场景：用项目任务替代 Makefile
 
@@ -1001,7 +1023,8 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - 基本使用：[安装、切换与查询](site/guide/basics/commands.md) ·
   [Shell 激活与补全](site/guide/basics/shell.md) ·
   [控制哪些命令进 PATH](site/guide/basics/path-control.md)
-- 项目：[项目工具链](site/guide/project/discovery.md) · [锁文件](site/guide/project/lockfiles.md) ·
+- 项目：[项目工具链](site/guide/project/discovery.md) · [外置项目配置](site/guide/project/external-config.md) ·
+  [锁文件](site/guide/project/lockfiles.md) ·
   [项目任务](site/guide/project/tasks.md) · [应用依赖](site/guide/project/deps.md) ·
   [GitHub Actions](site/guide/project/github-actions.md)
 - 运行时：[总览](site/guide/runtimes/overview.md) · [Node.js](site/guide/runtimes/node.md) ·

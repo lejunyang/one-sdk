@@ -10,6 +10,7 @@ mod lockfile;
 mod model_output;
 mod model_view;
 mod pkg;
+mod project_cmd;
 mod prompt;
 mod proxy_diag;
 mod skills_cmd;
@@ -405,6 +406,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Pkg { command } => pkg::run(app, command).await,
         Command::SelfCmd { command } => commands::self_command(app, command).await,
         Command::Prune { dry_run } => commands::prune(app, dry_run),
+        Command::Project { command } => project_cmd::run(app, command),
         Command::Doctor { verify, tool } => commands::doctor(app, verify, tool),
     };
     result.map(|()| None)

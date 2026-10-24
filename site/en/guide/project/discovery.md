@@ -2,6 +2,11 @@
 
 osdk looks upward from the current directory for version declarations and understands each ecosystem's native version files. This page covers where the active version comes from and in what order, and how npm tools fit into a Node project. See [Configuration Files](../config/files) for the complete schema.
 
+If you do not want to write `osdk.toml` into the project directory, a directory can
+instead be bound as an **external project**: its configuration and lock live under
+osdk's configuration directory, with the same discovery rules as this page. See
+[External Project Configuration](./external-config).
+
 ## Project version discovery
 
 Active-version sources use this type-first priority. Within each type, osdk
