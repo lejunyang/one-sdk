@@ -29,21 +29,37 @@ fn schema() -> u32 {
     1
 }
 
+/// Locate the project configuration that applies to `start`, honouring both
+/// checked-in files and external project bindings. Returns the physical config
+/// file path that trust must cover.
 pub fn project_config(start: &Path) -> Result<Option<PathBuf>> {
+    let Ok(dirs) = crate::dirs::Dirs::resolve() else {
+        return Ok(project_config_local(start));
+    };
+    project_config_with_config_dir(start, &dirs.config)
+}
+
+/// Like [`project_config`], with the config directory supplied explicitly so
+/// callers that already resolved [`crate::dirs::Dirs`] do not re-resolve it.
+pub fn project_config_with_config_dir(start: &Path, config_dir: &Path) -> Result<Option<PathBuf>> {
     let start = if start.is_file() {
         start.parent().unwrap_or(start)
     } else {
         start
     };
+    Ok(crate::project::discover(start, config_dir)?.map(|ctx| ctx.config_path))
+}
+
+fn project_config_local(start: &Path) -> Option<PathBuf> {
     for directory in start.ancestors() {
         for name in PROJECT_CONFIG_NAMES {
             let candidate = directory.join(name);
             if candidate.is_file() {
-                return Ok(Some(candidate));
+                return Some(candidate);
             }
         }
     }
-    Ok(None)
+    None
 }
 
 pub fn resolve_config(path: Option<&Path>, cwd: &Path) -> Result<PathBuf> {

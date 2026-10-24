@@ -54,7 +54,10 @@ pub mod package_sources;
 pub mod persistent_env;
 pub mod pipeline;
 pub mod platform;
+// External project bindings are discovered by the shim on every dispatch, so
+// this module must stay available without the install feature.
 pub mod process;
+pub mod project;
 // Project package-source preflight is shared by exec, deps and the uv shim.
 // This module uses the same HTTP dependencies already needed by npm preflight;
 // SDK/tool installation remains behind the install feature.

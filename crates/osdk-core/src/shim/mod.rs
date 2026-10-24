@@ -1813,6 +1813,8 @@ mod tests {
                 global_config_path: None,
                 tool_aliases: Default::default(),
                 project_config_path: None,
+                project_root: None,
+                project: None,
                 excluded_tools: Default::default(),
                 ..Default::default()
             },
@@ -2161,6 +2163,8 @@ mod tests {
                 global_config_path: None,
                 tool_aliases: Default::default(),
                 project_config_path: None,
+                project_root: None,
+                project: None,
                 excluded_tools: Default::default(),
                 ..Default::default()
             },
@@ -2759,6 +2763,8 @@ mod tests {
                 global_config_path: None,
                 tool_aliases: Default::default(),
                 project_config_path: None,
+                project_root: None,
+                project: None,
                 excluded_tools: Default::default(),
                 // Gated exactly like the field: `tasks` is behind the `install`
                 // feature so the shim's build never carries task parsing.

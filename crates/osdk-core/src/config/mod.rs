@@ -41,6 +41,15 @@ pub struct Config {
     pub tool_aliases: BTreeMap<String, BTreeMap<String, String>>,
     /// Path of the nearest discovered project config, if any.
     pub project_config_path: Option<PathBuf>,
+    /// The real project root the selected config belongs to. Identical to
+    /// `project_config_path.parent()` for a checked-in config; differs for an
+    /// external binding, whose config file lives outside the project tree.
+    /// Tasks, deps and resource relative paths anchor here.
+    pub project_root: Option<PathBuf>,
+    /// The full discovery result behind `project_config_path`, when one was
+    /// found. Kept so callers can tell the local/external sources apart and use
+    /// the lock that belongs to the selected source.
+    pub project: Option<crate::project::ProjectContext>,
     /// Project tasks, merged and platform-filtered.
     ///
     /// Behind `install` for the same reason as the module: the shim dispatches
@@ -1967,6 +1976,8 @@ impl Default for Config {
             #[cfg(feature = "install")]
             deps: DepsConfig::default(),
             project_config_path: None,
+            project_root: None,
+            project: None,
             excluded_tools: BTreeMap::new(),
         }
     }
@@ -2085,19 +2096,27 @@ impl Config {
             if let Some(config) = file.task {
                 self.tasks.apply_config(config);
             }
-            let base = origin.and_then(Path::parent);
+            // Relative task paths anchor at the real project root. For a
+            // checked-in config that is the config file's own directory; for
+            // an external binding the config lives outside the tree, so the
+            // recorded real root is what makes `dir = "apps/api"` and script
+            // discovery resolve where the project actually is.
+            let base = self
+                .project_root
+                .clone()
+                .or_else(|| origin.and_then(Path::parent).map(Path::to_path_buf));
             // Scripts first, so a `[tasks]` entry of the same name wins: the
             // TOML is the more specific statement, and a file appearing in the
             // directory should not quietly shadow it.
-            if let Some(base) = base {
+            if let Some(base) = &base {
                 self.tasks
                     .apply_files(&crate::tasks::files::discover(base, &includes)?);
             }
-            self.tasks.apply_from(file.tasks, base)?;
+            self.tasks.apply_from(file.tasks, base.as_deref())?;
 
             // Sub-projects named by `[task].roots`. After the layer's own
             // `[task]`, because that is what states the roots.
-            if let Some(base) = base {
+            if let Some(base) = &base {
                 self.apply_rooted_tasks(base)?;
             }
         }
@@ -2589,7 +2608,27 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
     }
 
     if let Some(start_dir) = start_dir {
-        if let Some((path, file)) = find_project_config(start_dir)? {
+        let config_dir = user_config_file.parent().map(Path::to_path_buf);
+        let discovered = match config_dir.as_deref() {
+            Some(dir) => crate::project::discover(start_dir, dir)?,
+            None => find_project_config(start_dir)?.map(|(path, _)| {
+                // No config directory is resolvable: behave exactly like the
+                // legacy local-only walk.
+                let root = path
+                    .parent()
+                    .map(|dir| dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()))
+                    .unwrap_or_else(|| start_dir.to_path_buf());
+                crate::project::ProjectContext {
+                    lock_path: root.join("osdk.lock"),
+                    root,
+                    config_path: path,
+                    source: crate::project::ProjectSource::Local,
+                }
+            }),
+        };
+        if let Some(ctx) = discovered {
+            let path = ctx.config_path.clone();
+            let file = read_config_file(&path)?;
             let sources = inheritance::sources(&path)?;
             let canonical_leaf = path
                 .canonicalize()
@@ -2621,9 +2660,13 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
             {
                 inheritance::merge(&mut precedence, overlay.clone());
             }
+            // Set the real root before applying so task relative paths anchor at
+            // the project, not at the (possibly external) config directory.
+            cfg.project_root = Some(ctx.root.clone());
             cfg.apply_file(file, false, sources.first().map(PathBuf::as_path))?;
             cfg.settings.precedence = precedence.try_into().map_err(sanitize_config_parse_error)?;
             cfg.project_config_path = Some(path);
+            cfg.project = Some(ctx);
         }
         if let Some((path, tv)) = find_tool_versions(start_dir)? {
             for (tool, version) in tv {
