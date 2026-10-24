@@ -453,7 +453,11 @@ fn system_source_remaining_adapters_probe_native_version_formats() {
         ("npm", "10.1.0"),
         ("yarn", "4.2.0"),
     ] {
-        write_executable(&bin.join(tool), &format!("#!/bin/sh\ncase \"$1\" in --version|version) echo '{version}' ;; *) echo 'SELECTED_{tool}' ;; esac\n"));
+        let expected_flag = match tool {
+            "go" | "zig" => "version",
+            _ => "--version",
+        };
+        write_executable(&bin.join(tool), &format!("#!/bin/sh\n[ \"$#\" -eq 1 ] || exit 72\ncase \"$1\" in {expected_flag}) echo '{version}' ;; fixture) echo 'SELECTED_{tool}' ;; *) echo 'wrong probe argument' >&2; exit 73 ;; esac\n"));
         write_executable(&bin.join("node"), "#!/bin/sh\necho v22.3.0\n");
         let output = run_isolated_in_with_env(
             root,

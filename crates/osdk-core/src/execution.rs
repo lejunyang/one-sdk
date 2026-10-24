@@ -379,7 +379,7 @@ impl SystemTarget {
         let path = self.command(ctx, &self.tool)?;
         let flag = if self.tool == "java" {
             "-version"
-        } else if self.tool == "go" {
+        } else if matches!(self.tool.as_str(), "go" | "zig") {
             "version"
         } else {
             "--version"

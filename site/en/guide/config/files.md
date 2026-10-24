@@ -411,7 +411,7 @@ Changing `tool_conflicts` to `"error"` rejects the incompatible `20` and `22` de
 
 There is no `env` source kind and no universal `OSDK_<TOOL>_VERSION` override: `OSDK_NODE_VERSION` and `OSDK_PYTHON_VERSION` are not implemented. `CLI > OSDK_* > project` applies only to implemented settings. Existing PATH/home tools use the separate opt-in [`system` execution source](#system-tools). Without that opt-in, a shim with no selected version still errors.
 
-Every row below also supports `osdk`, `global`, and `.tool-versions` for its backend key. A file's presence does not automatically request installation of its tool; this table describes version selection when that tool is requested or activated.
+Every row below also supports `osdk`, `global`, and `.tool-versions` for its backend key. Only tools explicitly marked `system` in the additional-values column support that source, and it must be enabled explicitly. A file's presence does not automatically request installation of its tool; this table describes version selection when that tool is requested or activated.
 
 | Tool / backend key | Additional applicable `tool_order` values | Files within `idiomatic`, in priority order |
 | --- | --- | --- |
@@ -506,7 +506,7 @@ tool_order = [
 | Go | `GOROOT/bin` | `go`; stable `go version goMAJOR.MINOR[.PATCH]` |
 | Java | `JAVA_HOME/bin` | `java`; numeric Java version, JDK with `javac` required; companions come from that JDK, not a different alternatives link |
 | npm, pnpm, Yarn | None | Corresponding command; semver output; Node runtime selected through the same policy |
-| Bun, Deno, Zig | None | Corresponding command; stable semver output (Deno's native banner is recognized) |
+| Bun, Deno, Zig | None | Corresponding command; stable semver output (Deno's native banner is recognized); Zig probes with `zig version`, Bun/Deno with `--version` |
 
 Only these adapters participate. Rust/rustup, Maven, Gradle, Kotlin, uv, dynamic package tools and plugin backends have no system adapter. `PNPM_HOME`, `NVM_DIR`, cache variables and other homes do not become selectors. Existing unrelated environment/cache policies remain intact; `override_env` is not a selection switch. Before external execution, osdk also restores its own activation-injected forced location variables (for example `PNPM_HOME`, `npm_config_prefix`, `BUN_INSTALL`) to the saved user value or absence. This restoration does not make them selection sources. For Python venv-first or JDK-first selection, set the ordinary `VIRTUAL_ENV` or `JAVA_HOME`, then use `tool_order=["system"]`; do not add new osdk version variables. For mixed managed pnpm and external Node, use `osdk exec -t pnpm@10.15.0 -- pnpm --version`: the explicit manager stays managed while the implicit Node follows the policy.
 

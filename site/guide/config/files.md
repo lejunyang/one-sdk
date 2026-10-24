@@ -374,7 +374,7 @@ tool_conflicts = "prefer"
 
 没有 `env` 来源类型，也没有通用 `OSDK_<TOOL>_VERSION` 覆盖：`OSDK_NODE_VERSION`、`OSDK_PYTHON_VERSION` 均未实现。`CLI > OSDK_* > 项目` 只适用于已实现的设置。机器上已有的 PATH/home 工具通过单独、需主动启用的 [`system` 执行来源](#system-tools) 选择；未启用时，shim 未选中版本仍会报错。
 
-下表每一行还支持 `system`（需主动启用）、`osdk`、`global`、`.tool-versions`，按该工具的 backend 键匹配。存在版本文件不等于自动请求安装该工具；本表说明请求或激活该工具时如何选择版本。
+下表每一行还支持 `osdk`、`global`、`.tool-versions`，按该工具的 backend 键匹配。只有在“额外适用”列明确标注 `system` 的工具支持该来源，且必须主动启用。存在版本文件不等于自动请求安装该工具；本表说明请求或激活该工具时如何选择版本。
 
 | 工具 / backend 键 | 额外适用的 `tool_order` 值 | `idiomatic` 内的文件，按优先级排列 |
 | --- | --- | --- |
@@ -469,7 +469,7 @@ tool_order = [
 | Go | `GOROOT/bin` | `go`；稳定版 `go version goMAJOR.MINOR[.PATCH]` |
 | Java | `JAVA_HOME/bin` | `java`；数字 Java 版本，必须是带 `javac` 的 JDK；伴随命令来自同一 JDK，不走另一条 alternatives 链接 |
 | npm、pnpm、Yarn | 无 | 同名命令，semver 输出；Node 运行时由同一策略选择 |
-| Bun、Deno、Zig | 无 | 同名命令，稳定 semver 输出（识别 Deno 原生 banner） |
+| Bun、Deno、Zig | 无 | 同名命令，稳定 semver 输出（识别 Deno 原生 banner）；Zig 使用 `zig version` 探测，Bun/Deno 使用 `--version` |
 
 只有这些适配器参与。Rust/rustup、Maven、Gradle、Kotlin、uv、动态包工具和插件 backend 没有 system 适配器。`PNPM_HOME`、`NVM_DIR`、缓存变量及其他 home 不会成为选择器。现有的无关环境/缓存变量策略不变；`override_env` 不是选择开关。 外部执行前，osdk 也将 activation 注入的强制位置变量（如 `PNPM_HOME`、`npm_config_prefix`、`BUN_INSTALL`）恢复为保存的用户原值或原本未设置状态；这不会让它们变成选择来源。Python venv 或 JDK 优先时，设置普通 `VIRTUAL_ENV` 或 `JAVA_HOME`，再用 `tool_order=["system"]`，无需新增 osdk 版本变量。要混用托管 pnpm 与外部 Node，可用 `osdk exec -t pnpm@10.15.0 -- pnpm --version`：显式管理器保持托管，隐式 Node 按策略选择。
 

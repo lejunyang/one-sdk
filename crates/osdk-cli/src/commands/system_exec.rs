@@ -74,8 +74,8 @@ pub(super) async fn try_exec(
     if managed.iter().any(|r| r.backend.contains(':')) {
         anyhow::bail!("mixed system execution with dynamic package tools is unsupported; use explicit managed runtime versions for their recorded installation contracts");
     }
-    // Verification precedes all installation and user execution. Manager
-    // version probes use the selected external Node when available.
+    // Verify standalone runtimes before installation. Manager version probes
+    // run below once their selected Node runtime is available.
     let mut env = BTreeMap::new();
     env.insert(
         "PATH".into(),
