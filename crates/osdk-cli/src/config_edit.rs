@@ -168,7 +168,11 @@ pub(crate) fn set_global_tool_unlocked(ctx: &Ctx, tool: &str, spec: &str) -> Res
 /// the current dir if none exists. Returns the file path written.
 pub fn set_project_tool(tool: &str, spec: &str) -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
+    let path = match osdk_core::project::discover(&cwd, &osdk_core::dirs::Dirs::resolve()?.config)?
+    {
+        Some(ctx) if ctx.is_external() => ctx.config_path,
+        _ => find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml")),
+    };
     edit_tool_version(&path, tool, spec)?;
     Ok(path)
 }
@@ -232,7 +236,11 @@ pub(crate) fn remove_global_tool_unlocked(ctx: &Ctx, tool: &str) -> Result<bool>
 #[allow(dead_code)]
 pub fn set_project_tool_config(tool: &str, config: &StructuredToolConfig) -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
+    let path = match osdk_core::project::discover(&cwd, &osdk_core::dirs::Dirs::resolve()?.config)?
+    {
+        Some(ctx) if ctx.is_external() => ctx.config_path,
+        _ => find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml")),
+    };
     edit_tool_config(&path, tool, config)?;
     Ok(path)
 }

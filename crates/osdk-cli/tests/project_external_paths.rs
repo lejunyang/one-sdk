@@ -290,14 +290,28 @@ fn shim_forwards_to_installed_tool_under_external_binding() {
         .status
         .success());
 
-    // Fake installed tool: OSDK_INSTALL_DIR/node/1.0.0/{node.cmd,.osdk-complete}.
+    // Fake installed tool: OSDK_INSTALL_DIR/node/1.0.0/<launcher> + .osdk-complete.
     let install = root.join("installs").join("node").join("1.0.0");
     std::fs::create_dir_all(&install).unwrap();
-    std::fs::write(
-        install.join("node.cmd"),
-        "@echo off\necho MARKER_OK\nexit /b 7\r\n",
-    )
-    .unwrap();
+    let launcher = if cfg!(windows) {
+        let script = "@echo off\necho MARKER_OK\nexit /b 7\r\n";
+        std::fs::write(install.join("node.cmd"), script).unwrap();
+        "node.cmd"
+    } else {
+        let script = "#!/bin/sh\necho MARKER_OK\nexit 7\n";
+        std::fs::write(install.join("node"), script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(install.join("node"))
+                .unwrap()
+                .permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(install.join("node"), p).unwrap();
+        }
+        "node"
+    };
+    let _ = launcher;
     std::fs::write(install.join(".osdk-complete"), "").unwrap();
 
     // Pin node=1.0.0 in the BUNDLE config (external binding), proving the shim
@@ -314,7 +328,11 @@ fn shim_forwards_to_installed_tool_under_external_binding() {
     let shim_exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_osdk"))
         .parent()
         .unwrap()
-        .join("osdk-shim.exe");
+        .join(if cfg!(windows) {
+            "osdk-shim.exe"
+        } else {
+            "osdk-shim"
+        });
     let out = std::process::Command::new(&shim_exe)
         .env("OSDK_CONFIG_DIR", root.join("config"))
         .env("OSDK_DATA_DIR", root.join("data"))
@@ -380,5 +398,66 @@ fn shim_forwards_to_installed_tool_under_external_binding() {
     assert!(
         out_sh.contains("MARKER_OK"),
         "stdout unchanged by warning: {out_sh}"
+    );
+}
+
+#[test]
+fn external_use_persists_in_bundle_not_project_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("real-proj");
+    std::fs::create_dir_all(&project).unwrap();
+    assert!(isolated(root)
+        .arg("project")
+        .arg("add")
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    // Fake installed node 1.0.0 so `use node@1.0.0` needs no network.
+    let install = root.join("installs").join("node").join("1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    let bin = install.join(if cfg!(windows) { "node.cmd" } else { "node" });
+    std::fs::write(
+        &bin,
+        if cfg!(windows) {
+            "@echo off\nexit /b 0\r\n"
+        } else {
+            "#!/bin/sh\nexit 0\n"
+        },
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::fs::metadata(&bin).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&bin, p).unwrap();
+    }
+    std::fs::write(install.join(".osdk-complete"), "").unwrap();
+
+    let out = isolated(root)
+        .arg("use")
+        .arg("node@1.0.0")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "use must exit 0: {:?}", out);
+
+    // Pin landed in the bundle, not a shadow local file.
+    let bundle = std::fs::read_dir(root.join("config").join("projects"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .unwrap();
+    let text = std::fs::read_to_string(bundle.join("osdk.toml")).unwrap();
+    assert!(text.contains("node"), "bundle must pin node: {text}");
+    assert!(
+        !project.join("osdk.toml").exists(),
+        "must not create a shadow local osdk.toml"
     );
 }

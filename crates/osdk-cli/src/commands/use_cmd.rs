@@ -121,8 +121,6 @@ fn use_project_npm_is_eligible(app: &App, global: bool, backend: &str) -> bool {
 
 #[cfg(test)]
 mod npm_project_gate_tests {
-    use super::use_project_npm_is_eligible;
-
     #[test]
     fn external_binding_never_selects_native_project_installer() {
         // Construct the decision purely from the booleans the gate reads:

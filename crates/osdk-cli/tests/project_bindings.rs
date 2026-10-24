@@ -295,6 +295,7 @@ fn concurrent_add_same_project_leaves_one_bundle() {
 }
 
 #[test]
+#[cfg(windows)]
 fn bind_via_junction_resolves_to_target_canonical_root() {
     let temp = tempfile::tempdir().unwrap();
     let real = temp.path().join("real-project");
