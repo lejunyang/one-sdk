@@ -298,16 +298,16 @@ fn shim_forwards_to_installed_tool_under_external_binding() {
         std::fs::write(install.join("node.cmd"), script).unwrap();
         "node.cmd"
     } else {
+        let bin = install.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
         let script = "#!/bin/sh\necho MARKER_OK\nexit 7\n";
-        std::fs::write(install.join("node"), script).unwrap();
+        std::fs::write(bin.join("node"), script).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut p = std::fs::metadata(install.join("node"))
-                .unwrap()
-                .permissions();
+            let mut p = std::fs::metadata(bin.join("node")).unwrap().permissions();
             p.set_mode(0o755);
-            std::fs::set_permissions(install.join("node"), p).unwrap();
+            std::fs::set_permissions(bin.join("node"), p).unwrap();
         }
         "node"
     };
@@ -419,8 +419,16 @@ fn external_use_persists_in_bundle_not_project_tree() {
 
     // Fake installed node 1.0.0 so `use node@1.0.0` needs no network.
     let install = root.join("installs").join("node").join("1.0.0");
-    std::fs::create_dir_all(&install).unwrap();
-    let bin = install.join(if cfg!(windows) { "node.cmd" } else { "node" });
+    if cfg!(windows) {
+        std::fs::create_dir_all(&install).unwrap();
+    } else {
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+    }
+    let bin = install.join(if cfg!(windows) {
+        "node.cmd"
+    } else {
+        "bin/node"
+    });
     std::fs::write(
         &bin,
         if cfg!(windows) {
