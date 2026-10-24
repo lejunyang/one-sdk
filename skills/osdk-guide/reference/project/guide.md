@@ -17,7 +17,7 @@ osdk project add .                  # 绑定当前目录
 osdk project add C:\repos\frontend  # 精确绑定，不向上猜 Git 根
 osdk project show .                 # 这个目录实际走哪份配置/锁
 osdk project show . --json          # 含全部状态字段
-osdk project list                   # 纯文本：根 + config:/lock:
+osdk project list                   # 纯文本：根 + source/status/config:/lock:
 osdk project list --json            # 数组，含 root_exists/config_exists/shadowed_by_local
 osdk project relocate ~/old ~/new --dry-run
 osdk project remove ~/tmp/checkout --dry-run
@@ -28,8 +28,8 @@ osdk project remove ~/tmp/checkout
 
 - 从 cwd 逐祖先向上：最近项目胜出；同一项目根本地 `osdk.toml` /
   `.osdk.toml` 优先于外置配置；近的外置子项目可胜远的本地父项目。
-- 配置与锁成套选择：本地缺锁不借外置锁，外置缺锁在外置目录内生成；
-  选中配置损坏直接报错，不回退；shadowed 的外置正文不读。
+- 配置与锁成套选择：绑定出生即带最小合法锁；日后锁缺失按当前来源在同目录
+  重建，绝不跨来源借锁；选中配置损坏直接报错，不回退；shadowed 的外置正文不读。
 - `current` / `where` / `exec` / shim / shell hook / `use` / `config` /
   `source` 共用这套解析；`--global` 仍是用户全局默认，与绑定无关。
 
