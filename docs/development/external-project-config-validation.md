@@ -52,24 +52,25 @@ result, and its log.
   the tool in the bundle, leaves no `osdk.toml` in the project, no
   `node_modules`, and byte-identical `package.json` / native lock. Commit
   `2fb869d`; fixture script
-  `<agent-logs>\fixture-use2.ps1`; successful run output not independently
-  saved.
+  `C:\Users\LJY\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38449122744973826\agents\s_000pVP0Ycc3\fixture-use2.ps1`;
+  successful run output not independently saved.
 - VitePress production build: `osdk run site` green (33.73 s, bilingual new
-  pages rendered).
+  pages rendered). Commit and raw log not captured; observation-only.
 
 ## Gates run on this machine
 
-- `cargo fmt --check` at `5495518`: exit 0.
+- `cargo fmt --check` at `5495518`: exit 0. No raw log saved; observation-only.
 - `cargo clippy --workspace --all-targets -- -D warnings` at `5495518`: exit 0.
+  No raw log saved; observation-only.
 
 ## Metrics
 
-- Release binary size (bytes) at `2fb869d`: CLI 14,766,080; shim 3,982,848.
-  Build commit for these exact bytes not separately traced.
+- Release binary size (bytes): CLI 14,766,080 at `2fb869d`; shim 3,982,848 —
+  exact build commit for the shim bytes not captured.
 - Clean-startup numbers 28.6 → 27.4 ms (hook-env) and 15.6 → 15.3 ms
-  (`shim --version`) were measured on rebuilt `E:\final` binaries at
-  `2fb869d`; the measured commit of the final binaries is not recorded. These
-  measure bare process launch, not real forwarding.
+  (`shim --version`) were measured on `E:\final` binaries rebuilt **before**
+  `2fb869d`; exact measurement commit not captured, not re-run on the final
+  code. These measure bare process launch, not real forwarding.
 - Benchmark: `cargo bench -p osdk-core --bench interactive_latency -- --nocapture`
   at base `249306fa` vs final `2fb869d`. Raw logs:
   `C:\Users\LJY\AppData\Local\Temp\bench-base.txt`,
@@ -81,17 +82,20 @@ result, and its log.
 
 ## Known baseline failures (Windows native; identical at `249306fa` and `2fb869d`)
 
+Logs root: `C:\Users\LJY\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38449122744973826\agents\s_000pVP0Ycc3\logs\`.
+
 - `osdk-core` package_registry: 5 failures.
-  Final log: `C:\Users\LJY\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38449122744973826\agents\s_000pVP0Ycc3\logs\final-core-reg.log`.
-  Base log: `...\base-core-reg.log`.
+  Final: `...\logs\final-core-reg.log`. Base: `...\logs\base-core-reg.log`.
 - `osdk-core` package_sources: 3 failures.
-  Final log: `...\logs\final-core-src.log`. Base log: `...\base-core-src.log`.
+  Final: `...\logs\final-core-src.log`. Base: `...\logs\base-core-src.log`.
 - `isolated_cli::github_action_windows_helpers_complete_the_ci_contract`: 1 fail.
-  Final log: `...\logs\final-gha.log`. Base log: `...\base-gha.log`.
+  Final: `...\logs\final-gha.log`. Base: `...\logs\base-gha.log`.
 
 Root cause not yet localised. These reproduce identically at the base commit;
 this work has not verified that every unrelated issue is absent.
 
-Note: logs under `C:\Temp\` are in the system temp directory and are not
-archived; they are not guaranteed to persist. Checks with no saved raw output
-are described as observation-time notes, not log-backed evidence.
+Note: logs under `C:\Temp\` and `C:\Users\LJY\AppData\Local\Temp\` are in
+system temp directories, and the six workspace/baseline logs above are retained
+locally in the agent session dir — none are committed to the repo as a permanent
+archive. Checks with no saved raw output are observation-time notes, not
+log-backed evidence.
