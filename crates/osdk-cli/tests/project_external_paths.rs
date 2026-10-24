@@ -273,3 +273,67 @@ fn project_scoped_config_set_writes_bundle_not_project_tree() {
         "must not create a local osdk.toml that shadows the bundle"
     );
 }
+
+#[test]
+fn shim_forwards_to_installed_tool_under_external_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("real-proj");
+    std::fs::create_dir_all(&project).unwrap();
+    assert!(isolated(root)
+        .arg("project")
+        .arg("add")
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    // Fake installed tool: OSDK_INSTALL_DIR/node/1.0.0/{node.cmd,.osdk-complete}.
+    let install = root.join("installs").join("node").join("1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(
+        install.join("node.cmd"),
+        "@echo off\necho MARKER_OK\nexit /b 7\r\n",
+    )
+    .unwrap();
+    std::fs::write(install.join(".osdk-complete"), "").unwrap();
+
+    // Pin node=1.0.0 in the BUNDLE config (external binding), proving the shim
+    // reads the external context rather than a project-local osdk.toml.
+    let bundle = std::fs::read_dir(root.join("config").join("projects"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .unwrap();
+    std::fs::write(bundle.join("osdk.toml"), "[tools]\nnode = \"1.0.0\"\n").unwrap();
+    assert!(!project.join("osdk.toml").exists());
+
+    let shim_exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_osdk"))
+        .parent()
+        .unwrap()
+        .join("osdk-shim.exe");
+    let out = std::process::Command::new(&shim_exe)
+        .env("OSDK_CONFIG_DIR", root.join("config"))
+        .env("OSDK_DATA_DIR", root.join("data"))
+        .env("OSDK_CACHE_DIR", root.join("cache"))
+        .env("OSDK_STORE_DIR", root.join("store"))
+        .env("OSDK_INSTALL_DIR", root.join("installs"))
+        .arg("node")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "shim must forward the tool's exit code"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("MARKER_OK"),
+        "shim must forward the tool's stdout: {stdout}"
+    );
+}
