@@ -353,3 +353,7 @@ The complete enum and tool applicability matrix now live in [Tool Selection](./t
 ### Existing system tools {#system-tools}
 
 See [system selection and limits](./tool-selection#system-tools) and [per-tool environment behavior](./tool-environment).
+
+### Examples: Node, Python and JavaScript managers
+
+See the [Node, Python and manager examples](./tool-selection#examples-node-python-and-javascript-managers) in Tool Selection.

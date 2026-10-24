@@ -320,3 +320,7 @@ jobs = 2
 ### 机器上已有的系统工具 {#system-tools}
 
 参见[system 选择与限制](./tool-selection#system-tools)和[各工具环境变量行为](./tool-environment)。
+
+### 示例：Node、Python 与 JavaScript 管理器
+
+参见工具选择中的 [Node、Python 与管理器示例](./tool-selection#示例-node、python-与-javascript-管理器)。

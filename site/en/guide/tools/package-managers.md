@@ -87,7 +87,7 @@ npm, pnpm, and Yarn use the shared [configurable declaration precedence](../conf
 }
 ```
 
-Here `packageManager` wins by default, and its exact version is compatible with the devEngines range under `tool_conflicts="error"`. Giving devEngines higher priority instead selects its range; the declarations are not intersected into a new request. See the [Node, Python and manager examples](../config/files#examples-node-python-and-javascript-managers).
+Here `packageManager` wins by default, and its exact version is compatible with the devEngines range under `tool_conflicts="error"`. Giving devEngines higher priority instead selects its range; the declarations are not intersected into a new request. See the [Node, Python and manager examples](../config/tool-selection#examples-node-python-and-javascript-managers).
 
 Automatic manager discovery supports npm/pnpm/Yarn, and rejects unsupported identities such as Bun/Deno; those tools remain installable explicitly. When resolving a specific manager, declarations belonging to another manager are ignored without interpreting their version or integrity values. No-argument `install`/`lock`/`upgrade` can add the discovered manager and Node; `current` reports the selected source. Resolved exact versions are recorded in `osdk.lock`.
 
@@ -303,7 +303,7 @@ Move defaults to `registries.npm.default` or `registries.python.default`. Use `r
 For a local exception, use `deps.uv.registries.python.default = "https://example.org/simple/"`.
 Unknown fields fail normally, including invented generic Cargo/Deno source fields.
 
-## Package-source precedence
+## Package-source precedence {#configurable-declaration-precedence}
 
 Tool version order, its complete enum and per-tool matrix are maintained in [Tool Selection](../config/tool-selection). Use `osdk current pnpm --sources` to inspect the current project; see [Tool Environments](../config/tool-environment) for environment selectors and cache overrides.
 

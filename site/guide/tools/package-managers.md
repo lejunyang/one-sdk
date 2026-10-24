@@ -80,7 +80,7 @@ npm、pnpm、Yarn 使用共用的[可配置声明优先级](../config/files#可�
 }
 ```
 
-此例默认选择 `packageManager`，其精确版本满足 devEngines 范围，因此在 `tool_conflicts="error"` 下也兼容。若提升 devEngines 优先级，则选择其范围；不会将多条声明求交成新请求。另见 [Node、Python 与管理器示例](../config/files#示例-node、python-与-javascript-管理器)。
+此例默认选择 `packageManager`，其精确版本满足 devEngines 范围，因此在 `tool_conflicts="error"` 下也兼容。若提升 devEngines 优先级，则选择其范围；不会将多条声明求交成新请求。另见 [Node、Python 与管理器示例](../config/tool-selection#示例-node、python-与-javascript-管理器)。
 
 自动管理器发现支持 npm/pnpm/Yarn，遇到 Bun/Deno 等不支持的身份会报错；这些工具仍可显式安装。解析指定管理器时，其他管理器的声明以 ignored 记录，不解释其版本或完整性值。无参数 `install`/`lock`/`upgrade` 可以加入发现的管理器和 Node；`current` 报告选择来源。解析出的精确版本记录在 `osdk.lock` 中。
 
@@ -280,7 +280,7 @@ proxy = "https://proxy.golang.org,direct"
 项目局部例外可写成 `deps.uv.registries.python.default = "https://example.org/simple/"`。
 未知字段正常报错，不能静默接受 Cargo/Deno 的虚构通用源字段。
 
-## 项目包来源优先级
+## 项目包来源优先级 {#可配置的声明优先级}
 
 工具版本顺序、完整枚举与各工具适用矩阵统一维护在[工具选择](../config/tool-selection)。用 `osdk current pnpm --sources` 检查当前项目；环境选择器与缓存覆盖见[工具环境变量](../config/tool-environment)。
 

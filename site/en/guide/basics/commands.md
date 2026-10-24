@@ -106,7 +106,7 @@ process. It neither changes project pins nor reads the lock.
 **Without `@`, the operand inherits the pin in effect.** `-t java` means "the Java
 this project selected": osdk walks up for `osdk.toml`, `.tool-versions` and the
 idiomatic version files following the
-[working-directory precedence](../../internals/resolution#working-directory-precedence).
+[working-directory precedence](../config/tool-selection#configurable-declaration-precedence).
 Only `-t java@<selector>` overrides it -- including an explicit `@latest`. The rule
 is the same for `install`, `exec`, `lock`, `outdated` and `upgrade`, and `latest`
 remains the fallback when nothing is configured.
