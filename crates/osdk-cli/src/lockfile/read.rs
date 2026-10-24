@@ -6,7 +6,7 @@ pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
-pub fn schema_version() -> u32 {
+pub(crate) fn schema_version() -> u32 {
     4
 }
 
@@ -1002,4 +1002,16 @@ pub(crate) fn reject_unmigratable_schema_one_npm_entries(lockfile: &Lockfile) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod empty_lock_tests {
+    use super::empty_lock_contents;
+
+    #[test]
+    fn empty_lock_matches_current_schema() {
+        let body = empty_lock_contents();
+        assert!(body.starts_with("schema = "));
+        assert_eq!(body, format!("schema = {}\n", super::schema_version()));
+    }
 }
