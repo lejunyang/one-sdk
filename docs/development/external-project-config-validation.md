@@ -86,14 +86,17 @@ result, and its log.
 
 ## Known baseline failures (Windows native; identical at `249306fa` and `2fb869d`)
 
-Logs root: `C:\Users\LJY\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38449122744973826\agents\s_000pVP0Ycc3\logs\`.
+Logs root: `C:\Users\LJY\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38449122744973826\agents\s_000pVP0Ycc3\logs\`
+(present at record time).
 
-- `osdk-core` package_registry: 5 failures.
-  Final: `...\logs\final-core-reg.log`. Base: `...\logs\base-core-reg.log`.
-- `osdk-core` package_sources: 3 failures.
-  Final: `...\logs\final-core-src.log`. Base: `...\logs\base-core-src.log`.
+Relative to that root:
+
+- `osdk-core` package_registry: 5 failures. `final-core-reg.log` /
+  `base-core-reg.log`.
+- `osdk-core` package_sources: 3 failures. `final-core-src.log` /
+  `base-core-src.log`.
 - `isolated_cli::github_action_windows_helpers_complete_the_ci_contract`: 1 fail.
-  Final: `...\logs\final-gha.log`. Base: `...\logs\base-gha.log`.
+  `final-gha.log` / `base-gha.log`.
 
 Root cause not yet localised. These reproduce identically at the base commit;
 this work has not verified that every unrelated issue is absent.
