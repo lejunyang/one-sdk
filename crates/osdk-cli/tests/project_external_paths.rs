@@ -134,3 +134,95 @@ fn selected_local_lock_is_not_borrowed_from_another_project() {
         "lock must belong to the selected project: {text}"
     );
 }
+
+#[test]
+fn external_bundle_trust_gate_track_and_relocate_renews_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let add = isolated(root)
+        .arg("project")
+        .arg("add")
+        .arg(root)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let bundle = std::fs::read_dir(root.join("config").join("projects"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .unwrap();
+    let bundle_toml = bundle.join("osdk.toml");
+    // A governed key: signature verification disabled.
+    std::fs::write(&bundle_toml, "[settings]\nverify_signatures = false\n").unwrap();
+
+    // Helper: a gated command's stderr, and whether the trust gate refused.
+    let gated = |cwd: &std::path::Path| -> String {
+        let out = isolated(temp.path())
+            .arg("install")
+            .arg("osdk-nonexistent-tool@0.0.1")
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    // (1) Untrusted bundle: the gate refuses (before any resolution attempt).
+    let err = gated(root);
+    assert!(
+        err.to_lowercase().contains("trust"),
+        "gate must refuse untrusted bundle: {err}"
+    );
+
+    // (2) Trust the physical bundle file explicitly: the gate stops refusing.
+    let trust = isolated(root)
+        .arg("trust")
+        .arg(&bundle_toml)
+        .arg("--yes")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(trust.status.success(), "{trust:?}");
+    let err = gated(root);
+    assert!(
+        !err.to_lowercase().contains("trust"),
+        "trust must clear the gate: {err}"
+    );
+
+    // (3) Tamper with governed content: record identity no longer matches.
+    std::fs::write(&bundle_toml, "[settings]\nverify_signatures = true\n").unwrap();
+    let err = gated(root);
+    assert!(
+        err.to_lowercase().contains("trust"),
+        "tampered governed key must re-trigger the gate: {err}"
+    );
+
+    // (4) Relocate: the bundle file moves to a new recorded root; the old
+    // record is gone and the new path must not be trusted.
+    std::fs::write(&bundle_toml, "[settings]\nverify_signatures = false\n").unwrap();
+    let ret = isolated(root)
+        .arg("trust")
+        .arg(&bundle_toml)
+        .arg("--yes")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(ret.status.success(), "{ret:?}");
+    let new_root = temp.path().join("moved-project");
+    std::fs::create_dir(&new_root).unwrap();
+    let rel = isolated(root)
+        .arg("project")
+        .arg("relocate")
+        .arg(root)
+        .arg(&new_root)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(rel.status.success(), "{rel:?}");
+    let err = gated(&new_root);
+    assert!(
+        err.to_lowercase().contains("trust"),
+        "after relocate the new bundle path must be untrusted: {err}"
+    );
+}
