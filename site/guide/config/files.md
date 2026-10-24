@@ -471,7 +471,7 @@ tool_order = [
 | npm、pnpm、Yarn | 无 | 同名命令，semver 输出；Node 运行时由同一策略选择 |
 | Bun、Deno、Zig | 无 | 同名命令，稳定 semver 输出（识别 Deno 原生 banner） |
 
-只有这些适配器参与。Rust/rustup、Maven、Gradle、Kotlin、uv、动态包工具和插件 backend 没有 system 适配器。`PNPM_HOME`、`NVM_DIR`、缓存变量及其他 home 不会成为选择器。现有的无关环境/缓存变量策略不变；`override_env` 不是选择开关。Python venv 或 JDK 优先时，设置普通 `VIRTUAL_ENV` 或 `JAVA_HOME`，再用 `tool_order=["system"]`，无需新增 osdk 版本变量。要混用托管 pnpm 与外部 Node，可用 `osdk exec -t pnpm@10.15.0 -- pnpm --version`：显式管理器保持托管，隐式 Node 按策略选择。
+只有这些适配器参与。Rust/rustup、Maven、Gradle、Kotlin、uv、动态包工具和插件 backend 没有 system 适配器。`PNPM_HOME`、`NVM_DIR`、缓存变量及其他 home 不会成为选择器。现有的无关环境/缓存变量策略不变；`override_env` 不是选择开关。 外部执行前，osdk 也将 activation 注入的强制位置变量（如 `PNPM_HOME`、`npm_config_prefix`、`BUN_INSTALL`）恢复为保存的用户原值或原本未设置状态；这不会让它们变成选择来源。Python venv 或 JDK 优先时，设置普通 `VIRTUAL_ENV` 或 `JAVA_HOME`，再用 `tool_order=["system"]`，无需新增 osdk 版本变量。要混用托管 pnpm 与外部 Node，可用 `osdk exec -t pnpm@10.15.0 -- pnpm --version`：显式管理器保持托管，隐式 Node 按策略选择。
 
 PATH 搜索接受绝对目录（允许空格），忽略空项/相对目录；排除 osdk data/install/store、canonical 别名、已知 shim 文件身份/副本及生成的包装脚本。home 必须是绝对路径；显式设置的无效 home 会报错，不悄悄改选 PATH。osdk activation 注入的 locator/PATH 在发现前恢复成保存的原始环境值。Windows 仅支持 `.exe`，名称不区分大小写；不选择 `.cmd`、`.bat`、PowerShell 或任意 PATHEXT 包装器，因此常见 `pnpm.cmd` / `npm.cmd` 安装应改用托管管理器或真实外部可执行文件。用于构造该执行环境的路径/home 必须是 Unicode。
 

@@ -303,7 +303,14 @@ impl SystemTarget {
     }
 
     pub fn restore_environment(&self, env: &mut BTreeMap<OsString, OsString>) {
-        if let Some((_, Some(key))) = adapter(&self.tool) {
+        // These existing forced locations are environment outputs, not extra
+        // selection adapters. Restore the user's value (or absence) before
+        // launching an external target; keep cache override policy unchanged.
+        let keys = crate::persistent_env::forced_var_names(&self.tool)
+            .iter()
+            .copied()
+            .chain(adapter(&self.tool).and_then(|(_, home)| home));
+        for key in keys {
             env.remove(std::ffi::OsStr::new(key));
             if let Some(value) = original_env(key) {
                 env.insert(key.into(), value);

@@ -83,6 +83,29 @@ fn system_target_pnpm_shim_selects_external_node_and_keeps_native_home() {
     assert!(stdout.contains("EXTERNAL_NODE"));
     assert!(stdout.contains("native-home"));
     assert!(!root.join("installs").exists());
+    for original_present in [true, false] {
+        let restored = isolated_command(root, root)
+            .arg0("pnpm")
+            .arg("run")
+            .env("PATH", &bin)
+            .env("PNPM_HOME", root.join("stale-osdk-home"))
+            .env("OSDK_MANAGED_ENV", "PNPM_HOME")
+            .env(
+                "OSDK_ORIG_PNPM_HOME_PRESENT",
+                if original_present { "1" } else { "0" },
+            )
+            .env("OSDK_ORIG_PNPM_HOME", root.join("native-home"))
+            .output()
+            .unwrap();
+        assert!(
+            restored.status.success(),
+            "{}",
+            String::from_utf8_lossy(&restored.stderr)
+        );
+        let text = String::from_utf8_lossy(&restored.stdout);
+        assert!(!text.contains("stale-osdk-home"), "{text}");
+        assert_eq!(text.contains("native-home"), original_present, "{text}");
+    }
 }
 
 fn isolated_command(root: &Path, cwd: &Path) -> Command {
