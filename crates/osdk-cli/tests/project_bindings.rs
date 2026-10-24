@@ -365,3 +365,68 @@ fn bind_under_a_long_chinese_path_still_resolves() {
     let text = String::from_utf8_lossy(&show.stdout);
     assert!(text.contains("external"), "must select the binding: {text}");
 }
+
+#[test]
+fn relocate_racing_remove_leaves_store_consistent() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("svc");
+    let moved = root.join("svc-moved");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&moved).unwrap();
+    assert!(isolated(root)
+        .arg("project")
+        .arg("add")
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    // Half the processes relocate, half remove, racing on the same bundle.
+    let mut children = Vec::new();
+    for i in 0..6 {
+        let c = if i % 2 == 0 {
+            isolated(root)
+                .arg("project")
+                .arg("relocate")
+                .arg(&project)
+                .arg(&moved)
+                .current_dir(root)
+                .spawn()
+                .unwrap()
+        } else {
+            isolated(root)
+                .arg("project")
+                .arg("remove")
+                .arg(&project)
+                .current_dir(root)
+                .spawn()
+                .unwrap()
+        };
+        children.push(c);
+    }
+    for mut c in children {
+        c.wait().unwrap();
+    }
+
+    // The store must not be left half-registered: either the bundle is gone,
+    // or it is a complete bundle at the moved root; never a dangling entry.
+    let list = isolated(root)
+        .arg("project")
+        .arg("list")
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let items: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert!(items.len() <= 1, "at most one binding survives: {items:?}");
+    for item in &items {
+        let root = item["root"].as_str().unwrap().replace('/', "\\");
+        assert!(
+            root.contains("svc-moved"),
+            "surviving binding must be the relocated one: {root}"
+        );
+    }
+}
