@@ -229,13 +229,17 @@ pub(crate) async fn use_legacy_cmd(
             .project_config_path
             .clone()
             .unwrap_or_else(|| cwd.join("osdk.toml"));
-        let project_root = config_path
-            .parent()
-            .ok_or_else(|| anyhow!("project config has no parent: {}", config_path.display()))?;
+        let project_root = match &app.ctx.config.project {
+            Some(ctx) if ctx.is_external() => ctx.root.clone(),
+            _ => config_path
+                .parent()
+                .ok_or_else(|| anyhow!("project config has no parent: {}", config_path.display()))?
+                .to_path_buf(),
+        };
         let lock_path = project_root.join(crate::lockfile::LOCKFILE_NAME);
         let metadata_rollback = ProjectMetadataRollback::begin_tool_selection(
             &app.ctx.dirs,
-            project_root,
+            &project_root,
             &config_path,
             &lock_path,
         )?;
