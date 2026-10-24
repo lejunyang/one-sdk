@@ -249,6 +249,95 @@ fn relocate_into_an_already_bound_target_is_refused_and_leaves_both_intact() {
 }
 
 #[test]
+fn concurrent_add_same_project_leaves_one_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("svc");
+    std::fs::create_dir_all(&project).unwrap();
+
+    // Ten parallel `project add` calls racing on the same root.
+    let mut children = Vec::new();
+    for _ in 0..10 {
+        let c = isolated(root)
+            .arg("project")
+            .arg("add")
+            .arg(&project)
+            .current_dir(root)
+            .spawn()
+            .unwrap();
+        children.push(c);
+    }
+    for mut c in children {
+        c.wait().unwrap();
+    }
+    // add is idempotent (re-binding is allowed and does not overwrite), so all
+    // may exit 0; the contract is that the store ends up with exactly one
+    // complete bundle, never a torn or duplicated one.
+    let list = isolated(root)
+        .arg("project")
+        .arg("list")
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let items: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(items.len(), 1, "no duplicate bundle");
+    let bundles = std::fs::read_dir(root.join("config").join("projects"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(bundles.len(), 1);
+    for f in ["project.toml", "osdk.toml", "osdk.lock"] {
+        assert!(bundles[0].join(f).is_file(), "missing {f}");
+    }
+}
+
+#[test]
+fn bind_via_junction_resolves_to_target_canonical_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real-project");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = temp.path().join("alias-link");
+    let out = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&real)
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        eprintln!(
+            "junction creation not permitted here, skipping: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let add = isolated(temp.path())
+        .arg("project")
+        .arg("add")
+        .arg(&link)
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let show = isolated(temp.path())
+        .arg("project")
+        .arg("show")
+        .arg(&link)
+        .arg("--json")
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    let root = json["root"].as_str().unwrap();
+    assert!(
+        root.replace('/', "\\").contains("real-project"),
+        "root must canonicalize through the junction: {root}"
+    );
+}
+
+#[test]
 fn bind_under_a_long_chinese_path_still_resolves() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

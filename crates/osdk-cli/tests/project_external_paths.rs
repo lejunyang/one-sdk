@@ -226,3 +226,50 @@ fn external_bundle_trust_gate_track_and_relocate_renews_review() {
         "after relocate the new bundle path must be untrusted: {err}"
     );
 }
+
+#[test]
+fn project_scoped_config_set_writes_bundle_not_project_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("real-proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let add = isolated(root)
+        .arg("project")
+        .arg("add")
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+
+    // Locate the bundle config.
+    let bundle = std::fs::read_dir(root.join("config").join("projects"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .unwrap();
+    let bundle_cfg = bundle.join("osdk.toml");
+
+    // Project-scoped write.
+    let set = isolated(root)
+        .arg("config")
+        .arg("set")
+        .arg("offline")
+        .arg("true")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(set.status.success(), "{set:?}");
+
+    // Bundle config now carries the setting; the real project tree stays clean.
+    let text = std::fs::read_to_string(&bundle_cfg).unwrap();
+    assert!(
+        text.contains("offline"),
+        "bundle config must record the setting: {text}"
+    );
+    assert!(
+        !project.join("osdk.toml").exists(),
+        "must not create a local osdk.toml that shadows the bundle"
+    );
+}

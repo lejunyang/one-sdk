@@ -1214,6 +1214,15 @@ pub fn setting_scope_path(ctx: &Ctx, scope: SettingScope) -> Result<PathBuf> {
         SettingScope::Global => Ok(ctx.dirs.user_config_file()),
         SettingScope::Project => {
             let cwd = std::env::current_dir().context("resolving current directory")?;
+            // `config set` runs without the project layer, so discover the
+            // selected context from cwd. An external binding must write the
+            // bundle config rather than create a local osdk.toml that shadows
+            // it; local configs keep their existing cwd-based resolution.
+            if let Some(ctx) = osdk_core::project::discover(&cwd, &ctx.dirs.config)? {
+                if ctx.is_external() {
+                    return Ok(ctx.config_path);
+                }
+            }
             Ok(find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml")))
         }
     }

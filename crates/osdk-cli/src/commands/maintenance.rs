@@ -357,6 +357,13 @@ pub(crate) fn freshness_state_path(app: &App) -> std::path::PathBuf {
 /// The config file's own directory, not the shell's cwd: a task means the same
 /// thing wherever it is invoked from.
 pub(crate) fn task_config_root(app: &App) -> std::path::PathBuf {
+    // External binding: task relative paths resolve against the real project
+    // tree, not the bundle directory.
+    if let Some(ctx) = &app.ctx.config.project {
+        if ctx.is_external() {
+            return ctx.root.clone();
+        }
+    }
     app.ctx
         .config
         .project_config_path
