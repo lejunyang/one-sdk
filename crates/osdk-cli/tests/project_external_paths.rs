@@ -336,4 +336,49 @@ fn shim_forwards_to_installed_tool_under_external_binding() {
         stdout.contains("MARKER_OK"),
         "shim must forward the tool's stdout: {stdout}"
     );
+
+    // (a) Mutation self-check: pinning a non-installed version must fail to
+    // forward -- proves the above assertion actually went through the bundle.
+    std::fs::write(bundle.join("osdk.toml"), "[tools]\nnode = \"9.9.9\"\n").unwrap();
+    let out_bad = std::process::Command::new(&shim_exe)
+        .env("OSDK_CONFIG_DIR", root.join("config"))
+        .env("OSDK_DATA_DIR", root.join("data"))
+        .env("OSDK_CACHE_DIR", root.join("cache"))
+        .env("OSDK_STORE_DIR", root.join("store"))
+        .env("OSDK_INSTALL_DIR", root.join("installs"))
+        .arg("node")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert_ne!(
+        out_bad.status.code(),
+        Some(7),
+        "version 9.9.9 is not installed, forwarding must not succeed"
+    );
+
+    // (b) Shadow conflict: a same-root local osdk.toml wins, but the shadowed
+    // external bundle emits its warning to stderr only; stdout stays the
+    // forwarded marker and exit code is preserved.
+    std::fs::write(bundle.join("osdk.toml"), "[tools]\nnode = \"1.0.0\"\n").unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\nnode = \"1.0.0\"\n").unwrap();
+    let out_shadow = std::process::Command::new(&shim_exe)
+        .env("OSDK_CONFIG_DIR", root.join("config"))
+        .env("OSDK_DATA_DIR", root.join("data"))
+        .env("OSDK_CACHE_DIR", root.join("cache"))
+        .env("OSDK_STORE_DIR", root.join("store"))
+        .env("OSDK_INSTALL_DIR", root.join("installs"))
+        .arg("node")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out_shadow.status.code(),
+        Some(7),
+        "shadowed local must still forward"
+    );
+    let out_sh = String::from_utf8_lossy(&out_shadow.stdout);
+    assert!(
+        out_sh.contains("MARKER_OK"),
+        "stdout unchanged by warning: {out_sh}"
+    );
 }
