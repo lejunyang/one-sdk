@@ -42,28 +42,29 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
         }
         return crate::global_npm_use::install(app, req, requested_spec).await;
     }
-    if !global && req.backend.starts_with("npm:") {
-        if use_project_npm_is_eligible(app, global, &req.backend) {
-            let cwd = std::env::current_dir()?;
-            let requested_installer =
-                osdk_core::npm_tools::installer_from_request_options(&req.options)?;
-            let plan = osdk_core::npm_tools::plan_npm_installer(
-                &cwd,
+    if !global
+        && req.backend.starts_with("npm:")
+        && use_project_npm_is_eligible(app, global, &req.backend)
+    {
+        let cwd = std::env::current_dir()?;
+        let requested_installer =
+            osdk_core::npm_tools::installer_from_request_options(&req.options)?;
+        let plan = osdk_core::npm_tools::plan_npm_installer(
+            &cwd,
+            requested_installer,
+            osdk_core::npm_tools::ToolScope::Project,
+            app.ctx.config.settings.npm_default_installer(),
+        )?;
+        if let Some(project) = plan.project {
+            return use_project_npm(
+                app,
+                req,
+                requested_spec,
+                project,
                 requested_installer,
-                osdk_core::npm_tools::ToolScope::Project,
-                app.ctx.config.settings.npm_default_installer(),
-            )?;
-            if let Some(project) = plan.project {
-                return use_project_npm(
-                    app,
-                    req,
-                    requested_spec,
-                    project,
-                    requested_installer,
-                    configured_key,
-                )
-                .await;
-            }
+                configured_key,
+            )
+            .await;
         }
     }
     use_legacy_cmd(app, req, requested_spec, global, configured_key).await
