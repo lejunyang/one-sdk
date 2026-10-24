@@ -66,6 +66,12 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
         bundle.join("osdk.lock").exists(),
         "bundle should carry its own lock"
     );
+    let lock_body = std::fs::read_to_string(bundle.join("osdk.lock")).unwrap();
+    // Keep in lockstep with lockfile::schema_version().
+    assert!(
+        lock_body.starts_with("schema = 4\n"),
+        "bundle lock must initialise at the current schema version: {lock_body}"
+    );
 
     let removed = isolated(root)
         .arg("project")

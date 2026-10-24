@@ -125,7 +125,12 @@ pub(crate) fn add(dirs: &Dirs, path: Option<&Path>, dry_run: bool, json: bool) -
         )?;
         // The bundle owns its lock from birth: discovery must never find an
         // empty selection and then borrow a lock from somewhere else.
-        write_atomic(&binding_dir, "osdk.lock.tmp", "osdk.lock", "schema = 3\n")?;
+        write_atomic(
+            &binding_dir,
+            "osdk.lock.tmp",
+            "osdk.lock",
+            &crate::lockfile::empty_lock_contents(),
+        )?;
     }
 
     if json {

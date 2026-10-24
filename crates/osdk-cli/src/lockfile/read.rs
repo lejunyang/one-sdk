@@ -6,8 +6,12 @@ pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
-pub(crate) fn schema_version() -> u32 {
+pub fn schema_version() -> u32 {
     4
+}
+
+pub(crate) fn empty_lock_contents() -> String {
+    format!("schema = {}\n", schema_version())
 }
 
 pub fn platform_key(platform: Platform) -> String {
