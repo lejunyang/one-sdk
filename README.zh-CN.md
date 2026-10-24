@@ -202,7 +202,7 @@ osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 osdk project add ~/repos/third-party-app  # 精确绑定该目录，不猜 Git 根
 osdk project show .                        # 该目录实际走哪份配置
 osdk use node@20                           # 写进外置配置与锁
-osdk project list                          # 全部绑定及其状态
+osdk project list                          # 全部绑定；--json 含完整状态字段
 osdk project remove ~/tmp/checkout --dry-run
 ```
 

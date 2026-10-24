@@ -64,6 +64,7 @@ struct Resolved {
     plan: RunPlan,
     decision: state::Decision,
     unit: Option<deps::workspace::WorkspaceUnit>,
+    lock_path: PathBuf,
 }
 
 pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
@@ -82,7 +83,14 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     // inherited from an ancestor file (extends), relative entries were declared
     // there, so keep anchoring at that file's directory -- the pre-existing
     // behaviour for checked-in configs.
-    let root = if config_path == app.ctx.config.project_config_path.clone().unwrap_or_default() {
+    let root = if config_path
+        == app
+            .ctx
+            .config
+            .project_config_path
+            .clone()
+            .unwrap_or_default()
+    {
         app.ctx
             .config
             .project_root
@@ -102,6 +110,9 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         report_undeclared(&cwd)?;
         return Ok(());
     }
+    // The deps lock belongs to the selected project configuration: an external
+    // binding's bundle lock, never a freshly written file next to the project.
+    let deps_lock = crate::commands::project_lock_path(app, &cwd);
     let mut entries = deps::catalog::catalog(&root, &config_path, &deps_config)?;
     let mut tool_evidence: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for entry in &mut entries {
@@ -325,6 +336,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             plan,
             decision,
             unit,
+            lock_path: deps_lock.clone(),
         });
     }
     if resolved.is_empty() {
@@ -587,7 +599,7 @@ fn verify(app: &App, resolved: &[Resolved]) -> anyhow::Result<()> {
 
         // L1 first: it is one file read, and it explains an L2 failure when both
         // fire.
-        let lock_path = crate::lockfile::default_path(&item.project.root);
+        let lock_path = &item.lock_path;
         if lock_path.is_file() {
             let locked = crate::lockfile::load(&lock_path)?;
             if let Some(entry) = locked.deps.get(&*item.project.provider) {
@@ -1041,9 +1053,9 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
         .find(|tool| tool.role == ToolRole::Runtime)
         .map(|tool| format!("{}@{}", tool.id, tool.version));
 
-    let lock_path = crate::lockfile::default_path(&item.project.root);
+    let lock_path = &item.lock_path;
     crate::lockfile::merge_deps(
-        &lock_path,
+        lock_path,
         &item.project.provider,
         crate::lockfile::DepsRecord {
             installer: item.choice.provider.to_string(),
@@ -1459,6 +1471,7 @@ mod tests {
                 plan,
                 decision: osdk_core::deps::state::Decision::Fresh,
                 unit: None,
+                lock_path: std::env::temp_dir().join("test-osdk.lock"),
             }
         }
         let tmp = tempfile::tempdir().unwrap();

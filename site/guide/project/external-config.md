@@ -13,27 +13,28 @@
 ## 命令一览
 
 ```text
-osdk project add [PATH]      # 把一个目录绑定为外置项目；PATH 默认当前目录
-osdk project show [PATH]     # 显示该目录生效的项目来源与绑定状态
-osdk project list            # 列出全部外置项目绑定
-osdk project relocate OLD NEW # 把绑定从旧根路径迁到新根路径
-osdk project remove PATH      # 删除外置绑定；--dry-run 先预览
+osdk project add [PATH]       # 绑定目录；PATH 默认当前目录；--dry-run / --json
+osdk project show [PATH]      # 显示该目录生效来源与绑定状态；PATH 默认当前目录；--json
+osdk project list             # 列出全部外置绑定；--json 输出数组
+osdk project relocate OLD NEW # 迁移绑定；OLD 与 NEW 必填；--dry-run / --json
+osdk project remove PATH       # 删除外置绑定目录；PATH 必填；--dry-run / --json
 ```
 
 ```bash
 osdk project add .                 # 绑定当前目录
-osdk project add C:\repos\frontend # 绑定任意目录，精确按给定路径
+osdk project add C:\repos\frontend # 绑定任意目录，按真实 canonical 路径计入
 osdk project show .                # 这个目录实际走哪份配置
-osdk project list                  # 全部绑定一览
+osdk project list                   # 全部绑定一览
+osdk project list --json            # 数组输出，含完整状态字段
 osdk project remove ~/tmp/old-checkout --dry-run
 osdk project remove ~/tmp/old-checkout
 ```
 
 ## 绑定行为
 
-- `add` 把用户给出的目录 canonical 化为真实绝对路径后绑定：相对路径、
-  junction 等别名都按解析后的真实路径计入；不会向上猜测 Git 根，不会安装
-  任何工具，也不会改动该目录。
+- `add` 把用户给出的目录经 OS canonicalize 解析为真实绝对路径后绑定：
+  相对路径、junction、8.3 短名、大小写别名都按解析后的真实路径计入；不会
+  向上猜测 Git 根，不会安装任何工具，也不会改动该目录。
 - 已绑定的目录再次 `add` 不会覆盖或改写已有绑定。
 - 目录里已经存在本地 `osdk.toml` / `.osdk.toml` 时，仍然可以绑定；运行时以
   本地文件为准，osdk 会在 stderr 提示外置配置被本地文件遮蔽（shadowed）。
@@ -49,7 +50,9 @@ osdk project remove ~/tmp/old-checkout
   osdk.lock       # 外置项目的锁文件
 ```
 
-- `root-id` 是由完整 BLAKE3 算出的平台感知路径身份，**不基于项目名，也不基于
+- `root-id` 由真实项目根路径经 OS canonicalize 解析后的完整 BLAKE3 决定：
+  junction、8.3 短名、大小写别名都归到同一身份；大小写按文件系统语义处理，
+  osdk 不额外全小写，也不做 Unicode 规范化。它**不基于项目名，也不基于
   Git remote**；项目改名或换 remote 不会影响绑定。
 - 这里没有另一份可手工编辑的索引：`<config>/projects/` 目录与其中的
   `project.toml` 就是全部注册表。
@@ -114,10 +117,14 @@ osdk project remove PATH          # 不再需要这个外置绑定
 
 ## show 与 list 能看到什么
 
-- `show [PATH]` 显示该目录命中的项目来源（外置绑定或本地配置）、外置绑定的
-  实际物理路径、是否被本地文件遮蔽（shadowed）、以及绑定的项目根是否还在
-  磁盘上（missing）。
-- `list` 列出全部外置绑定及其来源与状态。
+- `show [PATH]`（PATH 默认当前目录）显示该目录命中的项目来源
+  （`local` 或 `external`）、配置与锁的实际路径、绑定目录、是否被本地配置
+  遮蔽（`shadowed_local_config`）以及绑定是否缺失（`missing`）。`--json`
+  输出 `root`、`source`、`config_path`、`lock_path`、`binding_dir`、
+  `shadowed_local_config`、`missing`。
+- `list` 没有位置参数。纯文本输出逐行打印每个绑定的项目根，其下缩进两行
+  `config:` 与 `lock:` 指向配置与锁文件；完整状态（`root_exists`、
+  `config_exists`、`shadowed_by_local` 等）需要加 `--json` 以数组形式输出。
 
 ## 明确不做的事
 

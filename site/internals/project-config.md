@@ -26,9 +26,10 @@
 - `project.toml`（schema = 1）只记录一件事：`root` 是真实项目根的绝对
   路径。物理目录与逻辑根分离后，运行时需要一个显式锚点来回指——否则
   「配置在 X、项目在 Y」的对应关系无处安放。
-- 路径身份按平台感知方式规范化后再取 BLAKE3（Windows 上不是简单全小写），
-  也不额外做 Unicode NFC 归一——别名路径（junction 等）按 canonical 目标
-  计入，因此同一目录的不同写法只会产生一份绑定。
+- 路径身份由 OS canonicalize（dunce）解析后的真实路径决定：junction、
+  8.3 短名、大小写别名都归到同一身份；大小写按文件系统语义处理，osdk 不
+  额外全小写，也不做 Unicode 规范化。因此同一目录的不同写法只会产生一份
+  绑定。
 
 ## 单写源选择：配置与锁成套，禁止跨来源借用
 
@@ -81,7 +82,7 @@ lock——配置本来就不在项目里。但 `osdk run`、`osdk deps` 仍然�
 | 绑定目录里已存在本地 `osdk.toml` | 允许绑定；本地文件胜出，外置被 shadowed，stderr 警告 |
 | 重复 `add` 同一目录 | 不覆盖已有绑定 |
 | 选中配置/锁损坏 | 直接报错，不回退来源 |
-| 绑定的项目根在磁盘上已不存在（missing） | `show`/`list` 显示 missing；`relocate` 保留配置与锁；不自动删除 |
+| 绑定的项目根在磁盘上已不存在（missing） | `show` 的 `missing`、`list --json` 的 `root_exists`/`config_exists` 暴露它；纯文本 `list` 只列路径，不显示状态；`relocate` 保留配置与锁；不自动删除 |
 | `remove` | 只删外置绑定目录；项目文件与共享安装池不碰；`--dry-run` 预览 |
 
 ## 明确不做

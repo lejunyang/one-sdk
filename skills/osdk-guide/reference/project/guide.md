@@ -6,18 +6,20 @@
 
 | 子命令 | 参数 | 语义 |
 | --- | --- | --- |
-| `add [PATH]` | — | 精确绑定给定目录（默认 cwd）；不猜 Git 根、不安装、不改目录；重复 add 不覆盖；目录已有本地配置时允许绑定但运行时本地胜出（stderr shadowed 警告） |
-| `show [PATH]` | — | 显示该目录命中的来源（外置绑定或本地配置）、外置物理路径、shadowed/missing 状态 |
-| `list` | — | 列出全部外置绑定及其来源与状态 |
-| `relocate OLD NEW` | — | 把绑定迁到新根路径；外置 `osdk.toml` 与 `osdk.lock` 保留；旧根 missing 不自动删 |
-| `remove PATH` | `--dry-run` | 只删外置绑定目录；不删项目文件、不删共享安装池工具；先预览 |
+| `add [PATH]` | `--dry-run`、`--json` | 绑定给定目录（默认 cwd）；经 OS canonicalize 计入真实路径；不猜 Git 根、不安装、不改目录；重复 add 不覆盖；目录已有本地配置时允许绑定但运行时本地胜出（stderr shadowed 警告） |
+| `show [PATH]` | `--json`（仅） | 显示该目录命中的来源（`local`/`external`）、`config_path`、`lock_path`、`binding_dir`、`shadowed_local_config`、`missing` |
+| `list` | `--json`（数组） | 无位置参。纯文本逐行打印根目录、缩进 `config:`/`lock:`；状态字段 `root_exists`、`config_exists`、`shadowed_by_local` 仅 JSON 可见 |
+| `relocate OLD NEW` | `--dry-run`、`--json` | OLD 与 NEW 必填；外置 `osdk.toml` 与 `osdk.lock` 保留；旧根 missing 不自动删 |
+| `remove PATH` | `--dry-run`、`--json` | PATH 必填；只删外置绑定目录；不删项目文件、不删共享安装池工具 |
 
 ```bash
 osdk project add .                  # 绑定当前目录
 osdk project add C:\repos\frontend  # 精确绑定，不向上猜 Git 根
 osdk project show .                 # 这个目录实际走哪份配置/锁
-osdk project list
-osdk project relocate ~/old ~/new
+osdk project show . --json          # 含全部状态字段
+osdk project list                   # 纯文本：根 + config:/lock:
+osdk project list --json            # 数组，含 root_exists/config_exists/shadowed_by_local
+osdk project relocate ~/old ~/new --dry-run
 osdk project remove ~/tmp/checkout --dry-run
 osdk project remove ~/tmp/checkout
 ```

@@ -227,7 +227,7 @@ the current directory.
 osdk project add ~/repos/third-party-app   # binds exactly this directory; no Git-root guessing
 osdk project show .                        # which configuration this directory actually uses
 osdk use node@20                          # writes into the external config and its lock
-osdk project list                          # all bindings and their status
+osdk project list                          # all bindings; --json adds full status fields
 osdk project remove ~/tmp/checkout --dry-run
 ```
 

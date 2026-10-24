@@ -39,12 +39,12 @@ struct BindingRow {
 pub(crate) fn run(app: &mut App, command: crate::cli::ProjectCommand) -> Result<()> {
     let dirs = &app.ctx.dirs;
     match command {
-        crate::cli::ProjectCommand::Add { path, dry_run, json } => {
-            add(dirs, path.as_deref(), dry_run, json)
-        }
-        crate::cli::ProjectCommand::Show { path, json } => {
-            show(dirs, path.as_deref(), json)
-        }
+        crate::cli::ProjectCommand::Add {
+            path,
+            dry_run,
+            json,
+        } => add(dirs, path.as_deref(), dry_run, json),
+        crate::cli::ProjectCommand::Show { path, json } => show(dirs, path.as_deref(), json),
         crate::cli::ProjectCommand::List { json } => list(dirs, json),
         crate::cli::ProjectCommand::Relocate {
             old,
@@ -52,9 +52,11 @@ pub(crate) fn run(app: &mut App, command: crate::cli::ProjectCommand) -> Result<
             dry_run,
             json,
         } => relocate(dirs, &old, &new, dry_run, json),
-        crate::cli::ProjectCommand::Remove { path, dry_run, json } => {
-            remove(dirs, &path, dry_run, json)
-        }
+        crate::cli::ProjectCommand::Remove {
+            path,
+            dry_run,
+            json,
+        } => remove(dirs, &path, dry_run, json),
     }
 }
 
@@ -109,8 +111,21 @@ pub(crate) fn add(dirs: &Dirs, path: Option<&Path>, dry_run: bool, json: bool) -
             .with_context(|| format!("creating {}", binding_dir.display()))?;
         // Write the manifest via a temp file + rename so a crashed add never
         // leaves a directory discoverable with a half-written manifest.
-        write_atomic(&binding_dir, "project.toml.tmp", "project.toml", &toml::to_string(&Manifest::new(root.clone()))?)?;
-        write_atomic(&binding_dir, "osdk.toml.tmp", "osdk.toml", "# external project config: edit me\n")?;
+        write_atomic(
+            &binding_dir,
+            "project.toml.tmp",
+            "project.toml",
+            &toml::to_string(&Manifest::new(root.clone()))?,
+        )?;
+        write_atomic(
+            &binding_dir,
+            "osdk.toml.tmp",
+            "osdk.toml",
+            "# external project config: edit me\n",
+        )?;
+        // The bundle owns its lock from birth: discovery must never find an
+        // empty selection and then borrow a lock from somewhere else.
+        write_atomic(&binding_dir, "osdk.lock.tmp", "osdk.lock", "schema = 3\n")?;
     }
 
     if json {
@@ -174,8 +189,7 @@ pub(crate) fn show(dirs: &Dirs, path: Option<&Path>, json: bool) -> Result<()> {
                 .map(|c| c.lock_path.display().to_string())
                 .unwrap_or_default(),
             binding_dir: binding.as_ref().map(|b| b.dir.display().to_string()),
-            shadowed_local_config: existing_local_config(&root)
-                .map(|p| p.display().to_string()),
+            shadowed_local_config: existing_local_config(&root).map(|p| p.display().to_string()),
             missing: binding.as_ref().is_some_and(|b| !b.root_exists()),
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -235,20 +249,22 @@ pub(crate) fn list(dirs: &Dirs, json: bool) -> Result<()> {
     for b in &bindings {
         let mut flags = Vec::new();
         if !b.root_exists() {
-            flags.push("missing");
+            flags.push("project root missing");
         }
         if !b.config_exists() {
-            flags.push("missing-config");
+            flags.push("config missing");
         }
         if existing_local_config(&b.root).is_some() {
-            flags.push("shadowed");
+            flags.push("shadowed by local osdk.toml");
         }
-        let tag = if flags.is_empty() {
-            String::new()
+        let status = if flags.is_empty() {
+            "active".to_string()
         } else {
-            format!("  [{}]", flags.join(","))
+            flags.join("; ")
         };
-        println!("{}{}", b.root.display(), tag);
+        println!("{}", b.root.display());
+        println!("  source: external binding");
+        println!("  status: {status}");
         println!("  config: {}", b.config_path.display());
         println!("  lock:   {}", b.lock_path.display());
     }
@@ -266,10 +282,7 @@ fn find_binding_by_path(dirs: &Dirs, path: &Path) -> Result<Binding> {
     // after the project directory went away.
     list_bindings(&dirs.config)?
         .into_iter()
-        .find(|b| {
-            canonical.as_ref() == Some(&b.root)
-                || b.root.as_os_str() == path.as_os_str()
-        })
+        .find(|b| canonical.as_ref() == Some(&b.root) || b.root.as_os_str() == path.as_os_str())
         .with_context(|| format!("no external project binding for {}", path.display()))
 }
 
@@ -309,7 +322,11 @@ pub(crate) fn relocate(
             binding.root.display(),
             new_root.display()
         );
-        println!("  binding: {} -> {}", binding.dir.display(), new_dir.display());
+        println!(
+            "  binding: {} -> {}",
+            binding.dir.display(),
+            new_dir.display()
+        );
     }
     if dry_run {
         if !json {
@@ -332,7 +349,12 @@ pub(crate) fn relocate(
         std::fs::rename(&lock, new_dir.join("osdk.lock"))?;
     }
     // Rewrite the manifest with the new recorded root.
-    write_atomic(&new_dir, "project.toml.tmp", "project.toml", &toml::to_string(&Manifest::new(new_root.clone()))?)?;
+    write_atomic(
+        &new_dir,
+        "project.toml.tmp",
+        "project.toml",
+        &toml::to_string(&Manifest::new(new_root.clone()))?,
+    )?;
     // Remove the now-empty old bundle directory.
     let _ = std::fs::remove_dir(&binding.dir);
 

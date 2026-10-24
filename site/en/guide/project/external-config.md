@@ -17,27 +17,29 @@ Typical uses:
 ## Command overview
 
 ```text
-osdk project add [PATH]        # bind a directory as an external project; PATH defaults to cwd
-osdk project show [PATH]       # show which project source this directory actually uses
-osdk project list              # list every external project binding
-osdk project relocate OLD NEW  # move a binding from one root path to another
-osdk project remove PATH       # drop an external binding; --dry-run previews first
+osdk project add [PATH]        # bind a directory as an external project; PATH defaults to cwd; --dry-run / --json
+osdk project show [PATH]       # show the effective source and binding state; PATH defaults to cwd; --json
+osdk project list              # list every external binding; --json emits an array
+osdk project relocate OLD NEW  # move a binding; OLD and NEW are both required; --dry-run / --json
+osdk project remove PATH        # drop an external binding directory; PATH is required; --dry-run / --json
 ```
 
 ```bash
 osdk project add .                 # bind the current directory
-osdk project add C:\repos\frontend # bind any directory, exactly as given
-osdk project show .                 # which configuration this directory resolves to
-osdk project list                   # every binding at a glance
+osdk project add C:\repos\frontend # bind any directory, counted by its real canonical path
+osdk project show .                # which configuration this directory resolves to
+osdk project list                  # every binding at a glance
+osdk project list --json          # array output with the full status fields
 osdk project remove ~/tmp/old-checkout --dry-run
 osdk project remove ~/tmp/old-checkout
 ```
 
 ## Bind behavior
 
-- `add` canonicalizes the directory you give to its real absolute path and binds
-  that: relative paths and junction aliases resolve to their target; it does not
-  walk up to guess a Git root, installs nothing, and does not modify the directory.
+- `add` binds the directory after OS-canonicalizing it to its real absolute path:
+  relative paths, junctions, 8.3 short names, and case aliases all count by the
+  resolved real path; it does not walk up to guess a Git root, installs nothing,
+  and does not modify the directory.
 - Binding an already-bound directory again does not overwrite or change the
   existing binding.
 - A directory that already contains a local `osdk.toml` / `.osdk.toml` can
@@ -55,9 +57,12 @@ Every binding occupies one subdirectory under the config directory:
   osdk.lock       # the external project's lockfile
 ```
 
-- `root-id` is a full BLAKE3 of the platform-aware path identity. It is **not
-  derived from the project name or any Git remote**; renaming the project or
-  changing its remote does not disturb the binding.
+- `root-id` is the full BLAKE3 of the real project-root path after OS
+  canonicalization: junctions, 8.3 short names, and case aliases resolve to the
+  same identity; casing follows filesystem semantics — osdk neither lowercases
+  additionally nor applies Unicode normalization. It is **not derived from the
+  project name or any Git remote**; renaming the project or changing its remote
+  does not disturb the binding.
 - There is no separately hand-editable index: the `<config>/projects/`
   directory and its `project.toml` files are the whole registry.
 - `osdk project show .` prints the physical directory behind the binding, so you
@@ -135,11 +140,16 @@ osdk project remove PATH           # no longer need this external binding
 
 ## What show and list report
 
-- `show [PATH]` reports which source this directory resolves to (external
-  binding or local configuration), the physical path of the external binding,
-  whether it is shadowed by a local file, and whether the bound project root
-  still exists on disk (missing).
-- `list` enumerates every external binding with its source and status.
+- `show [PATH]` (PATH defaults to cwd) reports the effective source (`local` or
+  `external`), the real paths of configuration and lock, the binding directory,
+  whether a local configuration shadows it (`shadowed_local_config`), and
+  whether the binding is missing (`missing`). `--json` emits `root`, `source`,
+  `config_path`, `lock_path`, `binding_dir`, `shadowed_local_config`, and
+  `missing`.
+- `list` takes no positional argument. Plain-text output prints each binding's
+  project root per line, with two indented `config:` and `lock:` lines pointing
+  at the files; the full status fields (`root_exists`, `config_exists`,
+  `shadowed_by_local`, etc.) require `--json` as an array.
 
 ## Explicitly out of scope
 

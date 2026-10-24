@@ -13,7 +13,7 @@ The `root-id` of `<config>/projects/<root-id>/` is the full BLAKE3 of the platfo
 - Renaming a project or changing its remote must not change "which project this binding is"; names and remotes are mutable labels, the path identity is stable.
 - The directory name *is* the identity, so there is **no separately editable index file**. The `<config>/projects/` directory itself is the registry: enumerate it to discover every binding. The class of inconsistency "index entry points at a directory that no longer exists" cannot exist by construction.
 - `project.toml` (schema = 1) records exactly one thing: `root`, the real project root's absolute path. Once the physical directory and logical root are separated, the runtime needs an explicit anchor to point back at — otherwise the correspondence "configuration lives at X, project lives at Y" has nowhere to live.
-- The path identity is normalized in a platform-aware way before hashing (on Windows it is not a plain lowercasing), and no extra Unicode NFC normalization is applied. Aliased paths (junctions, etc.) count by their canonical target, so the same directory written differently yields exactly one binding.
+- The path identity is decided by the real path after OS canonicalization (dunce): junctions, 8.3 short names, and case aliases resolve to the same identity; casing follows filesystem semantics — osdk neither lowercases additionally nor applies Unicode normalization. The same directory written differently therefore yields exactly one binding.
 
 ## Single-writer source selection: config and lock as one set
 
@@ -49,7 +49,7 @@ An external `osdk use npm:xxx` keeps the isolated install and never touches the 
 | The bound directory already contains a local `osdk.toml` | Binding is allowed; the local file wins, the external config is shadowed, stderr warns |
 | Re-`add`ing the same directory | The existing binding is not overwritten |
 | A selected config/lock is corrupted | Hard error; no source fallback |
-| The bound project root no longer exists on disk (missing) | `show`/`list` report missing; `relocate` preserves config and lock; nothing is auto-deleted |
+| The bound project root no longer exists on disk (missing) | `show`'s `missing` and `list --json`'s `root_exists`/`config_exists` expose it; plain-text `list` prints paths only, without status; `relocate` preserves config and lock; nothing is auto-deleted |
 | `remove` | Deletes only the external binding directory; project files and the shared install pool are untouched; `--dry-run` previews |
 
 ## Explicitly not done
