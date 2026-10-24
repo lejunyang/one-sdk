@@ -1,5 +1,7 @@
 # Rust
 
+配置参考：[适用的 tool_order 来源](../config/tool-selection#rust)、[项目来源诊断](../config/tool-selection#inspect-sources)、[本工具的选择器、托管变量与缓存覆盖](../config/tool-environment#rust)。
+
 Rust backend 委托给安装在 osdk 隔离目录中的 rustup：
 
 ```bash

@@ -1,5 +1,7 @@
 # Rust
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#rust), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#rust).
+
 The Rust backend delegates to rustup inside osdk's isolated directories:
 
 ```bash

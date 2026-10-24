@@ -1,5 +1,7 @@
 # 声明式 Backend
 
+配置参考：[适用的 tool_order 来源](../config/tool-selection#tool-order-reference)、[项目来源诊断](../config/tool-selection#inspect-sources)、[本工具的选择器、托管变量与缓存覆盖](../config/tool-environment#per-tool-environment)。
+
 osdk 启动时自动加载以下目录直接子级的 `*.toml`，无需单独安装命令：
 
 ```text

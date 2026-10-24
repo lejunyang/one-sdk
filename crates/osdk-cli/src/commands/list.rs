@@ -386,3 +386,71 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
     }
     Ok(())
 }
+
+/// Source discovery is explicit so existing `current` output stays compatible.
+pub fn current_sources(app: &App, tool: &str, json: bool, probe: bool) -> Result<()> {
+    let backend = app.registry.get(tool)?;
+    let cwd = std::env::current_dir()?;
+    let report =
+        osdk_core::execution::diagnostics::inspect(&app.ctx, backend.as_ref(), &cwd, probe);
+    let value = serde_json::to_value(&report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{} — {}", report.tool, report.project.display());
+        println!("Configured order: {}", value["configured_order"]);
+        println!("Effective order: {}", value["effective_order"]);
+        println!("Resolution: {}", report.resolution_status);
+        if let Some(selected) = value["selected"].as_object() {
+            println!("Selection: {}", serde_json::to_string(selected)?);
+        }
+        println!("\nSource inventory (file presence is not a declaration):");
+        for source in value["sources"].as_array().expect("serialized inventory") {
+            println!(
+                "  {} [{}; rank {}] {}",
+                source["source"].as_str().unwrap(),
+                source["state"].as_str().unwrap(),
+                source["rank"],
+                source["reason"].as_str().unwrap()
+            );
+            for location in source["locations"].as_array().unwrap() {
+                println!(
+                    "    {} {}",
+                    if location["file_exists"] == true {
+                        "file"
+                    } else {
+                        "absent"
+                    },
+                    location["path"].as_str().unwrap()
+                );
+            }
+        }
+        println!("\nResolution evidence:");
+        for evidence in &report.evidence {
+            println!(
+                "  {} {}#{} — {}",
+                evidence.status,
+                evidence
+                    .path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                evidence.field,
+                evidence.reason
+            );
+        }
+        for note in &report.notes {
+            println!("{note}");
+        }
+        if !report.inventory_complete {
+            println!("Inventory incomplete; unknown sources must not be read as missing.");
+        }
+        if let Some(error) = &report.error {
+            println!("Error: {error}");
+        }
+    }
+    if report.error.is_some() {
+        anyhow::bail!("tool source diagnostics failed; see the report");
+    }
+    Ok(())
+}

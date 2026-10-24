@@ -24,7 +24,9 @@ const zhGuideSidebar: Item[] = [
   ]),
   group('配置', zhGuide, [
     ['配置文件', 'config/files'],
-    ['环境变量', 'config/environment'],
+    ['工具选择与来源诊断', 'config/tool-selection'],
+    ['各工具环境变量', 'config/tool-environment'],
+    ['osdk 环境变量', 'config/environment'],
     ['命令行全局参数', 'config/cli-options'],
     ['目录与存储', 'config/storage'],
     ['项目配置信任', 'config/trust']
@@ -122,7 +124,9 @@ const enGuideSidebar: Item[] = [
   ]),
   group('Configuration', enGuide, [
     ['Configuration Files', 'config/files'],
-    ['Environment Variables', 'config/environment'],
+    ['Tool Selection and Diagnostics', 'config/tool-selection'],
+    ['Tool Environments', 'config/tool-environment'],
+    ['osdk Environment Variables', 'config/environment'],
     ['Global Command-line Options', 'config/cli-options'],
     ['Directories and Storage', 'config/storage'],
     ['Project Configuration Trust', 'config/trust']

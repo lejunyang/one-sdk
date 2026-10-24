@@ -1,5 +1,7 @@
 # Go
 
+配置参考：[适用的 tool_order 来源](../config/tool-selection#go)、[项目来源诊断](../config/tool-selection#inspect-sources)、[本工具的选择器、托管变量与缓存覆盖](../config/tool-environment#go)。
+
 ```bash
 osdk install go@1.22
 osdk use -g golang@1.23

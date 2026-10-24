@@ -84,7 +84,13 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_arg("tool", |a| a.help(h("help.uninstall.arg.tool")))
             .mut_arg("global", |a| a.help(h("help.uninstall.flag.global")))
     })
-    .mut_subcommand("current", |c| c.about(h("help.current.about")))
+    .mut_subcommand("current", |c| {
+        c.about(h("help.current.about"))
+            .mut_arg("sources", |a| a.help(h("help.current.sources")))
+            .mut_arg("json", |a| a.help(h("help.current.json")))
+            .mut_arg("project", |a| a.help(h("help.current.project")))
+            .mut_arg("probe", |a| a.help(h("help.current.probe")))
+    })
     .mut_subcommand("where", |c| {
         c.about(h("help.where.about"))
             .mut_arg("global", |a| a.help(h("help.where.flag.global")))

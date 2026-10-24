@@ -1,5 +1,7 @@
 # Java and JVM Tools
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#java), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#java).
+
 This page covers the Java JDK and JRE, plus JVM tools such as Maven, Gradle, and Kotlin.
 
 ## Java JDK and JRE

@@ -74,6 +74,7 @@ system PATH.
 osdk list|ls [TOOL]
 osdk list-remote|lsr TOOL [FILTER]
 osdk current [TOOL]
+osdk current TOOL --sources [--project DIR] [--json] [--probe]
 osdk where TOOL[@VERSION]
 osdk reshim
 ```
@@ -165,3 +166,5 @@ explicitly.
 
 Next, read [Projects and Configuration](../config/files) to turn individual commands
 into a shared project environment.
+
+Use [source diagnostics](../config/tool-selection#inspect-sources) to list supported, present, missing and inapplicable kinds with effective order; default inspection does not execute system tools.

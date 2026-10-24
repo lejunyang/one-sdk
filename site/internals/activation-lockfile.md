@@ -90,4 +90,4 @@ task 专用实现。
 - trust store 自身也采用临时文件加 rename，但没有 read-modify-write 锁、durability 或跨平台替换原子性保证；并发 trust/untrust 同样可能丢失更新。
 
 
-主动启用 `system` 时，activation/shim 使用共享的外部执行目标，外部路径不进入托管 receipt 或锁条目。prefer 下 current/命令所有权发现不探测。托管激活仍只选择已安装版本且不安装；显式托管版本及锁重放不会悄悄换成主机程序。参见[系统工具](../guide/config/files#system-tools)。
+主动启用 `system` 时，activation/shim 使用共享的外部执行目标，外部路径不进入托管 receipt 或锁条目。prefer 下 current/命令所有权发现不探测。托管激活仍只选择已安装版本且不安装；显式托管版本及锁重放不会悄悄换成主机程序。参见[系统工具](../guide/config/tool-selection#system-tools)。

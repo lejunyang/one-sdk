@@ -103,7 +103,7 @@ Saving serializes the full document, writes a unique sibling temporary file cont
 ## Boundaries to keep in mind
 
 - “Global” means an osdk-controlled user-level selection. Global npm and Go-tool `use` write a user `osdk.lock`, but never rewrite the current project lock. npm uses a distinct global install scope; Go tools keep the same identity-qualified native install roots across project and global selection.
-- Managed activation selects installed versions only. A missing match is skipped; activation never installs it. Opt-in `system` selects an existing external execution target instead; see [system tools](../guide/config/files#system-tools).
+- Managed activation selects installed versions only. A missing match is skipped; activation never installs it. Opt-in `system` selects an existing external execution target instead; see [system tools](../guide/config/tool-selection#system-tools).
 - A lockfile records the saved resolution and backend-specific reproduction identity. Project `use` serializes and transactionally publishes its own config/lock update, but other project writers do not yet share one lock. The global npm `use` user-lock write runs under its dedicated state lock. Floating Rust channels are not immutable versions. Reinstallation applies currently available or policy-required verification; a complete installation is not checksum-rehashed.
 - The trust store also uses temporary-file rename without a read-modify-write lock, durability guarantee, or portable replace-atomicity guarantee, so concurrent trust/untrust operations can lose updates.
 

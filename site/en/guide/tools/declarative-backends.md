@@ -1,5 +1,7 @@
 # Declarative Backends
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#tool-order-reference), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#per-tool-environment).
+
 At startup, osdk automatically loads direct `*.toml` children from these
 directories; there is no separate installation command:
 

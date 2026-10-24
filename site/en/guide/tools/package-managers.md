@@ -1,5 +1,7 @@
 # JavaScript Package Managers
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#tool-order-reference), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#per-tool-environment).
+
 osdk treats npm, pnpm, and Yarn as independently lockable backends and also
 manages Bun and Deno directly. Before commands that may fetch npm packages, it
 can select a registry without rewriting the project's lockfile.
@@ -301,45 +303,9 @@ Move defaults to `registries.npm.default` or `registries.python.default`. Use `r
 For a local exception, use `deps.uv.registries.python.default = "https://example.org/simple/"`.
 Unknown fields fail normally, including invented generic Cargo/Deno source fields.
 
-## Configurable declaration precedence
+## Package-source precedence
 
-See the [complete tool_order values and per-tool applicability](../config/files#tool-order-reference).
-
-```toml
-[settings.precedence]
-tools = "osdk"
-packages = "native"
-tool_order = [".node-version", ".nvmrc", "osdk"]
-tool_conflicts = "error" # default: prefer, select by order
-npm = "osdk"           # optional override of packages; inherit clears this override
-python = "native"
-```
-
-`tool_order` is one shared source-kind order for all tools, highest first; it is not a per-tool map. Only kinds applicable to the requested tool participate. For each filename, the nearest declaration is considered; `idiomatic` also preserves the fixed backend filename order below.
-Accepted kinds: `system` (opt-in), `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
-`package.json#packageManager`, `package.json#devEngines.packageManager`,
-`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted declaration kinds are appended in
-_default_ order, not disabled. `system` is the exception: it is enabled only when explicitly listed. Unknown or duplicate entries fail. `[]` clears an inherited custom
-order and disables inherited `system`. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
-The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
-packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
-`tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
-
-Project osdk uses only the nearest configuration and explicit `extends`, not implicit parent merging.
-User, extends and project precedence settings merge by field; arrays replace; omitted fields inherit.
-Overridden ancestors within a kind are shadowed evidence, not simultaneous conflict constraints; inactive version values are not validated. Declarations belonging to another tool are ignored without interpreting their version or integrity values. Native manager fields choose the nearest identity across manager names; automatic manager selection rejects unsupported identities.
-`osdk current` reports tool, path, field, category, winner/shadowed/ignored and reason from the same selection result.
-Known structured fields, JSON fields and simple-file line numbers are reported; unknown paths remain
-absent rather than guessed.
-
-`tool_conflicts="error"` compares effective declarations across kinds: an exact version satisfying a
-range is compatible; numeric prefixes, supported semver comparators and `||` use pairwise range
-overlap after expanding configured aliases. This does not merge ranges into a new request: the
-highest-priority declaration still selects the version. Different latest/LTS/channels or opaque selectors
-that cannot be proved compatible offline produce a distinct unverifiable error, not a claimed
-incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager requires exact semver without URLs, hashes or build suffixes; devEngines.packageManager accepts a
-single object or single-element array with a range, and rejects multiple alternatives explicitly.
-Explicit `tool@version`, explicit deps provider/installer choices, and lock replay keep their authority.
+Tool version order, its complete enum and per-tool matrix are maintained in [Tool Selection](../config/tool-selection). Use `osdk current pnpm --sources` to inspect the current project; see [Tool Environments](../config/tool-environment) for environment selectors and cache overrides.
 
 `npm`, `python`, and `go` under `[settings.precedence]` override **package-source** policy for that ecosystem, not tool-version policy. They accept `osdk`, `native`, or `inherit` (use `packages` again); for example, `python="native"` preserves Python package indexes, not `.python-version` priority. They do not reorder native credentials, scope routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
 user/first-system candidates. Complex settings (named indexes, bindings and other unmodeled fields)
@@ -348,8 +314,3 @@ A possible uv workspace delegates the group intact, including membership/exclusi
 index injection; uv may still validate member metadata. Candidate files are not per-field winners. Requirements/constraint inputs with native options or unreadable context, positional `uv pip sync`/`compile` inputs, and explicit config/directory (`-C` included)/offline/dotenv invocation options, including options before subcommands, are delegated to uv;
 false-like UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX values do not disable injection merely by existing.
 Native files are not rewritten and failed execution is never retried with a different installer.
-
-
-### Opt-in external execution
-
-`tool_order` also accepts `system`, only when explicitly listed. Defaults and `[]` keep it disabled. The [system-tool reference](../config/files#system-tools) defines supported adapters, home-before-PATH search, Windows `.exe` limits, probing and examples. External tools are absolute execution targets rather than managed versions or installations. Explicit CLI versions, managed lock replay and frozen deps retain authority. Non-frozen deps can use unpinned external tools, revalidates each run under this policy and does not write portable receipts for external paths. Dynamic package-tool runtime receipts remain managed; mixing them with system execution is rejected.

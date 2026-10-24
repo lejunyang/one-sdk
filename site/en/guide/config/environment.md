@@ -1,5 +1,7 @@
 # Environment Variables
 
+For tool-specific PATH/home selectors, managed child variables and cache override settings, see [Tool Environments](./tool-environment). The precedence below applies only to implemented settings; it does not provide a universal `OSDK_<TOOL>_VERSION`.
+
 Every `OSDK_*` variable osdk reads is listed here, grouped by purpose. Overall
 precedence is `command-line options > OSDK_* variables > project configuration >
 user configuration > built-in defaults`; see

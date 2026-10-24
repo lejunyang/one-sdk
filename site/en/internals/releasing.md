@@ -17,7 +17,7 @@ platforms before a new tag exists.
 
 ## Planned 0.0.7 patch
 
-This patch prepares configurable tool source precedence and opt-in existing system tools, structured selection evidence, and unified project package source policy. The bilingual configuration guides describe supported source kinds and environment behavior. This is a version preparation; the PR does not create a tag or publish a release.
+This patch prepares configurable tool source precedence and opt-in existing system tools, structured selection evidence, and unified project package source policy. The bilingual configuration guides describe supported source kinds and environment behavior. `current TOOL --sources` adds project source inventory, effective ordering, JSON output, explicit directory targeting and opt-in version probes. This is a version preparation; the PR does not create a tag or publish a release.
 
 ## What one release publishes
 

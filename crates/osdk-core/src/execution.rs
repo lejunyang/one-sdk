@@ -1,6 +1,9 @@
 //! Host executables are execution targets, never managed installations.
 //! Discovery performs no subprocesses. Only explicit verification executes a
 //! bounded version probe. `system` is opt-in and is never appended by defaults.
+#[cfg(feature = "install")]
+pub mod diagnostics;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;

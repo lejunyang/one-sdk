@@ -1,5 +1,7 @@
 # JavaScript 包管理器
 
+配置参考：[适用的 tool_order 来源](../config/tool-selection#tool-order-reference)、[项目来源诊断](../config/tool-selection#inspect-sources)、[本工具的选择器、托管变量与缓存覆盖](../config/tool-environment#per-tool-environment)。
+
 osdk 把 npm、pnpm 和 Yarn 当作可独立锁定的 backend，也直接管理 Bun、Deno。
 它同时为可能获取 npm 包的命令做启动前 Registry 选择，但不会重写项目 lockfile。
 
@@ -278,50 +280,12 @@ proxy = "https://proxy.golang.org,direct"
 项目局部例外可写成 `deps.uv.registries.python.default = "https://example.org/simple/"`。
 未知字段正常报错，不能静默接受 Cargo/Deno 的虚构通用源字段。
 
-## 可配置的声明优先级
+## 项目包来源优先级
 
-完整合法值和各工具适用范围见 [tool_order 集中参考](../config/files#tool-order-reference)。
-
-```toml
-[settings.precedence]
-tools = "osdk"
-packages = "native"
-tool_order = [".node-version", ".nvmrc", "osdk"]
-tool_conflicts = "error" # 默认 prefer，按顺序选取
-npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆盖
-python = "native"
-```
-
-`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `system`（需主动启用）、`osdk`、`global`、
-`.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
-`package.json#packageManager`、`package.json#devEngines.packageManager`、
-`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏的声明来源按默认顺序补齐；`system` 是例外，仅在数组中明确列出时启用。
-未知值和重复值报错；`[]` 清除继承的自定义顺序并禁用继承的 `system`。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
-.tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
-devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
-把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
-
-项目 osdk 只使用最近配置及显式 `extends`，不隐式合并父配置。precedence 的用户、
-extends、项目层按字段覆盖，数组替换；未写的策略字段继承。工具声明同类中被覆盖的
-父层仅作为 shadowed 证据，不参与冲突检查，也不校验已失效的版本值。其他工具的声明以 ignored 记录，不解释其版本或完整性值。原生管理器字段跨管理器名称选择最近身份；自动选择遇到不支持的身份会报错。`osdk current` 输出同一选择结果中的
-tool、path、field、category、winner/shadowed/ignored 和 reason；结构化配置字段、JSON 字段和简单
-文件行号会在已知时报告，不能确定的路径保留为空，不猜测。
-
-`tool_conflicts="error"` 检查不同来源的有效声明：精确版本满足范围不算冲突，数字前缀、
-支持的 semver 比较符及 `||` 按范围检查两两交集；配置 alias 先展开。它不把多个范围
-合并成新的版本请求，最终仍选择最高优先级声明。不同的 latest/LTS/channel 或不透明选择器
-无法离线证明兼容时单独报“无法验证”，不伪称已确认冲突，也不联网安装来解释。
-`prefer` 选择最高项，但仍校验有效候选声明的结构。packageManager 要求精确 semver，不支持 URL、hash 或 build suffix；
-devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数组支持范围。
-显式 `tool@version`、指定的 deps provider/installer 及锁重放保持各自权威。
+工具版本顺序、完整枚举与各工具适用矩阵统一维护在[工具选择](../config/tool-selection)。用 `osdk current pnpm --sources` 检查当前项目；环境选择器与缓存覆盖见[工具环境变量](../config/tool-environment)。
 
 `[settings.precedence]` 下的 `npm`、`python`、`go` 只覆盖对应生态的**包源策略**，不控制工具版本顺序。可取 `osdk`、`native`、`inherit`（恢复使用 `packages`）；例如 `python="native"` 保留 Python 包索引策略，不会提升 `.python-version`。这些字段不重排管理器内部的认证、scope 或 TLS 来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
 复杂配置（命名索引、绑定及其他未建模字段）在 native 下整组保留，osdk 显式索引
 实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
 不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
 的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。
-
-
-### 主动启用外部工具执行
-
-`tool_order` 还接受 `system`，但必须明确列出；默认值和 `[]` 都禁用它。[系统工具参考](../config/files#system-tools) 列出适配器、home 优先于 PATH、Windows 仅 `.exe` 的限制、探测及示例。外部工具是绝对执行目标，不伪装成托管版本或安装。显式 CLI 版本、托管锁重放及 frozen deps 保持权威；非 frozen deps 可使用未固定的外部工具，该策略下每次重新验证，不为外部路径写可移植 receipt。动态包工具的运行时 receipt 仍保持托管，不允许与 system 执行混用。

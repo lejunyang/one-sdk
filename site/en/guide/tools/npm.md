@@ -1,5 +1,7 @@
 # npm Developer Tools
 
+Configuration reference: [applicable tool_order sources](../config/tool-selection#tool-order-reference), [project source diagnostics](../config/tool-selection#inspect-sources), and [this tool’s selectors, managed variables and cache overrides](../config/tool-environment#per-tool-environment).
+
 osdk accepts command-line packages from an npm registry through the
 `npm:<package>` namespace. `osdk use` is context-aware: it can add a tool to a
 real Node project, install it as a user-wide global tool, or retain the original
