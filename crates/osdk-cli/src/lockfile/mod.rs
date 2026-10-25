@@ -1966,6 +1966,39 @@ lockfile = "lockfileVersion: '9.0'"
     /// it. A write-only `[deps]` section would repeat that exactly -- the lock
     /// would promise an installer and index that no replay consults.
     #[test]
+    fn deps_merge_refuses_to_replace_another_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.lock");
+        let a = temp.path().join("a.json");
+        let b = temp.path().join("b.json");
+        std::fs::write(&a, "{}").unwrap();
+        std::fs::write(&b, "{}").unwrap();
+        let record = |manifest: &Path| {
+            merge_deps(
+                &path,
+                "npm",
+                DepsRecord {
+                    installer: "npm".into(),
+                    installer_version: None,
+                    runtime: None,
+                    project_root: temp.path(),
+                    manifest,
+                    native_lock: None,
+                    run: "npm install".into(),
+                    index: None,
+                    allow_build_from_source: false,
+                },
+            )
+        };
+        record(&a).unwrap();
+        record(&a).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = record(&b).unwrap_err();
+        assert!(error.to_string().contains("different manifest"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
     fn deps_section_round_trips_and_is_omitted_when_empty() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);

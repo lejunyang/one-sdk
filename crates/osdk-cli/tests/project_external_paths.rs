@@ -468,4 +468,269 @@ fn external_use_persists_in_bundle_not_project_tree() {
         !project.join("osdk.toml").exists(),
         "must not create a shadow local osdk.toml"
     );
+    assert!(
+        !project.join("osdk.lock").exists(),
+        "use must keep the lock outside the project"
+    );
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(bundle.join("osdk.lock")).unwrap()).unwrap();
+    let platforms = lock["platforms"].as_table().unwrap();
+    assert_eq!(platforms.len(), 1, "{lock}");
+    assert_eq!(
+        platforms.values().next().unwrap()["tools"]["node"]["version"].as_str(),
+        Some("1.0.0")
+    );
+    let before = "# retain this selection on lock failure\n[tools]\nnode='9.9.9'\n";
+    std::fs::write(bundle.join("osdk.toml"), before).unwrap();
+    std::fs::write(bundle.join("osdk.lock"), "invalid = = lock").unwrap();
+    let failed = isolated(root)
+        .args(["use", "node@1.0.0"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success(), "{failed:?}");
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("osdk.toml")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("osdk.lock")).unwrap(),
+        "invalid = = lock"
+    );
+    assert!(!project.join("osdk.lock").exists());
+}
+
+#[test]
+fn external_git_project_loads_without_inheritance() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    let config = std::path::Path::new(row["binding_dir"].as_str().unwrap()).join("osdk.toml");
+    std::fs::write(&config, "[tools]\nnode='20'\n").unwrap();
+    let out = isolated(root)
+        .args(["current", "node"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("20"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn inherited_tasks_keep_declaring_roots_for_local_and_external_projects() {
+    for external in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let repo = root.join("repo");
+        let project = repo.join("apps/svc");
+        let worker = project.join("worker");
+        std::fs::create_dir_all(&worker).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join("osdk.toml"),
+            "[tasks.parent]\nlua='write(\"parent-result\", \"parent\"); return 0'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            worker.join("osdk.toml"),
+            "[tasks.child]\nlua='write(\"worker-result\", \"worker\"); return 0'\n",
+        )
+        .unwrap();
+        let config = if external {
+            let add = isolated(root)
+                .args(["project", "add", "--json"])
+                .arg(&project)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(add.status.success(), "{add:?}");
+            let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+            std::path::Path::new(row["binding_dir"].as_str().unwrap()).join("osdk.toml")
+        } else {
+            project.join("osdk.toml")
+        };
+        std::fs::write(&config,
+            "extends='../../osdk.toml'\n[task]\nroots=['worker']\n[tasks.leaf]\nlua='write(\"leaf-result\", \"leaf\"); return 0'\n").unwrap();
+        for task in ["parent", "leaf", "//apps/svc/worker:child"] {
+            let out = isolated(root)
+                .args(["run", task])
+                .current_dir(&project)
+                .env("OSDK_TRUSTED_CONFIG_PATHS", root)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "external={external}, task={task}: {out:?}"
+            );
+        }
+        for (path, content) in [
+            (repo.join("parent-result"), "parent"),
+            (project.join("leaf-result"), "leaf"),
+            (worker.join("worker-result"), "worker"),
+        ] {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        }
+        // The external leaf is allowed outside .git, but an inherited target
+        // outside the repository is still rejected before a task can execute.
+        std::fs::write(root.join("osdk.toml"), "[tools]\nnode='99'\n").unwrap();
+        std::fs::write(&config, "extends='../../../osdk.toml'\n").unwrap();
+        let out = isolated(root)
+            .args(["current", "node"])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("repository boundary"),
+            "{out:?}"
+        );
+    }
+}
+
+#[test]
+fn external_inherited_deps_keep_the_catalog_declaring_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = root.join("repo");
+    let project = repo.join("apps/svc");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir(repo.join(".git")).unwrap();
+    std::fs::create_dir(repo.join("shared")).unwrap();
+    std::fs::write(
+        repo.join("shared/package.json"),
+        r#"{"packageManager":"npm@11.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("osdk.toml"), "[deps.projects.shared.npm]\n").unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    let bundle = std::path::Path::new(row["binding_dir"].as_str().unwrap());
+    std::fs::write(bundle.join("osdk.toml"), "extends='../../osdk.toml'\n").unwrap();
+    let deps = isolated(root)
+        .args(["deps", "--list", "--all", "--explain"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(deps.status.success(), "{deps:?}");
+    let output = String::from_utf8_lossy(&deps.stdout);
+    assert!(output.contains("//shared:npm"), "{output}");
+    // A catalog in the external leaf instead resolves relative to that leaf's
+    // logical root, even while it inherits tool declarations from an ancestor.
+    std::fs::write(repo.join("osdk.toml"), "[tools]\nnode='20'\n").unwrap();
+    std::fs::create_dir(project.join("worker")).unwrap();
+    std::fs::write(
+        project.join("worker/package.json"),
+        r#"{"packageManager":"npm@11.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        bundle.join("osdk.toml"),
+        "extends='../../osdk.toml'\n[deps.projects.worker.npm]\n",
+    )
+    .unwrap();
+    let leaf = isolated(root)
+        .args(["deps", "--list", "--all"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(leaf.status.success(), "{leaf:?}");
+    assert!(
+        String::from_utf8_lossy(&leaf.stdout).contains("//worker:npm"),
+        "{leaf:?}"
+    );
+    assert!(!project.join("osdk.toml").exists());
+    assert!(!project.join("osdk.lock").exists());
+}
+
+#[test]
+fn external_shared_lock_rejects_distinct_manifests_for_one_provider() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for name in ["a", "b"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+        std::fs::write(
+            root.join(name).join("package.json"),
+            r#"{"packageManager":"npm@11.0.0"}"#,
+        )
+        .unwrap();
+    }
+    let add = isolated(root)
+        .args(["project", "add", "."])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let bundle = std::fs::read_dir(root.join("config/projects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
+    std::fs::write(
+        bundle.join("osdk.toml"),
+        "[deps.projects.a.npm]\n[deps.projects.b.npm]\n",
+    )
+    .unwrap();
+    let before = std::fs::read(bundle.join("osdk.lock")).unwrap();
+    let out = isolated(root)
+        .args(["deps", "--dry-run"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("distinct manifests"),
+        "{out:?}"
+    );
+    assert_eq!(std::fs::read(bundle.join("osdk.lock")).unwrap(), before);
+    assert!(!root.join("a/osdk.lock").exists());
+    let list = isolated(root)
+        .args(["deps", "--list", "--all"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    // L1 paths are relative to the lock file, including an external bundle.
+    let native = bundle.join("saved-lock.json");
+    std::fs::write(&native, "{}").unwrap();
+    let manifest = toml::Value::String(root.join("a/package.json").to_string_lossy().into_owned());
+    std::fs::write(bundle.join("osdk.lock"), format!("schema=4\n[deps.npm]\ninstaller='npm'\nmanifest={manifest}\nmanifest_sha256='{}'\nrun='npm install'\n[deps.npm.native_lock]\nkind='package-lock'\npath='saved-lock.json'\nsha256='{}'\n", "00".repeat(32), osdk_core::deps::file_sha256(&native).unwrap())).unwrap();
+    let verified = isolated(root)
+        .args(["deps", "--verify", "--filter", "a"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&verified.stdout).contains("L1 saved-lock.json matches osdk.lock"),
+        "{verified:?}"
+    );
+    let before = std::fs::read(bundle.join("osdk.lock")).unwrap();
+    let conflict = isolated(root)
+        .args(["deps", "--dry-run", "--filter", "b"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success(), "{conflict:?}");
+    assert!(
+        String::from_utf8_lossy(&conflict.stderr).contains("different manifest"),
+        "{conflict:?}"
+    );
+    assert_eq!(std::fs::read(bundle.join("osdk.lock")).unwrap(), before);
 }

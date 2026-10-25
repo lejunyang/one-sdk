@@ -210,6 +210,14 @@ osdk project remove ~/tmp/checkout --dry-run
 留在项目之外。同一根上的本地 `osdk.toml` 永远优先于外置配置。移动或删除
 绑定时只保留或删除外置目录本身——项目文件与共享工具安装都不受影响。
 
+`project show .` 在子目录中也会报告实际选中的项目。`project add` 与
+`project relocate` 的目标必须是目录。已有绑定目录内容不会被覆盖；准备新绑定
+失败时，原绑定仍完整保留。
+Git 仓库也支持外置配置。使用 `extends` 时，继承任务仍在声明它的目录执行，
+继承文件不能越过仓库边界。
+
+每个外置 bundle 的每个依赖 provider 仅支持一个 manifest；使用同一 provider 的独立项目应分别绑定。锁记录冲突会在运行工具前被拒绝。
+
 指南：[外置项目配置](site/guide/project/external-config.md)
 
 ## 场景：用项目任务替代 Makefile
@@ -338,7 +346,8 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 传递依赖图。
 
 托管 `npm i -g` 等命令使用共享全局目录，因此切换 Node 不会删除包文件。
-经 osdk shim 运行的受支持 JS 包管理器会在退出后对账全局命令入口。全局命令使用
+经 osdk shim 运行的受支持 JS 包管理器会在退出后对账全局命令入口，
+快速卸载后重装也会恢复入口。全局命令使用
 所选运行时，不要求另装独立 npm；项目外可主动用 `osdk use --global node@22`
 设置默认版本。缺少运行时会给出提示，不会任取一个已安装版本。
 `osdk reshim` 也能发布原生 Cargo/Go 应用，不要求选择编译器。native addon、

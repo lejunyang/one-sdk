@@ -237,6 +237,14 @@ A local `osdk.toml` on the same root always wins over the external copy. Moving
 or removing a binding preserves or deletes only the external directory itself —
 project files and shared tool installations are never touched.
 
+`project show .` also finds the selected project from a child directory.
+`project add` and the destination of `project relocate` require a directory.
+Existing bundle contents are never overwritten; a failed preparation leaves the original binding intact.
+Git checkouts support external configuration too. With `extends`, inherited
+tasks keep their declaring directories and inherited files stay inside the repository.
+
+Each external bundle supports one dependency manifest per provider; use separate bindings for independent projects using the same provider. Conflicting lock records are rejected before running tools.
+
 Guide: [External project configuration](site/en/guide/project/external-config.md)
 
 ## Scenario: replace a Makefile with project tasks
@@ -384,7 +392,8 @@ latter does not replace the transitive dependency graph.
 
 Managed `npm i -g` and similar commands use shared global directories, so changing
 Node does not remove the installed packages. Through osdk shims, supported JS
-managers reconcile their global command shims after exit. These commands use the
+managers reconcile their global command shims after exit, including rapid
+uninstall/reinstall cycles. These commands use the
 selected runtime without requiring an independent npm installation; outside a
 project, deliberately set a default with `osdk use --global node@22`. Missing
 runtimes produce a hint instead of choosing an arbitrary installed version.

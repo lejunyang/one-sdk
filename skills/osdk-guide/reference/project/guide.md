@@ -34,16 +34,32 @@ osdk project remove ~/tmp/checkout
 - `current` / `where` / `exec` / shim / shell hook / `use` / `config` /
   `source` 共用这套解析；`--global` 仍是用户全局默认，与绑定无关。
 
+`add` 与 `relocate` 的新目标必须是目录，普通文件会被拒绝。`show .`
+可在子目录调用，报告实际选中的项目根、绑定目录及配套配置/锁。
+
+目标 bundle 若已有未登记内容会拒绝覆盖。新增绑定一次发布完整目录；迁移
+先准备新配置与锁，发布成功才撤销旧登记。发布前失败保留旧绑定，发布后
+中断可能有两个登记，应检查 list 和文件后清理。目录改名/移动需 relocate。
+
+`use` 的配置与锁均写入选中的外置 bundle；锁更新失败时恢复原配置，
+不回退到项目目录写锁。
+
+继承的 `[deps]` 目录相对声明祖先解析；外置叶配置自己的 `[deps]`
+相对逻辑项目根解析。
+
 ## 写边界（安全相关，先读）
 
 - 外置项目的 `osdk use npm:xxx` 走隔离安装：不改 `package.json`、不碰原生
   lock；但 `osdk run` / `osdk deps` 仍按逻辑项目根写项目输出，**不承诺项目
   目录零写入**，不要绑定到真只读卷后期望 run/deps 不写盘。
 - 逻辑项目根是被绑定的目录：任务、deps、相对资源按它解析；`extends` 保留
-  逻辑祖先与仓库边界。
+  逻辑祖先与仓库边界。外置叶配置可位于仓库外，继承目标不可越界；继承任务
+  保持各自声明目录，根目录任务名相对最上层继承配置。
 - 信任按外置目录里真实 `osdk.toml` 审批；`relocate` 后物理路径变了，需要
   重新 `osdk trust`，不会自动跟随。
 - 没有 Git remote / 分支 / multi-profile 概念：绑定就是路径绑定。
 
 完整用法见用户指南 `site/guide/project/external-config.md`，实现取舍见
 `site/internals/project-config.md`。以 `osdk project --help` 为最终参数权威。
+
+Local dependency projects retain a separate `osdk.lock` per installation root. An external bundle currently holds only one manifest per dependency provider. `deps --list --all` can inspect all entries, but materialization and verification reject conflicting manifests before running tools; use separate external bindings for independent projects with the same provider. An existing record is never silently replaced by another project. Supporting multiple records for one provider in one bundle requires a future lock-format design.

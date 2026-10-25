@@ -503,9 +503,8 @@ struct OwnerSyncState {
 
 /// Reconcile the shims directory against one package manager's redirected
 /// global bin dirs, intended to run right after the package manager process
-/// exits. The bin dirs' aggregated modification time is compared to the value
-/// cached from the previous run: when nothing changed this returns without any
-/// directory enumeration. When it changed, current names are read and diffed
+/// exits. The bin dirs' modification time and current command names are
+/// compared to the previous run. When either changed, current names are diffed
 /// against the last sync -- new names get a shim; vanished names are removed
 /// unless `is_protected` reports they are still provided by a managed tool.
 ///
@@ -548,13 +547,18 @@ pub fn sync_owner_global_shims(
             None => (0, 0),
         };
     let previous = state.owners.get(owner).cloned().unwrap_or_default();
+    let previous_names: BTreeSet<String> = previous.names.iter().cloned().collect();
 
-    // Fast path: bin dir mtime unchanged since the last sync.
-    if previous.mtime_sec == mtime_sec && previous.mtime_nsec == mtime_nsec {
+    // Directory timestamps can collide for quick uninstall/reinstall cycles,
+    // and a different bin directory can hide a change behind the maximum mtime.
+    // We already collected names above; never discard that stronger evidence.
+    if previous.mtime_sec == mtime_sec
+        && previous.mtime_nsec == mtime_nsec
+        && previous_names == current
+    {
         return Ok(GlobalSyncOutcome::default());
     }
 
-    let previous_names: BTreeSet<String> = previous.names.iter().cloned().collect();
     let mut outcome = GlobalSyncOutcome::default();
 
     // A name another package manager still exports must keep its shared shim.
@@ -1893,7 +1897,15 @@ mod tests {
 
         // Reinstall, then uninstall again but with the name reported protected
         // (e.g. a managed tool still owns it): the shim must be kept.
+        #[cfg(unix)]
+        let prior_mtime = std::fs::metadata(&pnpm_bin).unwrap().modified().unwrap();
         make_launcher(&launcher);
+        // Reproduce filesystems where two directory changes share a timestamp.
+        #[cfg(unix)]
+        std::fs::File::open(&pnpm_bin)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(prior_mtime))
+            .unwrap();
         let fourth = sync_owner_global_shims(&ctx, "pnpm", never_protected).unwrap();
         assert_eq!(fourth.added, vec!["tool-a".to_string()]);
         std::fs::remove_file(&launcher).unwrap();

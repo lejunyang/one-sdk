@@ -10,10 +10,35 @@ The existing model assumes project configuration always lives in `osdk.toml` ins
 
 The `root-id` of `<config>/projects/<root-id>/` is the full BLAKE3 of the platform-aware normalized project-root path. It is deliberately not the project name or a Git remote:
 
-- Renaming a project or changing its remote must not change "which project this binding is"; names and remotes are mutable labels, the path identity is stable.
+- Changing a project display name or remote does not change the binding. Renaming or moving its directory changes the canonical path and requires relocation.
 - The directory name *is* the identity, so there is **no separately editable index file**. The `<config>/projects/` directory itself is the registry: enumerate it to discover every binding. The class of inconsistency "index entry points at a directory that no longer exists" cannot exist by construction.
 - `project.toml` (schema = 1) records exactly one thing: `root`, the real project root's absolute path. Once the physical directory and logical root are separated, the runtime needs an explicit anchor to point back at — otherwise the correspondence "configuration lives at X, project lives at Y" has nowhere to live.
 - The path identity is decided by the real path after OS canonicalization (dunce): junctions, 8.3 short names, and case aliases resolve to the same identity; casing follows filesystem semantics — osdk neither lowercases additionally nor applies Unicode normalization. The same directory written differently therefore yields exactly one binding.
+
+The boundary check exempts only the initial external leaf. All inherited
+files are checked against the logical repository, using the same canonical
+path representation on Windows. Task-root rebasing uses each layer's logical
+directory; loading and trust checking share the oldest inherited task anchor.
+
+Discovery normalizes the starting directory before walking ancestors, so
+relative CLI paths and symlink aliases reach the same selected context.
+`show` reports that context's root rather than the input subdirectory.
+
+Bundle publication stages files beside `projects/` on the same filesystem,
+then renames the complete directory into place; enumeration cannot see staging
+manifests. Relocation copies config/lock before publishing a new manifest and
+unregistering the old bundle. Publication failures preserve the source. A crash
+after publication can leave two complete registrations; this is recoverable
+with `project list` and `remove`, not a cross-directory transaction. Unknown
+files left in the old bundle are preserved during cleanup.
+
+Tool selection writes and rollback snapshots both use the selected
+ProjectContext lock path, while the metadata mutex remains keyed on the
+logical project root.
+
+Dependency discovery compares the selected leaf with `deps_anchor`: only an
+external leaf receives the logical-root override. Inherited catalogs and their
+own inheritance chains retain the declaring ancestor as their base.
 
 ## Single-writer source selection: config and lock as one set
 
@@ -58,3 +83,5 @@ An external `osdk use npm:xxx` keeps the isolated install and never touches the 
 - No tool installation is triggered;
 - No Git remote, branch, or multi-profile concept — a binding is a path binding, and switching branches does not swap configuration;
 - No files are ever generated inside the project directory.
+
+Local dependency projects retain a separate `osdk.lock` per installation root. An external bundle currently holds only one manifest per dependency provider. `deps --list --all` can inspect all entries, but materialization and verification reject conflicting manifests before running tools; use separate external bindings for independent projects with the same provider. An existing record is never silently replaced by another project. Supporting multiple records for one provider in one bundle requires a future lock-format design.

@@ -245,6 +245,8 @@ prefix/home and does not promise osdk's shared storage or automatic reconciliati
 
 When the managed package manager runs through an osdk shim, it reconciles its
 redirected global bin directories after exit, adding/removing command shims.
+Rapid uninstall/reinstall cycles are reconciled even when directory timestamps
+do not change.
 Directly invoking a manager binary or using another execution path may require
 `osdk reshim` afterward. These are native installs, separate from the versioned
 `osdk use npm:<package>` receipt/lock workflow.

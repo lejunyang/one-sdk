@@ -396,6 +396,27 @@ pub fn remove_tool(path: &Path, platform: Platform, backend: &str) -> Result<boo
     Ok(true)
 }
 
+/// A provider record must continue to describe the same manifest.
+pub fn validate_deps_manifest(path: &Path, provider: &str, manifest: &Path) -> Result<()> {
+    if path.is_file() {
+        let lockfile = load(path)?;
+        if let Some(entry) = lockfile.deps.get(provider) {
+            let recorded = path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&entry.manifest);
+            let same = dunce::canonicalize(&recorded)
+                .ok()
+                .zip(dunce::canonicalize(manifest).ok())
+                .is_some_and(|(recorded, requested)| recorded == requested);
+            if !same {
+                anyhow::bail!("dependency lock already records a different manifest for provider {provider}; refusing to overwrite it: {}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Record a materialized application environment in the lock.
 ///
 /// Paths are stored relative to the lock and normalized to `/`: this value gets
@@ -404,6 +425,7 @@ pub fn remove_tool(path: &Path, platform: Platform, backend: &str) -> Result<boo
 /// so the entry describes what was actually consumed rather than what was
 /// intended.
 pub fn merge_deps(path: &Path, provider: &str, record: DepsRecord<'_>) -> Result<()> {
+    validate_deps_manifest(path, provider, record.manifest)?;
     let mut lockfile = if path.is_file() {
         load(path)?
     } else {

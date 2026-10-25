@@ -96,16 +96,28 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Native declarations (e.g. rust-toolchain.toml) are discovered through
+      # ancestors even when a nearer osdk.toml only declares tasks. Keep this
+      # tool-free Action fixture outside the checkout, retaining its layout so
+      # the named task still exercises the checked-out helper scripts.
+      - name: Prepare independent Action smoke project
+        shell: bash
+        run: |
+          smoke_root="$RUNNER_TEMP/osdk-action-smoke"
+          mkdir -p "$smoke_root/.github/action-smoke" "$smoke_root/scripts"
+          cp .github/action-smoke/osdk.toml "$smoke_root/.github/action-smoke/"
+          cp scripts/test-github-action.sh scripts/test-github-action.ps1 "$smoke_root/scripts/"
+          cp -R action "$smoke_root/"
       - name: Set up osdk through the checked-out Action
         id: setup-osdk
         uses: ./
         with:
-          working-directory: .github/action-smoke
+          working-directory: ${{ runner.temp }}/osdk-action-smoke/.github/action-smoke
           cache-key: action-self-test-v1
           install-tools: false
           install-deps: false
       - name: Verify exported osdk and Action helper contracts
-        working-directory: .github/action-smoke
+        working-directory: ${{ runner.temp }}/osdk-action-smoke/.github/action-smoke
         run: osdk run github-action-smoke
 
   # Keep the interactive terminal contract visible on both macOS architectures.

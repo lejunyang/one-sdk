@@ -62,8 +62,9 @@ Every binding occupies one subdirectory under the config directory. A successful
   canonicalization: junctions, 8.3 short names, and case aliases resolve to the
   same identity; casing follows filesystem semantics — osdk neither lowercases
   additionally nor applies Unicode normalization. It is **not derived from the
-  project name or any Git remote**; renaming the project or changing its remote
-  does not disturb the binding.
+  project name or any Git remote**; changing a display name or remote does not
+  disturb the binding. Moving or renaming its directory changes the path and
+  requires `project relocate`.
 - There is no separately hand-editable index: the `<config>/projects/`
   directory and its `project.toml` files are the whole registry.
 - `osdk project show .` prints the physical directory behind the binding, so you
@@ -109,11 +110,22 @@ After binding, the **logical project root** is still the bound directory:
   root (or the location of the declaring file);
 - `extends` locates the `.git` repository boundary from the logical project
   root, and a reference crossing that boundary still errors; without `.git`, the
-  existing inheritance behavior is preserved;
+  existing inheritance behavior is preserved. The external config itself may
+  live outside the repository; this does not exempt files named by `extends`.
+  Inherited tasks run in their declaring directories. Rooted task names are
+  relative to the oldest inherited config (for example `//apps/svc/worker:build`);
 - Trust is still evaluated per real configuration file and remains
   project-level trust, tied to the config's real path, its project root, and the
   governed content. `relocate` moves the physical path, so the trust record
   becomes stale and must be re-approved rather than following automatically.
+
+`use` updates the selected external lock along with the external configuration.
+If that lock cannot be updated, the previous configuration is restored; no
+replacement lock is created in the project tree.
+
+A dependency catalog inherited with `extends` keeps paths relative to the
+ancestor that declares `[deps]`. A catalog declared in the external leaf
+uses the bound project root.
 
 ## use, run, and deps inside an external project
 
@@ -125,6 +137,13 @@ After binding, the **logical project root** is still the bound directory:
   artifacts, dependency directories) relative to the logical project root, so
   external configuration **does not promise zero writes to the project
   directory**.
+
+Unregistered files already present at a destination bundle are preserved and
+reported as a conflict. `add` publishes a complete bundle at once. `relocate`
+prepares and publishes the new bundle before unregistering the old one, so a
+preparation failure leaves the old configuration and lock intact. A process
+interrupted after publication may leave both bindings; inspect `project list`
+and remove the obsolete one after checking its files.
 
 ## Relocating and removing bindings
 
@@ -139,6 +158,10 @@ osdk project remove PATH           # no longer need this external binding
 - `remove` deletes only the external binding directory itself: it does **not**
   delete the project files or the shared tool installations. Preview what would
   be removed with `--dry-run` first.
+
+`add` and the new destination of `relocate` reject regular files. `show`
+accepts relative paths and walks upward from a child directory; its `root`,
+`binding_dir`, config, and lock all describe the selected project.
 
 ## What show and list report
 
@@ -162,3 +185,5 @@ An external binding is a path binding: it has no Git remote, branch, or
 multi-profile concept, and it does not swap configuration when you switch
 branches. If you need several configurations side by side, organize them the
 regular way inside configuration files.
+
+Local dependency projects retain a separate `osdk.lock` per installation root. An external bundle currently holds only one manifest per dependency provider. `deps --list --all` can inspect all entries, but materialization and verification reject conflicting manifests before running tools; use separate external bindings for independent projects with the same provider. An existing record is never silently replaced by another project. Supporting multiple records for one provider in one bundle requires a future lock-format design.

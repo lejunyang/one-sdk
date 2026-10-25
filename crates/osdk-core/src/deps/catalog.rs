@@ -296,12 +296,16 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                         .clone()
                         .unwrap_or_else(|| config_path.to_path_buf()),
                 );
-                let base = config.project_config.as_deref().unwrap().parent().unwrap();
+                let base = local_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .unwrap_or(&root);
                 for path in config.sources.iter_mut().chain(&mut config.outputs) {
                     *path = owned_path(base, path);
                 }
                 config.project_tools = crate::config::dependency_tool_versions(
                     local_path.as_deref().unwrap_or(config_path),
+                    local_path.is_none().then_some(root.as_path()),
                 )?;
                 if entry.dir.is_some() {
                     config.dir = None;
@@ -519,6 +523,45 @@ pub fn owned_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_catalog_input_paths_use_the_logical_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let bundle = temp.path().join("bundle");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&bundle).unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            r#"{"packageManager":"npm@11.0.0"}"#,
+        )
+        .unwrap();
+        let path = bundle.join("osdk.toml");
+        std::fs::write(
+            &path,
+            "[deps.npm]\nsources=['package.json']\noutputs=['node_modules']\n",
+        )
+        .unwrap();
+        let config = crate::config::inheritance::deps_file(&path, Some(&project)).unwrap();
+        let entries = catalog(&project, &path, &config).unwrap();
+        assert_eq!(entries.len(), 1);
+        let canonical = project.canonicalize().unwrap();
+        assert_eq!(
+            entries[0].config.sources,
+            vec![canonical
+                .join("package.json")
+                .to_string_lossy()
+                .into_owned()]
+        );
+        assert_eq!(
+            entries[0].config.outputs,
+            vec![canonical
+                .join("node_modules")
+                .to_string_lossy()
+                .into_owned()]
+        );
+    }
+
     fn write(root: &Path, path: &str, contents: &str) {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

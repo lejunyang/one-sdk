@@ -390,3 +390,7 @@ Direct native global installs are separate from dynamic npm receipts. The shim s
 Yarn Classic discovery scans `node_modules/.bin`. Go/Cargo output directories also participate in global discovery; their application shims do not resolve compiler versions. Rust SDK binaries and reserved/identity-verified rustup proxies stay in toolchain ownership. `reshim` discovers these native applications without creating managed receipts or portable locks. Native package removal remains the native manager's responsibility.
 
 Exec resolves a known native global entry directly when its execution plan supplies the required host; this prevents shim re-entry from replacing an explicit CLI version with the project selection. Native global entries remain outside receipt and lock authority.
+
+Global command reconciliation compares the enumerated command names as well
+as the aggregate directory timestamp. Matching timestamps alone cannot prove
+that a rapid uninstall/reinstall or another bin directory was unchanged.

@@ -2096,15 +2096,9 @@ impl Config {
             if let Some(config) = file.task {
                 self.tasks.apply_config(config);
             }
-            // Relative task paths anchor at the real project root. For a
-            // checked-in config that is the config file's own directory; for
-            // an external binding the config lives outside the tree, so the
-            // recorded real root is what makes `dir = "apps/api"` and script
-            // discovery resolve where the project actually is.
-            let base = self
-                .project_root
-                .clone()
-                .or_else(|| origin.and_then(Path::parent).map(Path::to_path_buf));
+            // The caller supplies the task anchor used by inheritance::load,
+            // which can differ from both the leaf and its physical bundle.
+            let base = origin.and_then(Path::parent).map(Path::to_path_buf);
             // Scripts first, so a `[tasks]` entry of the same name wins: the
             // TOML is the more specific statement, and a file appearing in the
             // directory should not quietly shadow it.
@@ -2467,8 +2461,11 @@ fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> 
 }
 
 #[cfg(feature = "install")]
-pub fn dependency_tool_versions(path: &Path) -> Result<BTreeMap<String, String>> {
-    let file = read_config_file(path, None)?;
+pub fn dependency_tool_versions(
+    path: &Path,
+    rel_base: Option<&Path>,
+) -> Result<BTreeMap<String, String>> {
+    let file = read_config_file(path, rel_base)?;
     let mut config = Config::default();
     config.apply_tool_configs(&file.tools)?;
     Ok(config.tools)
@@ -2664,7 +2661,9 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
             // Set the real root before applying so task relative paths anchor at
             // the project, not at the (possibly external) config directory.
             cfg.project_root = Some(ctx.root.clone());
-            cfg.apply_file(file, false, sources.first().map(PathBuf::as_path))?;
+            let task_origin =
+                inheritance::task_root(&sources, rel_base.as_deref()).join("osdk.toml");
+            cfg.apply_file(file, false, Some(&task_origin))?;
             cfg.settings.precedence = precedence.try_into().map_err(sanitize_config_parse_error)?;
             cfg.project_config_path = Some(path);
             cfg.project = Some(ctx);
@@ -3510,9 +3509,24 @@ npm = { version = "11.5.2", lazy = true, allow_builds = ["esbuild", "sharp"], en
     #[test]
     fn project_tool_configs_override_global_and_tool_versions_only_fill_missing() {
         let temporary = tempfile::tempdir().unwrap();
-        let project = temporary.path().join("project/nested");
+        check_project_tool_provenance(temporary.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_tool_provenance_through_a_symlink_uses_canonical_project_config() {
+        let temporary = tempfile::tempdir().unwrap();
+        let real = temporary.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = temporary.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        check_project_tool_provenance(&alias);
+    }
+
+    fn check_project_tool_provenance(base: &std::path::Path) {
+        let project = base.join("project/nested");
         std::fs::create_dir_all(&project).unwrap();
-        let user_config = temporary.path().join("config.toml");
+        let user_config = base.join("config.toml");
         std::fs::write(
             &user_config,
             r#"
@@ -3523,7 +3537,7 @@ npm = { version = "11.5.1", allow_builds = ["esbuild"] }
         )
         .unwrap();
         std::fs::write(
-            temporary.path().join("project/osdk.toml"),
+            base.join("project/osdk.toml"),
             r#"
 [tools]
 npm = { version = "11.5.2", allow_builds = ["sharp"], engine = "node" }
@@ -3532,7 +3546,7 @@ pnpm = "9.0.0"
         )
         .unwrap();
         std::fs::write(
-            temporary.path().join("project/.tool-versions"),
+            base.join("project/.tool-versions"),
             "node 22.0.0\nbun 1.1.0\n",
         )
         .unwrap();
@@ -3568,15 +3582,19 @@ pnpm = "9.0.0"
         );
         assert_eq!(
             config.tool_origins["npm"],
-            ToolConfigOrigin::ProjectConfig(temporary.path().join("project/osdk.toml"))
+            ToolConfigOrigin::ProjectConfig(
+                dunce::canonicalize(base.join("project/osdk.toml")).unwrap()
+            )
         );
         assert_eq!(
             config.tool_origins["pnpm"],
-            ToolConfigOrigin::ProjectConfig(temporary.path().join("project/osdk.toml"))
+            ToolConfigOrigin::ProjectConfig(
+                dunce::canonicalize(base.join("project/osdk.toml")).unwrap()
+            )
         );
         assert_eq!(
             config.tool_origins["bun"],
-            ToolConfigOrigin::ToolVersions(temporary.path().join("project/.tool-versions"))
+            ToolConfigOrigin::ToolVersions(base.join("project/.tool-versions"))
         );
     }
 

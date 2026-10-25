@@ -13,10 +13,27 @@ fn isolated(temp: &std::path::Path) -> Command {
 #[test]
 fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
+    binding_roundtrip(temp.path());
+}
+
+#[test]
+#[cfg(unix)]
+fn binding_roundtrip_through_a_symlink_uses_the_real_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    let alias = temp.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    binding_roundtrip(&alias);
+}
+
+fn binding_roundtrip(root: &std::path::Path) {
     // Space + non-ASCII in the project path.
     let project = root.join("my 项目 svc");
     std::fs::create_dir_all(&project).unwrap();
+    // The API returns the real root, including macOS /var symlinks and
+    // Windows 8.3 aliases. Keep exact equality against that identity.
+    let canonical_project = dunce::canonicalize(&project).unwrap();
 
     let add = isolated(root)
         .arg("project")
@@ -38,7 +55,7 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     assert!(show.status.success(), "{show:?}");
     let json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_eq!(json["source"], "external");
-    assert_eq!(json["root"], project.to_str().unwrap());
+    assert_eq!(json["root"], canonical_project.to_str().unwrap());
     assert_eq!(json["missing"], false);
     assert_eq!(json["shadowed_local_config"], serde_json::Value::Null);
 
@@ -51,7 +68,8 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
         .unwrap();
     let items: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["root"], project.to_str().unwrap());
+    assert!(list.status.success(), "{list:?}");
+    assert_eq!(items[0]["root"], canonical_project.to_str().unwrap());
 
     // The bundle owns its own osdk.lock; nothing landed in the project tree.
     assert!(!project.join("osdk.toml").exists());
@@ -435,4 +453,175 @@ fn relocate_racing_remove_leaves_store_consistent() {
             "surviving binding must be the relocated one: {root}"
         );
     }
+}
+
+#[test]
+fn project_path_show_from_child_reports_selected_binding_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    let nested = project.join("nested/child");
+    std::fs::create_dir_all(&nested).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let added: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    for path in [".", ".."] {
+        let show = isolated(root)
+            .args(["project", "show", path, "--json"])
+            .current_dir(&nested)
+            .output()
+            .unwrap();
+        assert!(show.status.success(), "{show:?}");
+        let row: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+        assert_eq!(row["source"], "external");
+        assert_eq!(row["root"], added["root"]);
+        assert_eq!(row["binding_dir"], added["binding_dir"]);
+        assert_eq!(
+            row["lock_path"],
+            format!(
+                "{}{}osdk.lock",
+                added["binding_dir"].as_str().unwrap(),
+                std::path::MAIN_SEPARATOR
+            )
+        );
+    }
+}
+
+#[test]
+fn project_path_add_and_relocate_reject_files_without_changing_bindings() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let file = root.join("ordinary-file");
+    std::fs::write(&file, "keep me").unwrap();
+    let add_file = isolated(root)
+        .args(["project", "add"])
+        .arg(&file)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!add_file.status.success(), "{add_file:?}");
+    assert!(String::from_utf8_lossy(&add_file.stderr).contains("directory"));
+    let project = root.join("repo");
+    std::fs::create_dir(&project).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let relocate = isolated(root)
+        .args(["project", "relocate"])
+        .arg(&project)
+        .arg(&file)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!relocate.status.success(), "{relocate:?}");
+    let list = isolated(root)
+        .args(["project", "list", "--json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["root"],
+        dunce::canonicalize(&project).unwrap().to_str().unwrap()
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+}
+
+#[test]
+fn bundle_publication_never_overwrites_unregistered_contents() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir(&project).unwrap();
+    let bundle = osdk_core::project::binding_dir_for_root(
+        &root.join("config"),
+        &dunce::canonicalize(&project).unwrap(),
+    );
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("osdk.toml"), "# user recovery copy\n").unwrap();
+    let add = isolated(root)
+        .args(["project", "add"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!add.status.success(), "{add:?}");
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("osdk.toml")).unwrap(),
+        "# user recovery copy\n"
+    );
+    assert!(!bundle.join("project.toml").exists());
+    assert!(!bundle.join("osdk.lock").exists());
+}
+
+#[test]
+fn bundle_publication_failed_relocate_keeps_source_complete() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let old = root.join("old");
+    let new = root.join("new");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::create_dir(&new).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&old)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    let source = std::path::Path::new(row["binding_dir"].as_str().unwrap());
+    let names = ["project.toml", "osdk.toml", "osdk.lock"];
+    let original: Vec<_> = names
+        .iter()
+        .map(|name| std::fs::read(source.join(name)).unwrap())
+        .collect();
+    let destination = osdk_core::project::binding_dir_for_root(
+        &root.join("config"),
+        &dunce::canonicalize(&new).unwrap(),
+    );
+    // A directory at a file destination makes the old per-file move fail
+    // after it has already moved the source manifest.
+    std::fs::create_dir_all(destination.join("osdk.toml")).unwrap();
+    std::fs::write(destination.join("osdk.toml/keep"), "untouched").unwrap();
+    let relocate = isolated(root)
+        .args(["project", "relocate"])
+        .arg(&old)
+        .arg(&new)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!relocate.status.success(), "{relocate:?}");
+    for (name, contents) in names.iter().zip(original) {
+        assert_eq!(
+            std::fs::read(source.join(name)).unwrap(),
+            contents,
+            "{name}"
+        );
+    }
+    assert!(!destination.join("project.toml").exists());
+    assert_eq!(
+        std::fs::read_to_string(destination.join("osdk.toml/keep")).unwrap(),
+        "untouched"
+    );
+    let show = isolated(root)
+        .args(["project", "show", "--json"])
+        .arg(&old)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "{show:?}");
+    let selected: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(selected["source"], "external");
 }

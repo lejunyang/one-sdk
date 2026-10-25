@@ -295,3 +295,6 @@ Linux workspace 测试与完整 Windows GNU Wine 套件。
 Yarn Classic 扫描 `node_modules/.bin`。Go/Cargo 输出目录也参与全局发现，其应用 shim 不解析编译器版本。Rust SDK 二进制及保留名称/文件身份确认的 rustup proxy 仍属于工具链。`reshim` 发现这些原生应用，不创建托管 receipt 或可移植 lock；原生包删除仍由原生管理器负责。
 
 当 exec 执行计划已提供所需宿主时，直接解析已知原生全局入口，避免再次进入 shim 后用项目选择覆盖显式 CLI 版本。原生全局入口仍不属于 receipt/lock 的可复现安装合同。
+
+全局命令对账同时比较已枚举的命令名称集合和聚合目录时间戳；仅时间戳
+相同不能证明快速卸载重装或另一个 bin 目录没有变化。
