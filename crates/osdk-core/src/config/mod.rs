@@ -3582,11 +3582,15 @@ pnpm = "9.0.0"
         );
         assert_eq!(
             config.tool_origins["npm"],
-            ToolConfigOrigin::ProjectConfig(base.join("project/osdk.toml").canonicalize().unwrap())
+            ToolConfigOrigin::ProjectConfig(
+                dunce::canonicalize(base.join("project/osdk.toml")).unwrap()
+            )
         );
         assert_eq!(
             config.tool_origins["pnpm"],
-            ToolConfigOrigin::ProjectConfig(base.join("project/osdk.toml").canonicalize().unwrap())
+            ToolConfigOrigin::ProjectConfig(
+                dunce::canonicalize(base.join("project/osdk.toml")).unwrap()
+            )
         );
         assert_eq!(
             config.tool_origins["bun"],
