@@ -537,3 +537,91 @@ fn project_path_add_and_relocate_reject_files_without_changing_bindings() {
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
 }
+
+#[test]
+fn bundle_publication_never_overwrites_unregistered_contents() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir(&project).unwrap();
+    let bundle = osdk_core::project::binding_dir_for_root(
+        &root.join("config"),
+        &dunce::canonicalize(&project).unwrap(),
+    );
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("osdk.toml"), "# user recovery copy\n").unwrap();
+    let add = isolated(root)
+        .args(["project", "add"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!add.status.success(), "{add:?}");
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("osdk.toml")).unwrap(),
+        "# user recovery copy\n"
+    );
+    assert!(!bundle.join("project.toml").exists());
+    assert!(!bundle.join("osdk.lock").exists());
+}
+
+#[test]
+fn bundle_publication_failed_relocate_keeps_source_complete() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let old = root.join("old");
+    let new = root.join("new");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::create_dir(&new).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&old)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    let source = std::path::Path::new(row["binding_dir"].as_str().unwrap());
+    let names = ["project.toml", "osdk.toml", "osdk.lock"];
+    let original: Vec<_> = names
+        .iter()
+        .map(|name| std::fs::read(source.join(name)).unwrap())
+        .collect();
+    let destination = osdk_core::project::binding_dir_for_root(
+        &root.join("config"),
+        &dunce::canonicalize(&new).unwrap(),
+    );
+    // A directory at a file destination makes the old per-file move fail
+    // after it has already moved the source manifest.
+    std::fs::create_dir_all(destination.join("osdk.toml")).unwrap();
+    std::fs::write(destination.join("osdk.toml/keep"), "untouched").unwrap();
+    let relocate = isolated(root)
+        .args(["project", "relocate"])
+        .arg(&old)
+        .arg(&new)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!relocate.status.success(), "{relocate:?}");
+    for (name, contents) in names.iter().zip(original) {
+        assert_eq!(
+            std::fs::read(source.join(name)).unwrap(),
+            contents,
+            "{name}"
+        );
+    }
+    assert!(!destination.join("project.toml").exists());
+    assert_eq!(
+        std::fs::read_to_string(destination.join("osdk.toml/keep")).unwrap(),
+        "untouched"
+    );
+    let show = isolated(root)
+        .args(["project", "show", "--json"])
+        .arg(&old)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "{show:?}");
+    let selected: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(selected["source"], "external");
+}

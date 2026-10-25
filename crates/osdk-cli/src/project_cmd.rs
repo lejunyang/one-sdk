@@ -109,20 +109,22 @@ pub(crate) fn add(dirs: &Dirs, path: Option<&Path>, dry_run: bool, json: bool) -
         return Ok(());
     }
 
+    require_empty_destination(&binding_dir)?;
     let shadowed = existing_local_config(&root);
     if !dry_run {
-        std::fs::create_dir_all(&binding_dir)
-            .with_context(|| format!("creating {}", binding_dir.display()))?;
-        // Write the manifest via a temp file + rename so a crashed add never
-        // leaves a directory discoverable with a half-written manifest.
+        // Stage outside projects/ so list/discovery cannot observe partial
+        // bundles. Publishing one directory makes all three files visible.
+        let staged = tempfile::Builder::new()
+            .prefix(".project-")
+            .tempdir_in(&dirs.config)?;
         write_atomic(
-            &binding_dir,
+            staged.path(),
             "project.toml.tmp",
             "project.toml",
             &toml::to_string(&Manifest::new(root.clone()))?,
         )?;
         write_atomic(
-            &binding_dir,
+            staged.path(),
             "osdk.toml.tmp",
             "osdk.toml",
             "# external project config: edit me\n",
@@ -130,11 +132,12 @@ pub(crate) fn add(dirs: &Dirs, path: Option<&Path>, dry_run: bool, json: bool) -
         // The bundle owns its lock from birth: discovery must never find an
         // empty selection and then borrow a lock from somewhere else.
         write_atomic(
-            &binding_dir,
+            staged.path(),
             "osdk.lock.tmp",
             "osdk.lock",
             &crate::lockfile::empty_lock_contents(),
         )?;
+        publish_bundle(staged.path(), &binding_dir)?;
     }
 
     if json {
@@ -160,6 +163,23 @@ pub(crate) fn add(dirs: &Dirs, path: Option<&Path>, dry_run: bool, json: bool) -
         }
     }
     Ok(())
+}
+
+fn require_empty_destination(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("checking {}", path.display())),
+        Ok(_) => bail!(
+            "refusing to overwrite existing project bundle directory: {}",
+            path.display()
+        ),
+    }
+}
+
+fn publish_bundle(staged: &Path, destination: &Path) -> Result<()> {
+    require_empty_destination(destination)?;
+    std::fs::rename(staged, destination)
+        .with_context(|| format!("publishing project bundle {}", destination.display()))
 }
 
 fn write_atomic(dir: &Path, tmp_name: &str, final_name: &str, contents: &str) -> Result<()> {
@@ -316,6 +336,44 @@ pub(crate) fn relocate(
         );
     }
     let new_dir = project::binding_dir_for_root(&dirs.config, &new_root);
+    require_empty_destination(&new_dir)?;
+
+    if !dry_run {
+        let staged = tempfile::Builder::new()
+            .prefix(".project-")
+            .tempdir_in(&dirs.config)?;
+        for name in ["osdk.toml", "osdk.lock"] {
+            let src = binding.dir.join(name);
+            if src.try_exists()? {
+                std::fs::copy(&src, staged.path().join(name))
+                    .with_context(|| format!("copying {}", src.display()))?;
+            }
+        }
+        write_atomic(
+            staged.path(),
+            "project.toml.tmp",
+            "project.toml",
+            &toml::to_string(&Manifest::new(new_root.clone()))?,
+        )?;
+        // No source file is removed until a complete destination is visible.
+        publish_bundle(staged.path(), &new_dir)?;
+        // Remove the old registration first. If cleanup is interrupted, the
+        // old location is unregistered and the complete new binding survives.
+        for name in ["project.toml", "osdk.toml", "osdk.lock"] {
+            let src = binding.dir.join(name);
+            if src.try_exists()? {
+                std::fs::remove_file(&src).with_context(|| {
+                    format!(
+                        "new binding is available at {}; cleaning old {}",
+                        new_dir.display(),
+                        src.display()
+                    )
+                })?;
+            }
+        }
+        // Preserve unrelated recovery files a user may have put in the bundle.
+        let _ = std::fs::remove_dir(&binding.dir);
+    }
 
     if json {
         println!(
@@ -345,29 +403,6 @@ pub(crate) fn relocate(
         }
         return Ok(());
     }
-
-    std::fs::create_dir_all(&new_dir)?;
-    // Move each bundle file individually; leave the old directory removed.
-    for name in ["project.toml", "osdk.toml"] {
-        let src = binding.dir.join(name);
-        if src.exists() {
-            std::fs::rename(&src, new_dir.join(name))
-                .with_context(|| format!("moving {}", src.display()))?;
-        }
-    }
-    let lock = binding.lock_path.clone();
-    if lock.exists() {
-        std::fs::rename(&lock, new_dir.join("osdk.lock"))?;
-    }
-    // Rewrite the manifest with the new recorded root.
-    write_atomic(
-        &new_dir,
-        "project.toml.tmp",
-        "project.toml",
-        &toml::to_string(&Manifest::new(new_root.clone()))?,
-    )?;
-    // Remove the now-empty old bundle directory.
-    let _ = std::fs::remove_dir(&binding.dir);
 
     // The config file moved; its old trust record no longer points at anything.
     eprintln!(

@@ -62,8 +62,9 @@ Every binding occupies one subdirectory under the config directory. A successful
   canonicalization: junctions, 8.3 short names, and case aliases resolve to the
   same identity; casing follows filesystem semantics — osdk neither lowercases
   additionally nor applies Unicode normalization. It is **not derived from the
-  project name or any Git remote**; renaming the project or changing its remote
-  does not disturb the binding.
+  project name or any Git remote**; changing a display name or remote does not
+  disturb the binding. Moving or renaming its directory changes the path and
+  requires `project relocate`.
 - There is no separately hand-editable index: the `<config>/projects/`
   directory and its `project.toml` files are the whole registry.
 - `osdk project show .` prints the physical directory behind the binding, so you
@@ -128,6 +129,13 @@ After binding, the **logical project root** is still the bound directory:
   artifacts, dependency directories) relative to the logical project root, so
   external configuration **does not promise zero writes to the project
   directory**.
+
+Unregistered files already present at a destination bundle are preserved and
+reported as a conflict. `add` publishes a complete bundle at once. `relocate`
+prepares and publishes the new bundle before unregistering the old one, so a
+preparation failure leaves the old configuration and lock intact. A process
+interrupted after publication may leave both bindings; inspect `project list`
+and remove the obsolete one after checking its files.
 
 ## Relocating and removing bindings
 

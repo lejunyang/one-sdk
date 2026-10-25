@@ -239,6 +239,7 @@ project files and shared tool installations are never touched.
 
 `project show .` also finds the selected project from a child directory.
 `project add` and the destination of `project relocate` require a directory.
+Existing bundle contents are never overwritten; a failed preparation leaves the original binding intact.
 Git checkouts support external configuration too. With `extends`, inherited
 tasks keep their declaring directories and inherited files stay inside the repository.
 

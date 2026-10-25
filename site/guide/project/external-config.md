@@ -53,7 +53,8 @@ osdk project remove ~/tmp/old-checkout
 - `root-id` 由真实项目根路径经 OS canonicalize 解析后的完整 BLAKE3 决定：
   junction、8.3 短名、大小写别名都归到同一身份；大小写按文件系统语义处理，
   osdk 不额外全小写，也不做 Unicode 规范化。它**不基于项目名，也不基于
-  Git remote**；项目改名或换 remote 不会影响绑定。
+  Git remote**；只改项目显示名称或 remote 不影响绑定。目录改名或移动会
+  改变路径身份，需要使用 `project relocate`。
 - 这里没有另一份可手工编辑的索引：`<config>/projects/` 目录与其中的
   `project.toml` 就是全部注册表。
 - 用 `osdk project show .` 可以直接看到绑定对应的物理目录，再去编辑里面的
@@ -106,6 +107,11 @@ osdk project remove ~/tmp/old-checkout
   项目目录里。
 - 但 `osdk run`、`osdk deps` 仍会按逻辑项目根正常写项目输出（构建产物、
   依赖目录等），因此外置配置**不承诺项目目录完全零写入**。
+
+目标绑定目录中已有的未登记文件会保留并报告冲突。`add` 一次发布完整的
+三件套；`relocate` 先准备并发布新绑定，再撤销旧登记，准备失败不会拆散
+旧配置与锁。若进程在发布后中断，可能留下两个绑定；用 `project list`
+检查并核实文件后，再移除过时绑定。
 
 ## 迁移与删除绑定
 
