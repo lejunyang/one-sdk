@@ -44,6 +44,9 @@ osdk project remove ~/tmp/checkout
 `use` 的配置与锁均写入选中的外置 bundle；锁更新失败时恢复原配置，
 不回退到项目目录写锁。
 
+继承的 `[deps]` 目录相对声明祖先解析；外置叶配置自己的 `[deps]`
+相对逻辑项目根解析。
+
 ## 写边界（安全相关，先读）
 
 - 外置项目的 `osdk use npm:xxx` 走隔离安装：不改 `package.json`、不碰原生

@@ -36,6 +36,10 @@ Tool selection writes and rollback snapshots both use the selected
 ProjectContext lock path, while the metadata mutex remains keyed on the
 logical project root.
 
+Dependency discovery compares the selected leaf with `deps_anchor`: only an
+external leaf receives the logical-root override. Inherited catalogs and their
+own inheritance chains retain the declaring ancestor as their base.
+
 ## Single-writer source selection: config and lock as one set
 
 While walking up from cwd, candidates include both a local `osdk.toml` and bound external projects. The selection rules:

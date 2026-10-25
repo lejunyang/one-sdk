@@ -123,6 +123,10 @@ After binding, the **logical project root** is still the bound directory:
 If that lock cannot be updated, the previous configuration is restored; no
 replacement lock is created in the project tree.
 
+A dependency catalog inherited with `extends` keeps paths relative to the
+ancestor that declares `[deps]`. A catalog declared in the external leaf
+uses the bound project root.
+
 ## use, run, and deps inside an external project
 
 - Running `osdk use npm:xxx` in an external project keeps the isolated

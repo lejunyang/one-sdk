@@ -110,17 +110,37 @@ impl App {
     /// preserving the CLI overlays from the original invocation.
     pub fn config_for_project(&self, path: &Path) -> Result<Config> {
         let user = self.ctx.dirs.user_config_file();
-        let original = match self
+        let original = match self.ctx.config.project_root.as_deref().or_else(|| {
+            self.ctx
+                .config
+                .project_config_path
+                .as_deref()
+                .and_then(Path::parent)
+        }) {
+            Some(base) => Config::load(&user, base)?,
+            None => Config::load_user(&user)?,
+        };
+        let selected = self
             .ctx
             .config
             .project_config_path
             .as_deref()
-            .and_then(Path::parent)
-        {
-            Some(base) => Config::load(&user, base)?,
-            None => Config::load_user(&user)?,
+            .is_some_and(|leaf| {
+                dunce::canonicalize(leaf)
+                    .ok()
+                    .zip(dunce::canonicalize(path).ok())
+                    .is_some_and(|(leaf, candidate)| leaf == candidate)
+            });
+        let base = if selected {
+            self.ctx
+                .config
+                .project_root
+                .as_deref()
+                .unwrap_or_else(|| path.parent().unwrap())
+        } else {
+            path.parent().unwrap()
         };
-        let mut config = Config::load(&user, path.parent().unwrap())?;
+        let mut config = Config::load(&user, base)?;
         macro_rules! overlay {
             ($($field:ident).+) => {
                 if self.ctx.config.$($field).+ != original.$($field).+ { config.$($field).+ = self.ctx.config.$($field).+.clone(); }

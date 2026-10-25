@@ -83,41 +83,24 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         .as_ref()
         .filter(|p| p.is_external())
         .map(|p| p.root.as_path());
-    let config_path = osdk_core::config::inheritance::deps_anchor(&config_path, rel_base)?;
-    // For an external binding the config file sits outside the project tree;
-    // deps roots, dir validation and native-file discovery anchor at the real
-    // recorded root, not at the config directory. When the [deps] section was
-    // inherited from an ancestor file (extends), relative entries were declared
-    // there, so keep anchoring at that file's directory -- the pre-existing
-    // behaviour for checked-in configs.
-    let external = app
-        .ctx
-        .config
-        .project
-        .as_ref()
-        .map(|p| p.is_external())
-        .unwrap_or(false);
-    let root = if external {
-        app.ctx.config.project.as_ref().unwrap().root.clone()
-    } else {
-        let leaf = app.ctx.config.project_config_path.clone();
-        let anchor_is_leaf = leaf
+    let leaf_config = config_path;
+    let config_path = osdk_core::config::inheritance::deps_anchor(&leaf_config, rel_base)?;
+    let anchor_is_leaf = dunce::canonicalize(&leaf_config)? == dunce::canonicalize(&config_path)?;
+    // Only the external leaf uses the bound project as its relative base.
+    // An inherited catalog belongs to the ancestor that declared it, just as
+    // it does for local projects, including that ancestor's own extends chain.
+    let root = if anchor_is_leaf {
+        app.ctx
+            .config
+            .project_root
             .as_deref()
-            .and_then(|p| dunce::canonicalize(p).ok())
-            .map(|p| p == dunce::canonicalize(&config_path).unwrap_or_default())
-            .unwrap_or(true);
-        if anchor_is_leaf {
-            app.ctx
-                .config
-                .project_root
-                .as_deref()
-                .unwrap_or_else(|| config_path.parent().unwrap_or(&cwd))
-                .to_path_buf()
-        } else {
-            config_path.parent().unwrap_or(&cwd).to_path_buf()
-        }
+            .unwrap_or_else(|| config_path.parent().unwrap_or(&cwd))
+            .to_path_buf()
+    } else {
+        config_path.parent().unwrap_or(&cwd).to_path_buf()
     };
-    let deps_config = osdk_core::config::inheritance::deps_file(&config_path, rel_base)?;
+    let anchor_rel_base = if anchor_is_leaf { rel_base } else { None };
+    let deps_config = osdk_core::config::inheritance::deps_file(&config_path, anchor_rel_base)?;
     let deps_config = if deps_config.providers.is_empty() && deps_config.projects.is_empty() {
         app.ctx.config.deps.clone()
     } else {

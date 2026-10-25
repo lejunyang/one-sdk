@@ -103,6 +103,9 @@ osdk project remove ~/tmp/old-checkout
 `use` 同时更新选中外置配置及其锁；若锁更新失败，恢复之前的配置，
 不会在项目目录另建替代锁。
 
+通过 `extends` 继承的依赖目录仍相对声明 `[deps]` 的祖先配置解析；
+在外置叶配置直接声明的依赖目录则相对绑定项目根解析。
+
 ## 外置项目里的 use、run 与 deps
 
 - 外置项目下执行 `osdk use npm:xxx` 走 osdk 隔离安装，**不会**改动项目里的

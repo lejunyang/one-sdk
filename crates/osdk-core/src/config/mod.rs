@@ -2461,8 +2461,11 @@ fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> 
 }
 
 #[cfg(feature = "install")]
-pub fn dependency_tool_versions(path: &Path) -> Result<BTreeMap<String, String>> {
-    let file = read_config_file(path, None)?;
+pub fn dependency_tool_versions(
+    path: &Path,
+    rel_base: Option<&Path>,
+) -> Result<BTreeMap<String, String>> {
+    let file = read_config_file(path, rel_base)?;
     let mut config = Config::default();
     config.apply_tool_configs(&file.tools)?;
     Ok(config.tools)

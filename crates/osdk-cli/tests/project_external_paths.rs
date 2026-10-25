@@ -598,3 +598,64 @@ fn inherited_tasks_keep_declaring_roots_for_local_and_external_projects() {
         );
     }
 }
+
+#[test]
+fn external_inherited_deps_keep_the_catalog_declaring_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = root.join("repo");
+    let project = repo.join("apps/svc");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir(repo.join(".git")).unwrap();
+    std::fs::create_dir(repo.join("shared")).unwrap();
+    std::fs::write(
+        repo.join("shared/package.json"),
+        r#"{"packageManager":"npm@11.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("osdk.toml"), "[deps.projects.shared.npm]\n").unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    let bundle = std::path::Path::new(row["binding_dir"].as_str().unwrap());
+    std::fs::write(bundle.join("osdk.toml"), "extends='../../osdk.toml'\n").unwrap();
+    let deps = isolated(root)
+        .args(["deps", "--list", "--all", "--explain"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(deps.status.success(), "{deps:?}");
+    let output = String::from_utf8_lossy(&deps.stdout);
+    assert!(output.contains("//shared:npm"), "{output}");
+    // A catalog in the external leaf instead resolves relative to that leaf's
+    // logical root, even while it inherits tool declarations from an ancestor.
+    std::fs::write(repo.join("osdk.toml"), "[tools]\nnode='20'\n").unwrap();
+    std::fs::create_dir(project.join("worker")).unwrap();
+    std::fs::write(
+        project.join("worker/package.json"),
+        r#"{"packageManager":"npm@11.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        bundle.join("osdk.toml"),
+        "extends='../../osdk.toml'\n[deps.projects.worker.npm]\n",
+    )
+    .unwrap();
+    let leaf = isolated(root)
+        .args(["deps", "--list", "--all"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(leaf.status.success(), "{leaf:?}");
+    assert!(
+        String::from_utf8_lossy(&leaf.stdout).contains("//worker:npm"),
+        "{leaf:?}"
+    );
+    assert!(!project.join("osdk.toml").exists());
+    assert!(!project.join("osdk.lock").exists());
+}
