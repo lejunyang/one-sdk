@@ -109,7 +109,10 @@ After binding, the **logical project root** is still the bound directory:
   root (or the location of the declaring file);
 - `extends` locates the `.git` repository boundary from the logical project
   root, and a reference crossing that boundary still errors; without `.git`, the
-  existing inheritance behavior is preserved;
+  existing inheritance behavior is preserved. The external config itself may
+  live outside the repository; this does not exempt files named by `extends`.
+  Inherited tasks run in their declaring directories. Rooted task names are
+  relative to the oldest inherited config (for example `//apps/svc/worker:build`);
 - Trust is still evaluated per real configuration file and remains
   project-level trust, tied to the config's real path, its project root, and the
   governed content. `relocate` moves the physical path, so the trust record

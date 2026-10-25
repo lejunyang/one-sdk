@@ -40,7 +40,8 @@ osdk project remove ~/tmp/checkout
   lock；但 `osdk run` / `osdk deps` 仍按逻辑项目根写项目输出，**不承诺项目
   目录零写入**，不要绑定到真只读卷后期望 run/deps 不写盘。
 - 逻辑项目根是被绑定的目录：任务、deps、相对资源按它解析；`extends` 保留
-  逻辑祖先与仓库边界。
+  逻辑祖先与仓库边界。外置叶配置可位于仓库外，继承目标不可越界；继承任务
+  保持各自声明目录，根目录任务名相对最上层继承配置。
 - 信任按外置目录里真实 `osdk.toml` 审批；`relocate` 后物理路径变了，需要
   重新 `osdk trust`，不会自动跟随。
 - 没有 Git remote / 分支 / multi-profile 概念：绑定就是路径绑定。

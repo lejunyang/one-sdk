@@ -469,3 +469,102 @@ fn external_use_persists_in_bundle_not_project_tree() {
         "must not create a shadow local osdk.toml"
     );
 }
+
+#[test]
+fn external_git_project_loads_without_inheritance() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    let config = std::path::Path::new(row["binding_dir"].as_str().unwrap()).join("osdk.toml");
+    std::fs::write(&config, "[tools]\nnode='20'\n").unwrap();
+    let out = isolated(root)
+        .args(["current", "node"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("20"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn inherited_tasks_keep_declaring_roots_for_local_and_external_projects() {
+    for external in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let repo = root.join("repo");
+        let project = repo.join("apps/svc");
+        let worker = project.join("worker");
+        std::fs::create_dir_all(&worker).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join("osdk.toml"),
+            "[tasks.parent]\nlua='write(\"parent-result\", \"parent\"); return 0'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            worker.join("osdk.toml"),
+            "[tasks.child]\nlua='write(\"worker-result\", \"worker\"); return 0'\n",
+        )
+        .unwrap();
+        let config = if external {
+            let add = isolated(root)
+                .args(["project", "add", "--json"])
+                .arg(&project)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(add.status.success(), "{add:?}");
+            let row: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+            std::path::Path::new(row["binding_dir"].as_str().unwrap()).join("osdk.toml")
+        } else {
+            project.join("osdk.toml")
+        };
+        std::fs::write(&config,
+            "extends='../../osdk.toml'\n[task]\nroots=['worker']\n[tasks.leaf]\nlua='write(\"leaf-result\", \"leaf\"); return 0'\n").unwrap();
+        for task in ["parent", "leaf", "//apps/svc/worker:child"] {
+            let out = isolated(root)
+                .args(["run", task])
+                .current_dir(&project)
+                .env("OSDK_TRUSTED_CONFIG_PATHS", root)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "external={external}, task={task}: {out:?}"
+            );
+        }
+        for (path, content) in [
+            (repo.join("parent-result"), "parent"),
+            (project.join("leaf-result"), "leaf"),
+            (worker.join("worker-result"), "worker"),
+        ] {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        }
+        // The external leaf is allowed outside .git, but an inherited target
+        // outside the repository is still rejected before a task can execute.
+        std::fs::write(root.join("osdk.toml"), "[tools]\nnode='99'\n").unwrap();
+        std::fs::write(&config, "extends='../../../osdk.toml'\n").unwrap();
+        let out = isolated(root)
+            .args(["current", "node"])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("repository boundary"),
+            "{out:?}"
+        );
+    }
+}

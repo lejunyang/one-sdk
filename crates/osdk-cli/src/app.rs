@@ -415,18 +415,10 @@ impl App {
                         .as_ref()
                         .filter(|p| p.is_external())
                         .map(|p| p.root.as_path());
-                    let anchor = osdk_core::config::inheritance::sources(path, rel_base)?
-                        .into_iter()
-                        .next()
-                        .unwrap();
-                    let base = app
-                        .ctx
-                        .config
-                        .project_root
-                        .as_deref()
-                        .unwrap_or_else(|| anchor.parent().unwrap());
+                    let sources = osdk_core::config::inheritance::sources(path, rel_base)?;
+                    let base = osdk_core::config::inheritance::task_root(&sources, rel_base);
                     for expanded in osdk_core::deps::expand_roots(
-                        base,
+                        &base,
                         &app.ctx.config.tasks.config.roots,
                         "task.roots",
                     )? {

@@ -15,6 +15,11 @@ The `root-id` of `<config>/projects/<root-id>/` is the full BLAKE3 of the platfo
 - `project.toml` (schema = 1) records exactly one thing: `root`, the real project root's absolute path. Once the physical directory and logical root are separated, the runtime needs an explicit anchor to point back at — otherwise the correspondence "configuration lives at X, project lives at Y" has nowhere to live.
 - The path identity is decided by the real path after OS canonicalization (dunce): junctions, 8.3 short names, and case aliases resolve to the same identity; casing follows filesystem semantics — osdk neither lowercases additionally nor applies Unicode normalization. The same directory written differently therefore yields exactly one binding.
 
+The boundary check exempts only the initial external leaf. All inherited
+files are checked against the logical repository, using the same canonical
+path representation on Windows. Task-root rebasing uses each layer's logical
+directory; loading and trust checking share the oldest inherited task anchor.
+
 ## Single-writer source selection: config and lock as one set
 
 While walking up from cwd, candidates include both a local `osdk.toml` and bound external projects. The selection rules:

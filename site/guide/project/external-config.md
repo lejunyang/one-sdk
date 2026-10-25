@@ -95,6 +95,10 @@ osdk project remove ~/tmp/old-checkout
   所在项目根与受管内容；`relocate` 移动了物理路径，信任记录会随之失效，
   需要重新审批，而不是自动跟随。
 
+外置配置本身可以位于 Git 仓库外；`extends` 指向的文件仍须位于逻辑项目的
+仓库边界内。继承任务在各自声明目录执行，根目录任务名称以最上层继承配置
+为基准，例如 `//apps/svc/worker:build`。
+
 ## 外置项目里的 use、run 与 deps
 
 - 外置项目下执行 `osdk use npm:xxx` 走 osdk 隔离安装，**不会**改动项目里的

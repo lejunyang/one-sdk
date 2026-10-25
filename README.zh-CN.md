@@ -210,6 +210,9 @@ osdk project remove ~/tmp/checkout --dry-run
 留在项目之外。同一根上的本地 `osdk.toml` 永远优先于外置配置。移动或删除
 绑定时只保留或删除外置目录本身——项目文件与共享工具安装都不受影响。
 
+Git 仓库也支持外置配置。使用 `extends` 时，继承任务仍在声明它的目录执行，
+继承文件不能越过仓库边界。
+
 指南：[外置项目配置](site/guide/project/external-config.md)
 
 ## 场景：用项目任务替代 Makefile

@@ -11,6 +11,12 @@ use std::path::{Path, PathBuf};
 pub fn sources(path: &Path, rel_base: Option<&Path>) -> Result<Vec<PathBuf>> {
     let mut chain = Vec::new();
     let mut next = path.canonicalize().map_err(|e| Error::io(path, e))?;
+    // Compare one canonical representation throughout, including Windows
+    // verbatim prefixes and callers supplying a symlink or short path.
+    let canonical_base = rel_base
+        .map(|base| base.canonicalize().map_err(|e| Error::io(base, e)))
+        .transpose()?;
+    let rel_base = canonical_base.as_deref();
     // The repository boundary is anchored at the logical project root, not at
     // the physical config file.
     let boundary_from = rel_base.unwrap_or_else(|| next.parent().unwrap_or(&next));
@@ -23,9 +29,12 @@ pub fn sources(path: &Path, rel_base: Option<&Path>) -> Result<Vec<PathBuf>> {
         if chain.contains(&canonical) {
             return Err(Error::config("config extends forms a cycle"));
         }
-        if boundary
-            .as_ref()
-            .is_some_and(|root| !canonical.starts_with(root))
+        // Only the external leaf lives outside the logical repository. Every
+        // extends target must still stay inside its repository boundary.
+        if !(chain.is_empty() && rel_base.is_some())
+            && boundary
+                .as_ref()
+                .is_some_and(|root| !canonical.starts_with(root))
         {
             return Err(Error::config("config extends escapes repository boundary"));
         }
@@ -112,11 +121,12 @@ pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
                 .and_then(|task| task.get_mut("roots"))
                 .and_then(toml::Value::as_array_mut)
             {
-                let prefix = source
-                    .parent()
-                    .unwrap()
+                let logical_base = layer_base
+                    .canonicalize()
+                    .map_err(|e| Error::io(&layer_base, e))?;
+                let prefix = logical_base
                     .strip_prefix(&anchor)
-                    .unwrap()
+                    .map_err(|_| Error::config("task roots escape the inheritance anchor"))?
                     .to_string_lossy()
                     .replace('\\', "/");
                 if !prefix.is_empty() {
@@ -131,6 +141,17 @@ pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
         merge(&mut value, layer);
     }
     Ok(value)
+}
+
+/// Rooted-task names are rebased to the oldest inherited config. With no
+/// inheritance, an external leaf uses its logical project root instead.
+pub fn task_root(sources: &[PathBuf], rel_base: Option<&Path>) -> PathBuf {
+    if sources.len() == 1 {
+        if let Some(base) = rel_base {
+            return base.to_path_buf();
+        }
+    }
+    sources[0].parent().unwrap().to_path_buf()
 }
 pub fn merge(base: &mut toml::Value, value: toml::Value) {
     match (base, value) {

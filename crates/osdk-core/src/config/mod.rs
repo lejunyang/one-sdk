@@ -1,4 +1,4 @@
-﻿//! Layered configuration.
+//! Layered configuration.
 //!
 //! Precedence (highest wins): CLI flags → env (`OSDK_*`) → project config
 //! (`osdk.toml`, discovered by walking up) → user global config
@@ -2096,15 +2096,9 @@ impl Config {
             if let Some(config) = file.task {
                 self.tasks.apply_config(config);
             }
-            // Relative task paths anchor at the real project root. For a
-            // checked-in config that is the config file's own directory; for
-            // an external binding the config lives outside the tree, so the
-            // recorded real root is what makes `dir = "apps/api"` and script
-            // discovery resolve where the project actually is.
-            let base = self
-                .project_root
-                .clone()
-                .or_else(|| origin.and_then(Path::parent).map(Path::to_path_buf));
+            // The caller supplies the task anchor used by inheritance::load,
+            // which can differ from both the leaf and its physical bundle.
+            let base = origin.and_then(Path::parent).map(Path::to_path_buf);
             // Scripts first, so a `[tasks]` entry of the same name wins: the
             // TOML is the more specific statement, and a file appearing in the
             // directory should not quietly shadow it.
@@ -2664,7 +2658,9 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
             // Set the real root before applying so task relative paths anchor at
             // the project, not at the (possibly external) config directory.
             cfg.project_root = Some(ctx.root.clone());
-            cfg.apply_file(file, false, sources.first().map(PathBuf::as_path))?;
+            let task_origin =
+                inheritance::task_root(&sources, rel_base.as_deref()).join("osdk.toml");
+            cfg.apply_file(file, false, Some(&task_origin))?;
             cfg.settings.precedence = precedence.try_into().map_err(sanitize_config_parse_error)?;
             cfg.project_config_path = Some(path);
             cfg.project = Some(ctx);
