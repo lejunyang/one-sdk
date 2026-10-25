@@ -41,6 +41,9 @@ osdk project remove ~/tmp/checkout
 先准备新配置与锁，发布成功才撤销旧登记。发布前失败保留旧绑定，发布后
 中断可能有两个登记，应检查 list 和文件后清理。目录改名/移动需 relocate。
 
+`use` 的配置与锁均写入选中的外置 bundle；锁更新失败时恢复原配置，
+不回退到项目目录写锁。
+
 ## 写边界（安全相关，先读）
 
 - 外置项目的 `osdk use npm:xxx` 走隔离安装：不改 `package.json`、不碰原生

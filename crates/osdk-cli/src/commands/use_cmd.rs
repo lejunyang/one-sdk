@@ -44,7 +44,7 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
     }
     if !global
         && req.backend.starts_with("npm:")
-        && use_project_npm_is_eligible(app, global, &req.backend)
+        && use_project_npm_is_eligible(app.ctx.config.project.as_ref(), global, &req.backend)
     {
         let cwd = std::env::current_dir()?;
         let requested_installer =
@@ -109,15 +109,12 @@ fn update_platform_excluded_selection(app: &App, tool: &str, opts: &[String]) ->
 /// Whether `use <npm:pkg>` may run the native project installer (rewriting the
 /// repo's package.json and native lockfile). False when the project is bound
 /// externally -- those installs must stay isolated in the managed store.
-fn use_project_npm_is_eligible(app: &App, global: bool, backend: &str) -> bool {
-    !global
-        && backend.starts_with("npm:")
-        && !app
-            .ctx
-            .config
-            .project
-            .as_ref()
-            .is_some_and(|p| p.is_external())
+fn use_project_npm_is_eligible(
+    project: Option<&osdk_core::project::ProjectContext>,
+    global: bool,
+    backend: &str,
+) -> bool {
+    !global && backend.starts_with("npm:") && !project.is_some_and(|p| p.is_external())
 }
 
 #[cfg(test)]
@@ -157,9 +154,17 @@ mod npm_project_gate_tests {
             ),
         ];
         for (global, external, backend, expected, why) in cases {
-            // We cannot build a full App in a unit test, so mirror the gate
-            // expression directly; the production call site uses the same one.
-            let got = !global && backend.starts_with("npm:") && !external;
+            let project = osdk_core::project::ProjectContext {
+                root: "project".into(),
+                config_path: "bundle/osdk.toml".into(),
+                lock_path: "bundle/osdk.lock".into(),
+                source: if external {
+                    osdk_core::project::ProjectSource::External
+                } else {
+                    osdk_core::project::ProjectSource::Local
+                },
+            };
+            let got = super::use_project_npm_is_eligible(Some(&project), global, backend);
             assert_eq!(got, expected, "{why}");
         }
     }
@@ -235,7 +240,7 @@ pub(crate) async fn use_legacy_cmd(
                 .ok_or_else(|| anyhow!("project config has no parent: {}", config_path.display()))?
                 .to_path_buf(),
         };
-        let lock_path = project_root.join(crate::lockfile::LOCKFILE_NAME);
+        let lock_path = project_lock_path(app, &project_root);
         let metadata_rollback = ProjectMetadataRollback::begin_tool_selection(
             &app.ctx.dirs,
             &project_root,

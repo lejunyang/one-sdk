@@ -100,6 +100,9 @@ osdk project remove ~/tmp/old-checkout
 仓库边界内。继承任务在各自声明目录执行，根目录任务名称以最上层继承配置
 为基准，例如 `//apps/svc/worker:build`。
 
+`use` 同时更新选中外置配置及其锁；若锁更新失败，恢复之前的配置，
+不会在项目目录另建替代锁。
+
 ## 外置项目里的 use、run 与 deps
 
 - 外置项目下执行 `osdk use npm:xxx` 走 osdk 隔离安装，**不会**改动项目里的

@@ -468,6 +468,36 @@ fn external_use_persists_in_bundle_not_project_tree() {
         !project.join("osdk.toml").exists(),
         "must not create a shadow local osdk.toml"
     );
+    assert!(
+        !project.join("osdk.lock").exists(),
+        "use must keep the lock outside the project"
+    );
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(bundle.join("osdk.lock")).unwrap()).unwrap();
+    let platforms = lock["platforms"].as_table().unwrap();
+    assert_eq!(platforms.len(), 1, "{lock}");
+    assert_eq!(
+        platforms.values().next().unwrap()["tools"]["node"]["version"].as_str(),
+        Some("1.0.0")
+    );
+    let before = "# retain this selection on lock failure\n[tools]\nnode='9.9.9'\n";
+    std::fs::write(bundle.join("osdk.toml"), before).unwrap();
+    std::fs::write(bundle.join("osdk.lock"), "invalid = = lock").unwrap();
+    let failed = isolated(root)
+        .args(["use", "node@1.0.0"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success(), "{failed:?}");
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("osdk.toml")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("osdk.lock")).unwrap(),
+        "invalid = = lock"
+    );
+    assert!(!project.join("osdk.lock").exists());
 }
 
 #[test]

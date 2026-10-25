@@ -32,6 +32,10 @@ after publication can leave two complete registrations; this is recoverable
 with `project list` and `remove`, not a cross-directory transaction. Unknown
 files left in the old bundle are preserved during cleanup.
 
+Tool selection writes and rollback snapshots both use the selected
+ProjectContext lock path, while the metadata mutex remains keyed on the
+logical project root.
+
 ## Single-writer source selection: config and lock as one set
 
 While walking up from cwd, candidates include both a local `osdk.toml` and bound external projects. The selection rules:
