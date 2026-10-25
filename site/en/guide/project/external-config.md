@@ -143,6 +143,10 @@ osdk project remove PATH           # no longer need this external binding
   delete the project files or the shared tool installations. Preview what would
   be removed with `--dry-run` first.
 
+`add` and the new destination of `relocate` reject regular files. `show`
+accepts relative paths and walks upward from a child directory; its `root`,
+`binding_dir`, config, and lock all describe the selected project.
+
 ## What show and list report
 
 - `show [PATH]` (PATH defaults to cwd) prints `project root`, the `selected`

@@ -61,8 +61,12 @@ pub(crate) fn run(app: &mut App, command: crate::cli::ProjectCommand) -> Result<
 }
 
 fn canonical_root(path: &Path) -> Result<PathBuf> {
-    dunce::canonicalize(path)
-        .with_context(|| format!("project directory does not exist: {}", path.display()))
+    let root = dunce::canonicalize(path)
+        .with_context(|| format!("project directory does not exist: {}", path.display()))?;
+    if !root.is_dir() {
+        bail!("project path is not a directory: {}", path.display());
+    }
+    Ok(root)
 }
 
 fn existing_local_config(root: &Path) -> Option<PathBuf> {
@@ -170,9 +174,11 @@ fn write_atomic(dir: &Path, tmp_name: &str, final_name: &str, contents: &str) ->
 pub(crate) fn show(dirs: &Dirs, path: Option<&Path>, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let from = path.unwrap_or(&cwd);
-    let root = dunce::canonicalize(from).unwrap_or_else(|_| from.to_path_buf());
-
     let selected = project::discover(from, &dirs.config)?;
+    let root = selected
+        .as_ref()
+        .map(|ctx| ctx.root.clone())
+        .unwrap_or_else(|| dunce::canonicalize(from).unwrap_or_else(|_| from.to_path_buf()));
     let binding = find_binding_for_root(&dirs.config, &root)?;
 
     if json {

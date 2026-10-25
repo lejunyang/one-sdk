@@ -119,6 +119,9 @@ osdk project remove PATH          # 不再需要这个外置绑定
 - `remove` 只删除外置绑定目录本身：**不删**项目文件，也**不删**共享安装池里的
   工具。先用 `--dry-run` 预览将删除的内容。
 
+`add` 与 `relocate` 的新目标拒绝普通文件。`show` 支持相对路径，
+从子目录向上查找；`root`、`binding_dir`、配置和锁均属于实际选中的项目。
+
 ## show 与 list 能看到什么
 
 - `show [PATH]`（PATH 默认当前目录）打印 `project root`、`selected` 来源

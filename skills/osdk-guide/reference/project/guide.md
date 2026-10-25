@@ -34,6 +34,9 @@ osdk project remove ~/tmp/checkout
 - `current` / `where` / `exec` / shim / shell hook / `use` / `config` /
   `source` 共用这套解析；`--global` 仍是用户全局默认，与绑定无关。
 
+`add` 与 `relocate` 的新目标必须是目录，普通文件会被拒绝。`show .`
+可在子目录调用，报告实际选中的项目根、绑定目录及配套配置/锁。
+
 ## 写边界（安全相关，先读）
 
 - 外置项目的 `osdk use npm:xxx` 走隔离安装：不改 `package.json`、不碰原生

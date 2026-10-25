@@ -219,6 +219,11 @@ pub fn list_bindings(config_dir: &Path) -> Result<Vec<Binding>> {
 /// and a same-root external binding shadowed by a local config is reported on
 /// stderr exactly once per process.
 pub fn discover(start_dir: &Path, config_dir: &Path) -> Result<Option<ProjectContext>> {
+    // Ancestors of `.` or `child` alone do not include the cwd's parents.
+    // Normalize once before walking, also following symlinked directories.
+    let start_dir = dunce::canonicalize(start_dir)
+        .or_else(|_| std::path::absolute(start_dir))
+        .map_err(|e| Error::io(start_dir, e))?;
     for dir in start_dir.ancestors() {
         // Local first at this level: local always beats external for the root.
         for name in PROJECT_CONFIG_NAMES {

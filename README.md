@@ -237,6 +237,8 @@ A local `osdk.toml` on the same root always wins over the external copy. Moving
 or removing a binding preserves or deletes only the external directory itself —
 project files and shared tool installations are never touched.
 
+`project show .` also finds the selected project from a child directory.
+`project add` and the destination of `project relocate` require a directory.
 Git checkouts support external configuration too. With `extends`, inherited
 tasks keep their declaring directories and inherited files stay inside the repository.
 

@@ -20,6 +20,10 @@ files are checked against the logical repository, using the same canonical
 path representation on Windows. Task-root rebasing uses each layer's logical
 directory; loading and trust checking share the oldest inherited task anchor.
 
+Discovery normalizes the starting directory before walking ancestors, so
+relative CLI paths and symlink aliases reach the same selected context.
+`show` reports that context's root rather than the input subdirectory.
+
 ## Single-writer source selection: config and lock as one set
 
 While walking up from cwd, candidates include both a local `osdk.toml` and bound external projects. The selection rules:

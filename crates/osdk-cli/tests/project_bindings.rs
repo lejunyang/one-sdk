@@ -454,3 +454,86 @@ fn relocate_racing_remove_leaves_store_consistent() {
         );
     }
 }
+
+#[test]
+fn project_path_show_from_child_reports_selected_binding_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    let nested = project.join("nested/child");
+    std::fs::create_dir_all(&nested).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let added: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    for path in [".", ".."] {
+        let show = isolated(root)
+            .args(["project", "show", path, "--json"])
+            .current_dir(&nested)
+            .output()
+            .unwrap();
+        assert!(show.status.success(), "{show:?}");
+        let row: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+        assert_eq!(row["source"], "external");
+        assert_eq!(row["root"], added["root"]);
+        assert_eq!(row["binding_dir"], added["binding_dir"]);
+        assert_eq!(
+            row["lock_path"],
+            format!(
+                "{}{}osdk.lock",
+                added["binding_dir"].as_str().unwrap(),
+                std::path::MAIN_SEPARATOR
+            )
+        );
+    }
+}
+
+#[test]
+fn project_path_add_and_relocate_reject_files_without_changing_bindings() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let file = root.join("ordinary-file");
+    std::fs::write(&file, "keep me").unwrap();
+    let add_file = isolated(root)
+        .args(["project", "add"])
+        .arg(&file)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!add_file.status.success(), "{add_file:?}");
+    assert!(String::from_utf8_lossy(&add_file.stderr).contains("directory"));
+    let project = root.join("repo");
+    std::fs::create_dir(&project).unwrap();
+    let add = isolated(root)
+        .args(["project", "add", "--json"])
+        .arg(&project)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let relocate = isolated(root)
+        .args(["project", "relocate"])
+        .arg(&project)
+        .arg(&file)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!relocate.status.success(), "{relocate:?}");
+    let list = isolated(root)
+        .args(["project", "list", "--json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["root"],
+        dunce::canonicalize(&project).unwrap().to_str().unwrap()
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+}
