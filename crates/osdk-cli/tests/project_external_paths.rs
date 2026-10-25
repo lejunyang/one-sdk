@@ -680,10 +680,9 @@ fn external_shared_lock_rejects_distinct_manifests_for_one_provider() {
     assert!(add.status.success(), "{add:?}");
     let bundle = std::fs::read_dir(root.join("config/projects"))
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
     std::fs::write(
         bundle.join("osdk.toml"),
         "[deps.projects.a.npm]\n[deps.projects.b.npm]\n",
