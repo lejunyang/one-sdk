@@ -1,4 +1,4 @@
-//! Layered configuration.
+﻿//! Layered configuration.
 //!
 //! Precedence (highest wins): CLI flags → env (`OSDK_*`) → project config
 //! (`osdk.toml`, discovered by walking up) → user global config
@@ -3509,9 +3509,24 @@ npm = { version = "11.5.2", lazy = true, allow_builds = ["esbuild", "sharp"], en
     #[test]
     fn project_tool_configs_override_global_and_tool_versions_only_fill_missing() {
         let temporary = tempfile::tempdir().unwrap();
-        let project = temporary.path().join("project/nested");
+        check_project_tool_provenance(temporary.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_tool_provenance_through_a_symlink_uses_canonical_project_config() {
+        let temporary = tempfile::tempdir().unwrap();
+        let real = temporary.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = temporary.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        check_project_tool_provenance(&alias);
+    }
+
+    fn check_project_tool_provenance(base: &std::path::Path) {
+        let project = base.join("project/nested");
         std::fs::create_dir_all(&project).unwrap();
-        let user_config = temporary.path().join("config.toml");
+        let user_config = base.join("config.toml");
         std::fs::write(
             &user_config,
             r#"
@@ -3522,7 +3537,7 @@ npm = { version = "11.5.1", allow_builds = ["esbuild"] }
         )
         .unwrap();
         std::fs::write(
-            temporary.path().join("project/osdk.toml"),
+            base.join("project/osdk.toml"),
             r#"
 [tools]
 npm = { version = "11.5.2", allow_builds = ["sharp"], engine = "node" }
@@ -3531,7 +3546,7 @@ pnpm = "9.0.0"
         )
         .unwrap();
         std::fs::write(
-            temporary.path().join("project/.tool-versions"),
+            base.join("project/.tool-versions"),
             "node 22.0.0\nbun 1.1.0\n",
         )
         .unwrap();
@@ -3567,15 +3582,15 @@ pnpm = "9.0.0"
         );
         assert_eq!(
             config.tool_origins["npm"],
-            ToolConfigOrigin::ProjectConfig(temporary.path().join("project/osdk.toml"))
+            ToolConfigOrigin::ProjectConfig(base.join("project/osdk.toml").canonicalize().unwrap())
         );
         assert_eq!(
             config.tool_origins["pnpm"],
-            ToolConfigOrigin::ProjectConfig(temporary.path().join("project/osdk.toml"))
+            ToolConfigOrigin::ProjectConfig(base.join("project/osdk.toml").canonicalize().unwrap())
         );
         assert_eq!(
             config.tool_origins["bun"],
-            ToolConfigOrigin::ToolVersions(temporary.path().join("project/.tool-versions"))
+            ToolConfigOrigin::ToolVersions(base.join("project/.tool-versions"))
         );
     }
 
