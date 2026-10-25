@@ -390,7 +390,8 @@ latter does not replace the transitive dependency graph.
 
 Managed `npm i -g` and similar commands use shared global directories, so changing
 Node does not remove the installed packages. Through osdk shims, supported JS
-managers reconcile their global command shims after exit. These commands use the
+managers reconcile their global command shims after exit, including rapid
+uninstall/reinstall cycles. These commands use the
 selected runtime without requiring an independent npm installation; outside a
 project, deliberately set a default with `osdk use --global node@22`. Missing
 runtimes produce a hint instead of choosing an arbitrary installed version.

@@ -344,7 +344,8 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 传递依赖图。
 
 托管 `npm i -g` 等命令使用共享全局目录，因此切换 Node 不会删除包文件。
-经 osdk shim 运行的受支持 JS 包管理器会在退出后对账全局命令入口。全局命令使用
+经 osdk shim 运行的受支持 JS 包管理器会在退出后对账全局命令入口，
+快速卸载后重装也会恢复入口。全局命令使用
 所选运行时，不要求另装独立 npm；项目外可主动用 `osdk use --global node@22`
 设置默认版本。缺少运行时会给出提示，不会任取一个已安装版本。
 `osdk reshim` 也能发布原生 Cargo/Go 应用，不要求选择编译器。native addon、
