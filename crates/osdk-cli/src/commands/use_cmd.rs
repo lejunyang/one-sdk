@@ -240,7 +240,13 @@ pub(crate) async fn use_legacy_cmd(
                 .ok_or_else(|| anyhow!("project config has no parent: {}", config_path.display()))?
                 .to_path_buf(),
         };
-        let lock_path = project_lock_path(app, &project_root);
+        let lock_path = app
+            .ctx
+            .config
+            .project
+            .as_ref()
+            .map(|project| project.lock_path.clone())
+            .unwrap_or_else(|| project_root.join(crate::lockfile::LOCKFILE_NAME));
         let metadata_rollback = ProjectMetadataRollback::begin_tool_selection(
             &app.ctx.dirs,
             &project_root,

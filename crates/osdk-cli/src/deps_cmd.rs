@@ -335,7 +335,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         };
         let lock_path = external_lock
             .clone()
-            .unwrap_or_else(|| crate::lockfile::default_path(&project.root));
+            .unwrap_or_else(|| project.root.join(crate::lockfile::LOCKFILE_NAME));
         resolved.push(Resolved {
             schema,
             rooted: Some(rooted),

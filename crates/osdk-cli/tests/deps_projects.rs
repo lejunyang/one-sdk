@@ -512,4 +512,12 @@ fn local_child_verification_reads_its_own_lock() {
         String::from_utf8_lossy(&output.stdout).contains("L1"),
         "{output:?}"
     );
+    // An unrelated parent lock must not become the default for another child.
+    write(root, "osdk.lock", "not a lockfile");
+    let output = run(root, root, &["deps", "--dry-run", "--filter", "b"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("osdk.lock")).unwrap(),
+        "not a lockfile"
+    );
 }
