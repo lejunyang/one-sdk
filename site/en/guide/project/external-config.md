@@ -185,3 +185,5 @@ An external binding is a path binding: it has no Git remote, branch, or
 multi-profile concept, and it does not swap configuration when you switch
 branches. If you need several configurations side by side, organize them the
 regular way inside configuration files.
+
+Local dependency projects retain a separate `osdk.lock` per installation root. An external bundle currently holds only one manifest per dependency provider. `deps --list --all` can inspect all entries, but materialization and verification reject conflicting manifests before running tools; use separate external bindings for independent projects with the same provider. An existing record is never silently replaced by another project. Supporting multiple records for one provider in one bundle requires a future lock-format design.

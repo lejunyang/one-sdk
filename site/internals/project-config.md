@@ -115,3 +115,5 @@ lock——配置本来就不在项目里。但 `osdk run`、`osdk deps` 仍然�
 - 没有 Git remote、分支、multi-profile 概念——绑定就是路径绑定，切分支
   不换配置；
 - 不在项目目录里生成任何文件。
+
+本地依赖项目仍按安装根目录各自保存 `osdk.lock`。外置 bundle 目前每个依赖 provider 只能记录一个 manifest。`deps --list --all` 可以查看所有条目，但实际安装与校验会在运行工具前拒绝冲突；使用同一 provider 的独立项目应分别建立外置绑定。已有记录不会被另一项目静默覆盖。在同一 bundle 中支持同 provider 多条记录，需要后续单独设计锁格式。

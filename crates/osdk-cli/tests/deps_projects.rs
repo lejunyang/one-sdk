@@ -483,3 +483,33 @@ fn workspace_rejects_conflicting_canonical_registries_between_members() {
         "{output:?}"
     );
 }
+
+#[test]
+fn local_child_verification_reads_its_own_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "osdk.toml",
+        "[deps.projects.a.npm]\n[deps.projects.b.npm]\n",
+    );
+    for name in ["a", "b"] {
+        write(
+            root,
+            &format!("{name}/package.json"),
+            r#"{"packageManager":"npm@11.0.0"}"#,
+        );
+        write(
+            root,
+            &format!("{name}/package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{}}"#,
+        );
+    }
+    write(root, "a/osdk.lock", &format!("schema=4\n[deps.npm]\ninstaller='npm'\nmanifest='package.json'\nmanifest_sha256='{}'\nrun='npm install'\n[deps.npm.native_lock]\nkind='package-lock'\npath='package-lock.json'\nsha256='{}'\n", "00".repeat(32), "00".repeat(32)));
+    let output = run(root, root, &["deps", "--verify", "--filter", "a"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("L1"),
+        "{output:?}"
+    );
+}

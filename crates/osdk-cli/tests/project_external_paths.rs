@@ -659,3 +659,79 @@ fn external_inherited_deps_keep_the_catalog_declaring_root() {
     assert!(!project.join("osdk.toml").exists());
     assert!(!project.join("osdk.lock").exists());
 }
+
+#[test]
+fn external_shared_lock_rejects_distinct_manifests_for_one_provider() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for name in ["a", "b"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+        std::fs::write(
+            root.join(name).join("package.json"),
+            r#"{"packageManager":"npm@11.0.0"}"#,
+        )
+        .unwrap();
+    }
+    let add = isolated(root)
+        .args(["project", "add", "."])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    let bundle = std::fs::read_dir(root.join("config/projects"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(
+        bundle.join("osdk.toml"),
+        "[deps.projects.a.npm]\n[deps.projects.b.npm]\n",
+    )
+    .unwrap();
+    let before = std::fs::read(bundle.join("osdk.lock")).unwrap();
+    let out = isolated(root)
+        .args(["deps", "--dry-run"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("distinct manifests"),
+        "{out:?}"
+    );
+    assert_eq!(std::fs::read(bundle.join("osdk.lock")).unwrap(), before);
+    assert!(!root.join("a/osdk.lock").exists());
+    let list = isolated(root)
+        .args(["deps", "--list", "--all"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    // L1 paths are relative to the lock file, including an external bundle.
+    let native = bundle.join("saved-lock.json");
+    std::fs::write(&native, "{}").unwrap();
+    let manifest = toml::Value::String(root.join("a/package.json").to_string_lossy().into_owned());
+    std::fs::write(bundle.join("osdk.lock"), format!("schema=4\n[deps.npm]\ninstaller='npm'\nmanifest={manifest}\nmanifest_sha256='{}'\nrun='npm install'\n[deps.npm.native_lock]\nkind='package-lock'\npath='saved-lock.json'\nsha256='{}'\n", "00".repeat(32), osdk_core::deps::file_sha256(&native).unwrap())).unwrap();
+    let verified = isolated(root)
+        .args(["deps", "--verify", "--filter", "a"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&verified.stdout).contains("L1 saved-lock.json matches osdk.lock"),
+        "{verified:?}"
+    );
+    let before = std::fs::read(bundle.join("osdk.lock")).unwrap();
+    let conflict = isolated(root)
+        .args(["deps", "--dry-run", "--filter", "b"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success(), "{conflict:?}");
+    assert!(
+        String::from_utf8_lossy(&conflict.stderr).contains("different manifest"),
+        "{conflict:?}"
+    );
+    assert_eq!(std::fs::read(bundle.join("osdk.lock")).unwrap(), before);
+}

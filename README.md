@@ -243,6 +243,8 @@ Existing bundle contents are never overwritten; a failed preparation leaves the 
 Git checkouts support external configuration too. With `extends`, inherited
 tasks keep their declaring directories and inherited files stay inside the repository.
 
+Each external bundle supports one dependency manifest per provider; use separate bindings for independent projects using the same provider. Conflicting lock records are rejected before running tools.
+
 Guide: [External project configuration](site/en/guide/project/external-config.md)
 
 ## Scenario: replace a Makefile with project tasks

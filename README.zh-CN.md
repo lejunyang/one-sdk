@@ -216,6 +216,8 @@ osdk project remove ~/tmp/checkout --dry-run
 Git 仓库也支持外置配置。使用 `extends` 时，继承任务仍在声明它的目录执行，
 继承文件不能越过仓库边界。
 
+每个外置 bundle 的每个依赖 provider 仅支持一个 manifest；使用同一 provider 的独立项目应分别绑定。锁记录冲突会在运行工具前被拒绝。
+
 指南：[外置项目配置](site/guide/project/external-config.md)
 
 ## 场景：用项目任务替代 Makefile

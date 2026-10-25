@@ -61,3 +61,5 @@ osdk project remove ~/tmp/checkout
 
 完整用法见用户指南 `site/guide/project/external-config.md`，实现取舍见
 `site/internals/project-config.md`。以 `osdk project --help` 为最终参数权威。
+
+Local dependency projects retain a separate `osdk.lock` per installation root. An external bundle currently holds only one manifest per dependency provider. `deps --list --all` can inspect all entries, but materialization and verification reject conflicting manifests before running tools; use separate external bindings for independent projects with the same provider. An existing record is never silently replaced by another project. Supporting multiple records for one provider in one bundle requires a future lock-format design.

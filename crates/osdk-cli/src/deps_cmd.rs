@@ -110,9 +110,15 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         report_undeclared(&cwd)?;
         return Ok(());
     }
-    // The deps lock belongs to the selected project configuration: an external
-    // binding's bundle lock, never a freshly written file next to the project.
-    let deps_lock = crate::commands::project_lock_path(app, &cwd);
+    // Local dependency units keep their own locks. External units must stay
+    // in the selected bundle and validate its one-manifest-per-provider limit.
+    let external_lock = app
+        .ctx
+        .config
+        .project
+        .as_ref()
+        .filter(|project| project.is_external())
+        .map(|project| project.lock_path.clone());
     let mut entries = deps::catalog::catalog(&root, &config_path, &deps_config)?;
     let mut tool_evidence: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for entry in &mut entries {
@@ -327,6 +333,9 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         } else {
             decide(app, schema, &project, &config, &plan, unit.as_ref())?
         };
+        let lock_path = external_lock
+            .clone()
+            .unwrap_or_else(|| crate::lockfile::default_path(&project.root));
         resolved.push(Resolved {
             schema,
             rooted: Some(rooted),
@@ -336,7 +345,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             plan,
             decision,
             unit,
-            lock_path: deps_lock.clone(),
+            lock_path,
         });
     }
     if resolved.is_empty() {
@@ -346,6 +355,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     order_by_depends(&mut resolved)?;
 
     if options.verify {
+        validate_lock_ownership(&resolved)?;
         return verify(app, &resolved);
     }
 
@@ -397,6 +407,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    validate_lock_ownership(&resolved)?;
     for item in &mut resolved {
         let system_policy = osdk_core::execution::enabled(&source_context(app, &item.config)?);
         if let Some(reason) = &item.plan.downgraded_reason {
@@ -576,6 +587,25 @@ fn order_by_depends(resolved: &mut Vec<Resolved>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reject shared provider records before running installers or verification.
+fn validate_lock_ownership(resolved: &[Resolved]) -> anyhow::Result<()> {
+    let mut owners = BTreeMap::new();
+    for item in resolved {
+        let key = (&item.lock_path, &item.project.provider);
+        if let Some(previous) = owners.insert(key, &item.project.manifest) {
+            if previous != &item.project.manifest {
+                anyhow::bail!("shared dependency lock cannot represent distinct manifests for provider {}; use separate external bindings for independent projects", item.project.provider);
+            }
+        }
+        crate::lockfile::validate_deps_manifest(
+            &item.lock_path,
+            &item.project.provider,
+            &item.project.manifest,
+        )?;
+    }
+    Ok(())
+}
+
 /// Check installed environments against the package managers' own receipts.
 ///
 /// Two layers, cheapest first:
@@ -605,7 +635,7 @@ fn verify(app: &App, resolved: &[Resolved]) -> anyhow::Result<()> {
             if let Some(entry) = locked.deps.get(&*item.project.provider) {
                 if let Some(native) = &entry.native_lock {
                     match deep::verify_native_lock(
-                        &item.project.root,
+                        lock_path.parent().unwrap_or(&item.project.root),
                         &native.path,
                         &native.sha256,
                     )? {

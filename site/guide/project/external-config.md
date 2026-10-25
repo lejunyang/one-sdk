@@ -153,3 +153,5 @@ osdk project remove PATH          # 不再需要这个外置绑定
 外置绑定就是路径绑定：它没有 Git remote、分支或多套 profile 的概念，也不会
 因为切换分支而换配置。需要多套配置并存时，仍按 osdk 的常规方式在配置文件里
 组织。
+
+本地依赖项目仍按安装根目录各自保存 `osdk.lock`。外置 bundle 目前每个依赖 provider 只能记录一个 manifest。`deps --list --all` 可以查看所有条目，但实际安装与校验会在运行工具前拒绝冲突；使用同一 provider 的独立项目应分别建立外置绑定。已有记录不会被另一项目静默覆盖。在同一 bundle 中支持同 provider 多条记录，需要后续单独设计锁格式。
