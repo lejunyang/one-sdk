@@ -13,10 +13,27 @@ fn isolated(temp: &std::path::Path) -> Command {
 #[test]
 fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
+    binding_roundtrip(temp.path());
+}
+
+#[test]
+#[cfg(unix)]
+fn binding_roundtrip_through_a_symlink_uses_the_real_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    let alias = temp.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    binding_roundtrip(&alias);
+}
+
+fn binding_roundtrip(root: &std::path::Path) {
     // Space + non-ASCII in the project path.
     let project = root.join("my 项目 svc");
     std::fs::create_dir_all(&project).unwrap();
+    // The API returns the real root, including macOS /var symlinks and
+    // Windows 8.3 aliases. Keep exact equality against that identity.
+    let canonical_project = dunce::canonicalize(&project).unwrap();
 
     let add = isolated(root)
         .arg("project")
@@ -38,7 +55,7 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     assert!(show.status.success(), "{show:?}");
     let json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_eq!(json["source"], "external");
-    assert_eq!(json["root"], project.to_str().unwrap());
+    assert_eq!(json["root"], canonical_project.to_str().unwrap());
     assert_eq!(json["missing"], false);
     assert_eq!(json["shadowed_local_config"], serde_json::Value::Null);
 
@@ -51,7 +68,8 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
         .unwrap();
     let items: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["root"], project.to_str().unwrap());
+    assert!(list.status.success(), "{list:?}");
+    assert_eq!(items[0]["root"], canonical_project.to_str().unwrap());
 
     // The bundle owns its own osdk.lock; nothing landed in the project tree.
     assert!(!project.join("osdk.toml").exists());
