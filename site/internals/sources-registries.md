@@ -45,8 +45,8 @@ osdk 有两套独立的网络选择机制，不能混为一谈：
 同源 redirect 继续携带，第一次跨源 redirect 后永久移除。header 值只以 hash 参与
 metadata/probe cache identity，不明文写入 cache。受管的 npm/pnpm 子进程只会收到 registry
 覆盖以及一份 osdk 自有的空配置，因此 `npm:<package>` 的 package fetch 不转发
-`Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具在隔离 prefix 下会拒绝
-认证或私有原生配置透传。
+`Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具匿名安装，不导入用户凭据；仅有认证配置不阻断公共包，
+私有/scope 等策略仍拒绝。详见 [npm 工具](/guide/tools/npm#source-与共享存储)。
 Go command 工具有更严格的边界：存在 custom source 时只对这些 custom candidate（以及
 显式 pin 的 candidate）排序，避免把私有 module path 发往公开默认 proxy。自定义 header
 会被拒绝，因为 `go install` 无法执行 osdk 的逐请求转发策略。全新解析会把首选及其余

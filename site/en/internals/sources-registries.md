@@ -53,8 +53,8 @@ Only hashes of header values participate in metadata/probe cache identity; clear
 values are not persisted. The managed npm/pnpm delegates receive only a registry
 override inside an otherwise empty osdk-owned configuration, so `npm:<package>`
 package fetches do not forward `Source.headers`. Project operations may use native trusted configuration;
-global npm-tool installs reject authenticated/private native pass-through while
-running in their isolated prefix.
+global npm-tool installs remain anonymous: discarded user credentials alone do not block
+public packages, while private/scoped policy still fails closed. See [npm tools](/en/guide/tools/npm#sources-and-shared-storage).
 Go command tools add one stricter boundary: if custom sources exist, only those
 custom candidates (plus an explicitly pinned candidate) are ranked, so a private
 module path is not sent to public default proxies. Custom headers are rejected

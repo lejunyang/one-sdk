@@ -552,6 +552,45 @@ pub async fn plan<F>(
 where
     F: Fn(&str) -> Option<String> + Copy,
 {
+    plan_with_auth_policy(ctx, cwd, manager, executable_alias, args, getenv, false).await
+}
+
+/// Plan an anonymous npm/pnpm install whose caller clears the child environment
+/// and replaces user/global npmrc files with empty, osdk-owned files. Credentials
+/// in those discarded layers cannot affect this install. Routing, TLS, proxy,
+/// unreadable configuration and managed builtin npmrc policy remain fail-closed.
+/// Never use this for native/project commands that inherit user configuration.
+pub async fn plan_isolated<F>(
+    ctx: &Ctx,
+    cwd: &Path,
+    manager: PackageManager,
+    executable_alias: &str,
+    args: &[String],
+    getenv: F,
+) -> Result<RegistryPlan>
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    if !matches!(manager, PackageManager::Npm | PackageManager::Pnpm) {
+        return Err(Error::config(
+            "isolated registry planning requires npm or pnpm",
+        ));
+    }
+    plan_with_auth_policy(ctx, cwd, manager, executable_alias, args, getenv, true).await
+}
+
+async fn plan_with_auth_policy<F>(
+    ctx: &Ctx,
+    cwd: &Path,
+    manager: PackageManager,
+    executable_alias: &str,
+    args: &[String],
+    getenv: F,
+    isolated: bool,
+) -> Result<RegistryPlan>
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
     let invocation = analyze_invocation(manager, executable_alias, args);
     if !should_plan(manager, executable_alias, args) {
         let reason = if explicit_registry_arg(&invocation.options) {
@@ -587,10 +626,17 @@ where
             });
         }
     }
-    let native = match native_registry_candidates(ctx, cwd, manager, getenv)? {
-        NativeDecision::PassThrough(reason) => return Ok(RegistryPlan::PassThrough { reason }),
-        NativeDecision::Candidates(native) => native,
-    };
+    let native =
+        match native_registry_candidates_with_auth_policy(ctx, cwd, manager, getenv, isolated)? {
+            NativeDecision::PassThrough(reason) => return Ok(RegistryPlan::PassThrough { reason }),
+            NativeDecision::Candidates(native) => native,
+        };
+    if isolated && !native.is_empty() {
+        return Ok(RegistryPlan::Selected {
+            url: native[0].clone(),
+            probes: vec![],
+        });
+    }
     if !native.is_empty() {
         return Ok(RegistryPlan::PassThrough {
             reason: "native registry declaration has priority over mirror fallback".into(),
@@ -707,11 +753,25 @@ fn normalize_candidates(values: Vec<String>) -> Result<Vec<String>> {
     Ok(output)
 }
 
+#[cfg(test)]
 fn native_registry_candidates<F>(
     ctx: &Ctx,
     cwd: &Path,
     manager: PackageManager,
     getenv: F,
+) -> Result<NativeDecision>
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    native_registry_candidates_with_auth_policy(ctx, cwd, manager, getenv, false)
+}
+
+fn native_registry_candidates_with_auth_policy<F>(
+    ctx: &Ctx,
+    cwd: &Path,
+    manager: PackageManager,
+    getenv: F,
+    isolated: bool,
 ) -> Result<NativeDecision>
 where
     F: Fn(&str) -> Option<String> + Copy,
@@ -774,6 +834,11 @@ where
             | PackageManager::Bun
             | PackageManager::Deno
     );
+    let managed_configs = if reads_npm_config {
+        managed_npm_config_files(ctx)
+    } else {
+        Vec::new()
+    };
     if reads_npm_config {
         for name in ["NPM_CONFIG_USERCONFIG", "npm_config_userconfig"] {
             if let Some(path) = env_path(cwd, name, getenv) {
@@ -838,8 +903,8 @@ where
                 }
             }
         }
-        for path in managed_npm_config_files(ctx) {
-            if let Err(path) = push_if_present(path, &mut files) {
+        for path in &managed_configs {
+            if let Err(path) = push_if_present(path.clone(), &mut files) {
                 return Ok(unreadable_native_config(path));
             }
         }
@@ -855,7 +920,7 @@ where
         }
     }
 
-    if let Some(name) = global_auth_env(getenv) {
+    if let Some(name) = global_auth_env(getenv).filter(|_| !isolated) {
         return Ok(NativeDecision::PassThrough(format!(
             "global registry authentication is configured by environment variable {name}"
         )));
@@ -902,7 +967,7 @@ where
                 )));
             }
         };
-        if analysis.auth {
+        if analysis.auth && (!isolated || managed_configs.contains(&file)) {
             return Ok(NativeDecision::PassThrough(format!(
                 "native registry authentication is configured in {}",
                 file.display()
@@ -2607,6 +2672,123 @@ npmRegistries:
             .await
             .expect_err("env mode without a variable must fail");
         assert!(error.to_string().contains("pnpm"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn isolated_auth_only_configuration_uses_anonymous_probes() {
+        for manager in [PackageManager::Npm, PackageManager::Pnpm] {
+            for policy in ["file", "unrelated-file", "env"] {
+                let temp = tempfile::tempdir().unwrap();
+                let cwd = isolated_cwd(temp.path());
+                let home = temp.path().join("home");
+                std::fs::create_dir_all(&home).unwrap();
+                let contents = if policy == "unrelated-file" {
+                    "//packages.unrelated.invalid/private/:_authToken=fixture-secret\n"
+                } else {
+                    "//registry.npmjs.org/:_authToken=fixture-secret\n"
+                };
+                if policy != "env" {
+                    std::fs::write(home.join(".npmrc"), contents).unwrap();
+                }
+                let getenv = |key: &str| match key {
+                    "HOME" => Some(home.display().to_string()),
+                    "NPM_TOKEN" if policy == "env" => Some("fixture-secret".into()),
+                    _ => None,
+                };
+                let (url, request, server) = registry_server("200 OK", "{}", Duration::ZERO);
+                let ctx = test_ctx(temp.path(), vec![url.clone()], false);
+                let args = vec!["install".into()];
+                // Native commands must still delegate, without contacting the server.
+                assert!(matches!(
+                    plan(&ctx, &cwd, manager, "npm", &args, getenv)
+                        .await
+                        .unwrap(),
+                    RegistryPlan::PassThrough { .. }
+                ));
+                let result = plan_isolated(&ctx, &cwd, manager, "npm", &args, getenv)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(result, RegistryPlan::Selected { url: selected, .. } if selected == url)
+                );
+                let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert!(!request.to_ascii_lowercase().contains("authorization:"));
+                assert!(!request.to_ascii_lowercase().contains("cookie:"));
+                assert!(!request.contains("fixture-secret"));
+                server.join().unwrap();
+                if policy != "env" {
+                    assert_eq!(
+                        std::fs::read_to_string(home.join(".npmrc")).unwrap(),
+                        contents
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_auth_does_not_hide_routing_tls_or_unreadable_config() {
+        for manager in [PackageManager::Npm, PackageManager::Pnpm] {
+            for policy in [
+                "registry=https://private.invalid/\n",
+                "@private:registry=https://private.invalid/\n",
+                "registry=https://user:fixture-secret@registry.npmjs.org/\n",
+                "cafile=private.pem\n",
+                "strict-ssl=false\n",
+                "proxy=http://proxy.invalid/\n",
+                "userconfig=another.npmrc\n",
+                "unreadable",
+                "builtin",
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let cwd = isolated_cwd(temp.path());
+                let home = temp.path().join("home");
+                std::fs::create_dir_all(&home).unwrap();
+                let contents = format!("//registry.npmjs.org/:_authToken=fixture-secret\n{policy}");
+                let ctx = test_ctx(temp.path(), vec![], false);
+                let file = if policy == "builtin" {
+                    let root = ctx.dirs.installs.join("node/20.0.0");
+                    std::fs::create_dir_all(root.join("lib/node_modules/npm")).unwrap();
+                    std::fs::write(root.join(".osdk-complete"), "").unwrap();
+                    root.join("lib/node_modules/npm/npmrc")
+                } else {
+                    home.join(".npmrc")
+                };
+                if policy == "unreadable" {
+                    std::fs::create_dir(&file).unwrap();
+                } else {
+                    std::fs::write(&file, contents).unwrap();
+                }
+                let result =
+                    plan_isolated(&ctx, &cwd, manager, "npm", &["install".into()], |key| {
+                        (key == "HOME").then(|| home.display().to_string())
+                    })
+                    .await
+                    .unwrap();
+                let RegistryPlan::PassThrough { reason } = result else {
+                    panic!("unsafe policy accepted: {manager} {policy}: {result:?}");
+                };
+                assert!(!reason.contains("fixture-secret"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_public_native_registry_keeps_its_origin_without_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = isolated_cwd(temp.path());
+        let text = "registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=fixture-secret\n";
+        std::fs::write(cwd.join(".npmrc"), text).unwrap();
+        let (mirror, _guard) = unused_loopback();
+        let ctx = test_ctx(temp.path(), vec![mirror], false);
+        for manager in [PackageManager::Npm, PackageManager::Pnpm] {
+            let result = plan_isolated(&ctx, &cwd, manager, "npm", &["install".into()], |_| None)
+                .await
+                .unwrap();
+            assert!(
+                matches!(result, RegistryPlan::Selected { url, probes } if url == NPMJS && probes.is_empty())
+            );
+        }
     }
 
     fn test_ctx(root: &Path, candidates: Vec<String>, offline: bool) -> Ctx {

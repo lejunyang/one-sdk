@@ -354,6 +354,10 @@ Guide: [Package managers and registry selection](site/en/guide/tools/package-man
 
 ## Scenario: add an npm-published developer tool
 
+Global `npm:` tools install public packages anonymously even when you are logged in
+to npm. Your login configuration stays intact and credentials are not imported;
+private or scoped registry routing remains unsupported for this isolated path.
+
 Prefix a package with `npm:` to distinguish it from the npm package manager. In
 a Node project, `use` adds the package to the nearest `package.json`, keeps an
 existing dependency section (or defaults to `devDependencies`), and makes its

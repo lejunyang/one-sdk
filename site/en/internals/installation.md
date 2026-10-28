@@ -76,8 +76,9 @@ This paragraph concerns download headers carried by a generic artifact download
 plan. `Source.headers` separately applies to osdk metadata/source probes under an
 origin boundary. The managed npm/pnpm delegates currently do not forward
 arbitrary `Source.headers`. Project operations may use native trusted
-configuration; global npm-tool installs reject authenticated/private native
-pass-through while running in their isolated prefix.
+configuration; global npm-tool installs remain anonymous and discard user credentials. Authentication
+alone does not block public packages; private/scoped policy still fails closed. See
+[npm tools](/en/guide/tools/npm#sources-and-shared-storage).
 
 An artifact-cache hit during an actual pipeline run or reinstall still runs the applicable checksum or attestation verification; mere cache-file existence is not trusted. Offline reinstall can reuse a persisted checksum, but it never falls back to the network when the artifact cache is absent. Ordinary `osdk install` reuses an already complete installation before entering the pipeline and does not revalidate its receipt, checksum, or installed bytes.
 

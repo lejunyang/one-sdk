@@ -90,8 +90,9 @@ pub async fn install(
             }
         };
         // This must precede runtime preparation and npm package resolution. A
-        // private/authenticated native registry cannot be reproduced inside
-        // the isolated global installer.
+        // private/scoped native registry cannot be reproduced inside the
+        // isolated global installer. Discarded user credentials do not block
+        // an otherwise anonymous public install.
         let selected_registry = plan_isolated_global_registry(
             app,
             &app.ctx.dirs.data.join("global-registry-preflight"),
@@ -799,7 +800,7 @@ pub(crate) async fn plan_isolated_global_registry(
         &std::env::current_dir()?,
     )?;
     let context = global_registry_ctx(app)?;
-    match package_registry::plan(
+    match package_registry::plan_isolated(
         &context,
         cwd,
         manager,
