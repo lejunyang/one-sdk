@@ -27,4 +27,9 @@ osdk use npm:prettier@3 -o installer=pnpm
 `use` 不写项目 lock；依赖原生安装图的全局 npm/Go 工具继续使用用户 lock。相关配置见
 `reference/configuration/tools.md`；请求语法见 `reference/tool-requests/guide.md`。
 
-隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他认证和 TLS 覆盖设置仍受原有隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
+隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他 TLS 覆盖设置仍受隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
+
+全局 `npm:` 工具（npm/pnpm 安装器）匿名安装。用户 npmrc/环境中的认证本身不再阻断公共包，
+也不会导入凭据；无需删除用户登录配置。已知公共原生 registry 保留原地址。私有/未知源、
+scope 路由、不可读/重定向配置、自定义 TLS/代理策略及受管 Node npmrc 的认证仍拒绝。
+需要认证的包不受此修复支持；项目 `use`、`exec` 与 shim 继续遵循原生认证配置。

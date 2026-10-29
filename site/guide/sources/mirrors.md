@@ -100,8 +100,8 @@ enabled = true
 这些 header；同源 redirect 保留，第一次跨源 redirect 后永久移除，header 值也不会
 明文写入 cache。受管的 npm/pnpm 子进程只会收到 registry 覆盖以及一份 osdk 自有的空配置，
 因此 `npm:<package>` 的实际 package fetch 不转发这里的 header。项目包管理器调用可以使用原生
-可信配置；全局 npm 工具为了隔离 prefix，会拒绝认证或私有原生配置透传，全局安装请使用
-可匿名访问的已配置 Registry。
+可信配置；全局 npm 工具匿名安装，不导入用户凭据。仅有认证不阻断公共包；私有/scope
+等策略仍拒绝，详见 [npm 工具](../tools/npm#source-与共享存储)。
 
 ## 选择、探测与故障转移
 

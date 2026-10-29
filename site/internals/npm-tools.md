@@ -159,9 +159,10 @@ kind、index/download URL、priority、enabled、credential-forwarding 和 heade
 osdk 自己发起的 npm metadata 请求和 source probe 会使用显式 `Source.headers`，但只发
 给配置的 index/download origin；同源 redirect 保留 header，第一次跨源 redirect 后永久
 移除。受管的 npm/pnpm 子进程只会收到 registry 覆盖以及一份 osdk 自有的空配置，因此真正
-获取 package 时不转发 `Source.headers`。全局受管工具安装目前会拒绝原生认证、scope、私有、
-自定义 TLS 或代理 Registry 的透传，因为在不扩大凭据边界的前提下无法把这些状态复制进
-隔离前缀；该路径请使用可匿名访问的已配置 Registry。`package_registry.rs` 的 Registry
+获取 package 时不转发 `Source.headers`。全局受管工具通过 `plan_isolated` 区分认证与路由：
+`env_clear` 和空的 user/global npmrc 隔离的认证层不阻断匿名安装，但不复制任何凭据。
+已知公共原生 registry 保留原 URL；scope、私有源、自定义 TLS/代理、不可读配置和
+受管 Node npmrc 的认证仍拒绝。普通 `plan` 的原生透传行为不变。`package_registry.rs` 的 Registry
 preflight 针对用户随后运行的
 npm/pnpm/Yarn/Bun/Deno 命令，每次调用独立判断，不能与这里的 TTL cache 等同。
 

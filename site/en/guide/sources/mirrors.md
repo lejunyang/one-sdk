@@ -114,8 +114,9 @@ written to cache. The managed npm and pnpm delegates receive only a registry
 override and an otherwise empty, osdk-owned configuration, so actual
 `npm:<package>` package fetches do not forward `Source.headers`.
 Project package-manager invocations may use native trusted configuration, but
-global npm tools reject authenticated/private native pass-through while their
-prefix is isolated; use an anonymous configured registry for global installs.
+global npm tools install anonymously without importing user credentials. Authentication
+alone does not block public packages; private/scoped policy still fails closed. See
+[npm tools](../tools/npm#sources-and-shared-storage).
 
 ## Selection, probing, and failover
 

@@ -319,9 +319,17 @@ Dynamic npm version metadata uses the normal npm source selection across
 npmmirror and npmjs. This is distinct from the `[registries.npm]` preflight used
 before a managed native npm or pnpm process starts. Project delegates retain the
 documented explicit registry precedence. Global delegates run with isolated
-configuration inside the osdk-controlled prefix and currently reject native
-private/authenticated/scoped registry pass-through; configure an anonymously
-reachable `[registries.npm]` endpoint for that scope.
+configuration inside the osdk-controlled prefix and install anonymously.
+Authentication alone in user npmrc files or environment variables (such as an npmjs login
+token) no longer blocks public packages; keep your login configuration. Credentials are
+not copied into isolated configuration, passed to installers, or sent to mirrors.
+Packages requiring authentication remain unsupported. An explicitly declared known public
+native registry keeps its original URL instead of switching mirrors when authentication
+is discarded. Private/unknown registries, scope routing, unreadable files, custom config
+locations, TLS and native proxy policy still fail closed. Authentication in npmrc files
+inside managed Node installations is also rejected because those files are not guaranteed
+to belong to the isolated user configuration layers. Use an anonymously reachable registry
+for this scope. Native `exec`, shim and project delegates retain their authentication behavior.
 
 An unlocked isolated install rebuilds a clean synthetic project for every ranked
 source. `osdk lock` does the same for graph generation, rewriting the manifest
@@ -372,7 +380,7 @@ metadata only.
 For installer planning, metadata validation, native-prefix isolation, and the
 activation safety checks, see [npm tool implementation](../../internals/npm-tools).
 
-Isolated global npm/pnpm installs preserve `NODE_EXTRA_CA_CERTS` as an absolute file path. The additional trust roots do not disable TLS verification or import user npmrc files. Other custom authentication and TLS overrides remain subject to the existing isolation checks; registry probes still require trusted HTTPS connections.
+Isolated global npm/pnpm installs preserve `NODE_EXTRA_CA_CERTS` as an absolute file path. The additional trust roots do not disable TLS verification or import user npmrc files. Other custom TLS overrides remain subject to isolation checks; registry probes still require trusted HTTPS connections.
 
 Project-isolated native npm installs also preserve NODE_EXTRA_CA_CERTS, resolving it before changing to the staging directory. Other ambient npm configuration remains isolated.
 

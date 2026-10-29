@@ -5100,9 +5100,154 @@ fn write_registry_config(root: &Path, urls: &[&str]) {
 
 #[cfg(unix)]
 #[test]
-fn authenticated_global_use_fails_before_public_metadata_probe_or_installer_spawn() {
+fn auth_only_global_use_keeps_credentials_out_of_both_installers() {
+    for manager in ["npm", "pnpm"] {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for expected in ["/-/ping", "/@fixture/cli"] {
+                let mut stream = accept_fixture_connection(&listener, "anonymous global fixture");
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(
+                    request.starts_with(&format!("GET {expected} ")),
+                    "{request}"
+                );
+                assert!(!request.to_ascii_lowercase().contains("authorization:"));
+                assert!(!request.contains("secret"));
+                let body = if expected == "/-/ping" {
+                    "{}"
+                } else {
+                    r#"{"dist-tags":{"latest":"1.2.3"},"versions":{"1.2.3":{}}}"#
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        std::fs::create_dir_all(temp.path().join("home")).unwrap();
+        let npmrc = "//registry.npmjs.org/:_authToken=fixture-file-secret\n";
+        std::fs::write(temp.path().join("home/.npmrc"), npmrc).unwrap();
+        std::fs::write(
+            temp.path().join("config/config.toml"),
+            format!(
+                r#"
+[tools]
+node = "20.0.0"
+{manager} = "10.0.0"
+[sources]
+selection = "ordered"
+[sources."npm:@fixture/cli"]
+pin = "fixture"
+disable = ["npmmirror", "npm"]
+[[sources."npm:@fixture/cli".custom]]
+id = "fixture"
+kind = "custom"
+index_url = {endpoint:?}
+download_url = {endpoint:?}
+[registries.npm]
+urls = [{endpoint:?}]
+probe_timeout_ms = 500
+"#
+            ),
+        )
+        .unwrap();
+        let marker = temp.path().join("installer-isolated");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+test -z "${{NPM_TOKEN-}}"
+test -z "${{NODE_AUTH_TOKEN-}}"
+test -z "${{NPM_CONFIG__AUTH-}}"
+test ! -s "$npm_config_userconfig"
+test ! -s "$npm_config_globalconfig"
+test ! -e "$HOME/.npmrc"
+test "$npm_config_registry" = '{endpoint}'
+case "$*" in *--ignore-scripts*) ;; *) exit 41 ;; esac
+printf isolated > '{marker}'
+if test '{manager}' = npm; then
+  package="$PWD/lib/node_modules/@fixture/cli"
+else
+  test "$pnpm_config_registry" = '{endpoint}'
+  package="$PWD/pnpm-global/5/node_modules/@fixture/cli"
+fi
+mkdir -p "$package" "$PWD/bin"
+printf '%s' '{{"name":"@fixture/cli","version":"1.2.3","bin":{{"fixture-cli":"cli.js"}}}}' > "$package/package.json"
+printf '#!/bin/sh\nexit 0\n' > "$package/cli.js"
+chmod +x "$package/cli.js"
+ln -s "$package/cli.js" "$PWD/bin/fixture-cli"
+if test '{manager}' = pnpm; then
+  printf 'lockfileVersion: 9.0\nimporters: {{}}\n' > "$PWD/pnpm-global/5/pnpm-lock.yaml"
+fi
+"#,
+            marker = marker.display()
+        );
+        write_fake_registry_manager(temp.path(), manager, "10.0.0", manager, &script);
+        let option = format!("installer={manager}");
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &["use", "-g", "npm:@fixture/cli@=1.2.3", "-o", &option],
+            &[
+                ("NPM_TOKEN", "fixture-env-secret"),
+                ("NODE_AUTH_TOKEN", "fixture-node-secret"),
+                ("NPM_CONFIG__AUTH", "fixture-basic-secret"),
+                ("PATH", "/usr/bin:/bin"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{manager}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        server.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "isolated");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("home/.npmrc")).unwrap(),
+            npmrc
+        );
+        // Inspect the published installation, including its receipt/lock/config,
+        // rather than accepting only a successful child exit.
+        let manifests = walkdir::WalkDir::new(temp.path().join("installs/npm-global"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() == ".osdk-install.json")
+            .collect::<Vec<_>>();
+        assert_eq!(manifests.len(), 1, "{manager}");
+        for entry in walkdir::WalkDir::new(temp.path())
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if entry.file_type().is_file() && entry.path() != temp.path().join("home/.npmrc") {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                let text = String::from_utf8_lossy(&bytes);
+                for secret in [
+                    "fixture-file-secret",
+                    "fixture-env-secret",
+                    "fixture-node-secret",
+                    "fixture-basic-secret",
+                ] {
+                    assert!(
+                        !text.contains(secret),
+                        "credential persisted at {}",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unsafe_native_policy_fails_before_public_metadata_probe_or_installer_spawn() {
     for installer in ["npm", "pnpm"] {
-        for native_policy in ["auth-env", "private-npmrc"] {
+        for native_policy in ["tls-env", "private-npmrc"] {
             let temporary = tempfile::tempdir().unwrap();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -5144,9 +5289,9 @@ probe_timeout_ms = 500
                 .join(format!("{installer}-{native_policy}-spawned"));
             let marker_value = marker.display().to_string();
             let mut environment = Vec::new();
-            if native_policy == "auth-env" {
+            if native_policy == "tls-env" {
                 environment.push((
-                    "NPM_TOKEN".to_string(),
+                    "NPM_CONFIG_CAFILE".to_string(),
                     "must-not-appear-in-errors".to_string(),
                 ));
             }
@@ -5185,8 +5330,8 @@ probe_timeout_ms = 500
                 stderr.contains("cannot safely isolate global"),
                 "{installer}: {stderr}"
             );
-            let expected_reason = if native_policy == "auth-env" {
-                "NPM_TOKEN"
+            let expected_reason = if native_policy == "tls-env" {
+                "NPM_CONFIG_CAFILE"
             } else {
                 "private or unknown native registry"
             };

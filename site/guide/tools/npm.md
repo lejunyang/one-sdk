@@ -263,9 +263,13 @@ activation、shim 分发、`where`、`uninstall` 与 `reshim` 都从活动请求
 
 动态 npm 版本 metadata 使用常规 npm source 选择，在 npmmirror 与 npmjs 之间选择。
 它与受管原生 npm 或 pnpm 进程启动前执行的 `[registries.npm]` 预检不同。项目委托保留
-文档约定的显式 Registry 优先级；全局委托则在 osdk 控制的前缀中使用隔离配置，当前会
-拒绝原生私有、认证或 scope Registry 的透传。该作用域请配置可匿名访问的
-`[registries.npm]` endpoint。
+文档约定的显式 Registry 优先级；全局委托在 osdk 控制的前缀中匿名安装。
+用户 npmrc 或环境变量中仅存在认证信息（例如 npmjs 登录 token）不会阻止安装公共包，
+无需删除登录配置。凭据不会复制到隔离配置、传给安装器或发送给镜像；需要认证的包仍不支持。
+显式声明的已知公共原生 Registry 保持原地址，不因忽略认证而切换到镜像。
+私有/未知源、scope 路由、不可读配置、自定义配置位置、TLS 或原生代理策略仍会拒绝；
+受管 Node 内的 npmrc 认证也保持拒绝，因为不能保证属于被隔离的用户配置层。
+该作用域使用可匿名访问的 Registry；`exec`、shim 和项目委托继续保留原生认证语义。
 
 未锁定的隔离安装会为每个排序 source 重建干净的 synthetic project；`osdk lock` 生成
 依赖图时也逐 source 重建 manifest 和 `.npmrc`，并在每次尝试前删除旧
@@ -307,7 +311,7 @@ lifecycle 操作，`osdk.lock` schema 4 保存与 schema 3 兼容的 npm 选项�
 安装器规划、metadata 校验、原生前缀隔离和激活安全检查见
 [npm 工具实现](../../internals/npm-tools)。
 
-隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他认证和 TLS 覆盖设置仍受原有隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
+隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他 TLS 覆盖设置仍受隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
 
 项目隔离的原生 npm 安装同样保留 NODE_EXTRA_CA_CERTS，并在切换到临时项目目录之前解析其文件路径；其他环境 npm 配置仍保持隔离。
 

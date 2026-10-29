@@ -210,10 +210,12 @@ osdk's own npm metadata requests and source probes honor explicit
 survive same-origin redirects and are permanently removed after the first
 cross-origin redirect. The managed npm/pnpm delegates receive only a registry
 override inside an otherwise empty osdk-owned configuration, so package fetches
-do not forward `Source.headers`. Global managed-tool installation currently rejects native
-authenticated, scoped, private, TLS-customized, or proxy registry pass-through
-because that state cannot be copied into the isolated prefix without widening
-the credential boundary; use an anonymous configured registry for this path.
+do not forward `Source.headers`. Global managed-tool installation uses `plan_isolated` to separate authentication from
+routing: credentials in layers isolated by `env_clear` and empty user/global npmrc
+files do not block anonymous installation and are never copied. Known public native
+registries retain their URL. Scope/private routing, custom TLS/proxy policy, unreadable
+configuration and authentication in managed Node npmrc files still fail closed.
+The normal `plan` retains native pass-through behavior.
 Registry preflight in `package_registry.rs`
 applies to npm/pnpm/Yarn/Bun/Deno commands that users run later, evaluates each
 invocation independently, and must not be described as using this TTL cache.

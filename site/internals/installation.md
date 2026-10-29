@@ -52,8 +52,8 @@ lock upsert 放进同一个项目元数据事务；lock 失败会恢复配置，
 [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs) 先写同级 `.partial` 文件，成功后原子 rename。只有 partial metadata 中保存了同一 URL 的 ETag 或 Last-Modified 时才发送 `Range` + `If-Range`；服务端忽略 range、对象变化或返回不匹配的 `Content-Range` 时会安全重启或失败，不会盲目拼接。敏感请求头只附加在初始请求，跨 host redirect 不继承。
 这里描述的是通用 artifact download plan 携带的下载 header。`Source.headers` 另用于
 osdk metadata/source probe，并按 origin 约束；受管 npm/pnpm 子进程当前不转发
-任意 `Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具在隔离 prefix 下会
-拒绝认证或私有原生配置透传。
+任意 `Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具匿名安装，不导入用户凭据；
+仅有认证不阻断公共包，私有/scope 等策略仍拒绝。详见 [npm 工具](/guide/tools/npm#source-与共享存储)。
 
 在实际进入 pipeline 的安装或重装中，artifact cache 命中仍会执行适用的 checksum/attestation 逻辑，而不是把“文件存在”当作验证成功。离线重装可以使用先前持久化的 checksum；但没有缓存 artifact 时不会联网降级。普通 `osdk install` 若发现完整安装，会在 pipeline 之前复用它，不重新校验 receipt、checksum 或已安装字节。
 
