@@ -263,10 +263,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "msg.checksum_verified",
-        ("checksum verified: {file}", "校验和已验证：{file}"),
-    );
-    m.insert(
         "msg.probing",
         ("probing sources for {tool} ...", "正在探测 {tool} 的源 ..."),
     );
@@ -336,13 +332,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "--source-mode env was requested but {variable} is unusable: {reason}",
             "已指定 --source-mode env，但 {variable} 不可用：{reason}",
-        ),
-    );
-    m.insert(
-        "msg.env_source_selected",
-        (
-            "using the mirror from {variable} for {tool}",
-            "已使用 {variable} 指定的镜像用于 {tool}",
         ),
     );
     m.insert(
@@ -427,8 +416,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "   （Windows 无法执行：需要可识别的扩展名或 shebang）",
         ),
     );
-    m.insert("label.trusted", ("trusted", "已信任"));
-    m.insert("label.stale", ("stale", "已失效"));
     m.insert("label.trust.active", ("active", "生效中"));
     m.insert("label.trust.changed", ("changed", "内容已变"));
     m.insert("label.trust.missing", ("missing", "文件已不存在"));
@@ -1323,13 +1310,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "err.container.prune_target_changed",
-        (
-            "native prune target changed after confirmation; rerun the preview",
-            "确认后原生清理目标发生变化；请重新生成预览",
-        ),
-    );
-    m.insert(
         "err.container.prune_docker_endpoint_unsupported",
         (
             "Docker prune execution requires a direct local unix or named-pipe endpoint without context TLS material",
@@ -1385,10 +1365,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "log.yarn_download_failed",
-        ("yarn download failed: {err}", "yarn 下载失败：{err}"),
-    );
-    m.insert(
         "log.index_fetch_failover",
         (
             "index fetch failed, trying next: {err}",
@@ -1400,36 +1376,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("go index fetch failed: {err}", "go 索引获取失败：{err}"),
     );
     m.insert(
-        "log.pnpm_packument_failed",
-        (
-            "pnpm packument fetch failed: {err}",
-            "pnpm packument 获取失败：{err}",
-        ),
-    );
-    m.insert(
         "log.binary_download_failed",
         ("binary download failed: {err}", "二进制下载失败：{err}"),
-    );
-    m.insert(
-        "log.stale_python_cache",
-        (
-            "network failed; using stale cached python catalog",
-            "网络失败；改用过期的 python 目录缓存",
-        ),
-    );
-    m.insert(
-        "log.pbs_metadata_failed",
-        (
-            "pbs metadata fetch failed: {err}",
-            "PBS 元数据获取失败：{err}",
-        ),
-    );
-    m.insert(
-        "log.pbs_sha256sums_failed",
-        (
-            "pbs SHA256SUMS fetch failed: {err}",
-            "PBS SHA256SUMS 获取失败：{err}",
-        ),
     );
     m.insert(
         "log.github_public_fallback",
@@ -1446,7 +1394,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         "doctor.same_fs_no",
         ("will fall back to copy", "将回退为复制"),
     );
-    m.insert("doctor.on_path", ("on PATH", "在 PATH 中"));
     m.insert(
         "doctor.proxy_env",
         ("environment proxy in use", "使用环境变量代理"),
@@ -1602,52 +1549,10 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "err.registry_command_not_started",
-        (
-            "no dependency registry is available for {manager}; command was not started",
-            "{manager} 没有可用的依赖 Registry；命令未启动",
-        ),
-    );
-    m.insert(
-        "err.registry_command_not_started_details",
-        (
-            "no dependency registry is available for {manager}; command was not started: {details}",
-            "{manager} 没有可用的依赖 Registry；命令未启动：{details}",
-        ),
-    );
-    m.insert(
         "err.registry_test_unavailable",
         (
             "no dependency registry is available for {managers}",
             "以下包管理器没有可用的依赖 Registry：{managers}",
-        ),
-    );
-    m.insert(
-        "err.registry_preflight_runtime",
-        (
-            "creating registry preflight runtime: {error}",
-            "创建 Registry 预检运行时失败：{error}",
-        ),
-    );
-    m.insert(
-        "err.registry_preflight",
-        (
-            "registry preflight failed: {error}",
-            "Registry 预检失败：{error}",
-        ),
-    );
-    m.insert(
-        "err.registry_unavailable",
-        (
-            "no reachable package registry for `{executable}`",
-            "`{executable}` 没有可达的包 Registry",
-        ),
-    );
-    m.insert(
-        "err.registry_unavailable_details",
-        (
-            "no reachable package registry for `{executable}` ({details})",
-            "`{executable}` 没有可达的包 Registry（{details}）",
         ),
     );
     m.insert(
@@ -2065,13 +1970,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "err.npm_lock_payload_not_utf8",
-        (
-            "npm lock payload {path} is not UTF-8",
-            "npm 锁定载荷 {path} 不是 UTF-8 编码",
-        ),
-    );
-    m.insert(
         "err.npm_project_manifest_identity_mismatch",
         (
             "npm project manifest does not pin {package}@{version}",
@@ -2104,13 +2002,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "npm dependency graph root version mismatch for {package}: expected {expected}, got {actual}",
             "npm 依赖图中根包 {package} 的版本不匹配：期望 {expected}，实际为 {actual}",
-        ),
-    );
-    m.insert(
-        "err.npm_graph_resolved_root_missing",
-        (
-            "npm dependency graph is missing resolved root package {package}@{version}",
-            "npm 依赖图缺少已解析的根包 {package}@{version}",
         ),
     );
     m.insert(
@@ -2363,13 +2254,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "schema 1 npm entry `{backend}` on `{platform}` cannot be migrated without a dependency graph; regenerate the lock",
             "平台 `{platform}` 上的 schema 1 npm 条目 `{backend}` 缺少依赖图，无法迁移；请重新生成锁文件",
-        ),
-    );
-    m.insert(
-        "err.lock_npm_resolved_node_required",
-        (
-            "cannot lock `{backend}` without a resolved `node` entry",
-            "缺少已解析的 `node` 条目，无法锁定 `{backend}`",
         ),
     );
     m.insert(
@@ -3892,7 +3776,6 @@ mod tests {
             "err.container.docker_context_mismatch",
             "err.container.prune_builder_unavailable",
             "err.container.prune_target_identity",
-            "err.container.prune_target_changed",
             "err.container.prune_docker_endpoint_unsupported",
             "err.container.prune_buildkit_execute_unsupported",
             "err.container.prune_preview_mismatch",
@@ -3922,5 +3805,98 @@ mod tests {
         }
         result.sort_unstable();
         result
+    }
+
+    /// Production source of every workspace crate, test code cut away.
+    ///
+    /// A key mentioned only by a test is not in use, so test modules are
+    /// dropped: files that are test-only by name, and everything from a
+    /// file's first `#[cfg(test)] mod` on (where this repo keeps its tests).
+    fn production_sources() -> Vec<(std::path::PathBuf, String)> {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let mut sources = Vec::new();
+        for entry in walkdir::WalkDir::new(crates) {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            let in_src = path.components().any(|part| part.as_os_str() == "src");
+            if !in_src
+                || path.extension().is_none_or(|extension| extension != "rs")
+                || name == "catalog.rs"
+                || name.ends_with("tests.rs")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+            let production = match text.find("\n#[cfg(test)]\nmod ") {
+                Some(start) => text[..start].to_string(),
+                None => text,
+            };
+            sources.push((path.to_path_buf(), production));
+        }
+        sources
+    }
+
+    /// The catalog and the code must name the same keys.
+    ///
+    /// Both directions fail silently at runtime. A key the code asks for but
+    /// the catalog lacks prints the key itself (`err.something`) to the user,
+    /// and a key nothing asks for is dead text that drifts from the code it
+    /// once described -- 21 such keys had piled up, among them a second,
+    /// unused set of trust-state labels. Keys are therefore always written as
+    /// whole string literals; building one with `format!` would hide it from
+    /// this check, and from anyone searching for where a message comes from.
+    #[test]
+    fn catalog_keys_and_code_references_match() {
+        let catalog = build();
+        let prefixes: std::collections::BTreeSet<&str> = catalog
+            .keys()
+            .filter_map(|key| key.split_once('.').map(|(prefix, _)| prefix))
+            .collect();
+        let literal = regex::Regex::new(r#""([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)""#).unwrap();
+        // Dotted literals that share a catalog prefix but are not message keys.
+        // Each one is a config path named in a diagnostic.
+        const NOT_KEYS: &[&str] = &["task.roots"];
+
+        let mut referenced = std::collections::BTreeSet::new();
+        let mut undefined = Vec::new();
+        for (path, source) in production_sources() {
+            for capture in literal.captures_iter(&source) {
+                let key = capture.get(1).unwrap().as_str();
+                let prefix = key.split_once('.').unwrap().0;
+                if !prefixes.contains(prefix) || NOT_KEYS.contains(&key) {
+                    continue;
+                }
+                if catalog.contains_key(key) {
+                    referenced.insert(key.to_string());
+                } else {
+                    undefined.push(format!("{key} ({})", path.display()));
+                }
+            }
+        }
+        let mut unused: Vec<_> = catalog
+            .keys()
+            .filter(|key| !referenced.contains(**key))
+            .collect();
+        unused.sort_unstable();
+        undefined.sort_unstable();
+        undefined.dedup();
+
+        assert!(
+            undefined.is_empty(),
+            "code references keys missing from the catalog:\n  {}",
+            undefined.join("\n  ")
+        );
+        assert!(
+            unused.is_empty(),
+            "catalog keys no production code references:\n  {}",
+            unused
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
     }
 }

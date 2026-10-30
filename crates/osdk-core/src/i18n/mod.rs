@@ -224,11 +224,7 @@ mod tests {
     fn log_keys_localized_both_langs() {
         // User-visible log messages must exist in both languages and differ
         // (i.e. actually translated, not just falling back to the key).
-        for key in [
-            "log.checksum_verified",
-            "log.download_failover",
-            "log.stale_python_cache",
-        ] {
+        for key in ["log.checksum_verified", "log.download_failover"] {
             let en = trl(Lang::En, key);
             let zh = trl(Lang::Zh, key);
             assert_ne!(en, key, "missing en for {key}");
@@ -271,13 +267,11 @@ mod tests {
             "err.npm_bins_not_discovered",
             "err.npm_bin_target_unresolved",
             "err.npm_lock_payload_read",
-            "err.npm_lock_payload_not_utf8",
             "err.npm_project_manifest_identity_mismatch",
             "err.npm_project_manifest_build_policy_mismatch",
             "err.npm_graph_parse_invalid",
             "err.npm_graph_root_missing",
             "err.npm_graph_root_version_mismatch",
-            "err.npm_graph_resolved_root_missing",
             "err.npm_graph_root_integrity_missing",
             "err.npm_graph_root_integrity_invalid",
             "err.npm_graph_root_source_mismatch",
@@ -305,7 +299,6 @@ mod tests {
             "err.lock_artifact_filename_unsafe",
             "err.lock_artifact_subdir_unsafe",
             "err.lock_schema1_npm_migration_requires_graph",
-            "err.lock_npm_resolved_node_required",
             "err.lockfile_size_limit_exceeded",
             "err.lock_atomic_path_filename_missing",
             "err.fs_directory_create",
