@@ -192,7 +192,7 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
     }
 
     let scope_root = scope_root(app, args.global)?;
-    let targets = resolve_agents(app, &args.agents, &scope_root)?;
+    let targets = resolve_agents(app, &args.agents, &scope_root, args.global)?;
     let target_dirs = agent_dirs_by_path(&targets, &scope_root, args.global)?;
     let mode = add_link_mode(app, args.copy, target_dirs.len())?;
     let packages = roots
@@ -865,6 +865,7 @@ fn resolve_agents(
     app: &App,
     explicit: &[String],
     scope_root: &Path,
+    global: bool,
 ) -> Result<Vec<&'static AgentTarget>> {
     let home = home_dir().ok();
     let detected = detect_installed_agent_ids(scope_root, home.as_deref());
@@ -873,6 +874,7 @@ fn resolve_agents(
         &app.ctx.config.skills_defaults.default_agents,
         &detected,
         app.prompt.as_ref(),
+        global,
     )?;
     let mut targets = Vec::new();
     for id in &ids {
@@ -891,6 +893,7 @@ fn resolve_agent_ids(
     defaults: &[String],
     detected: &[String],
     prompt: &dyn crate::prompt::Prompt,
+    global: bool,
 ) -> Result<Vec<String>> {
     if !explicit.is_empty() {
         return Ok(explicit.to_vec());
@@ -921,49 +924,107 @@ fn resolve_agent_ids(
         );
     }
 
-    let candidates: Vec<&AgentTarget> = if detected.is_empty() {
-        AGENT_TARGETS.iter().collect()
-    } else {
-        AGENT_TARGETS
-            .iter()
-            .filter(|target| detected.iter().any(|id| id == target.id) && target.id != "universal")
-            .collect()
-    };
-    let options = candidates
+    // One choice per directory, not per agent: in a project the shared
+    // `.agents/skills` serves five agents at once, and listing them separately
+    // offered five options that all wrote the same place. The picker installs
+    // exactly what is checked -- it used to add every shared-directory agent
+    // on top, so checking one agent installed for all of them.
+    let choices = agent_choices(global);
+    let options = choices.iter().map(AgentChoice::label).collect::<Vec<_>>();
+    let checked = choices
         .iter()
-        .map(|target| format!("{} ({})", target.name, target.id))
+        .map(|choice| {
+            choice
+                .members
+                .iter()
+                .any(|member| detected.iter().any(|id| id == member.id))
+        })
         .collect::<Vec<_>>();
     let selected = prompt.select_many(
-        "Select the agents that should receive this skill:",
+        "Select the agents that should receive this skill",
         &options,
+        &checked,
     )?;
     let mut ids = Vec::new();
     for index in selected {
-        let target = candidates
+        let choice = choices
             .get(index)
             .with_context(|| format!("prompt returned invalid agent index {index}"))?;
-        if !ids.iter().any(|id| id == target.id) {
-            ids.push(target.id.to_string());
+        if !ids.iter().any(|id| id == choice.id()) {
+            ids.push(choice.id().to_string());
         }
     }
     if ids.is_empty() {
         anyhow::bail!("select at least one target agent");
     }
-    Ok(if detected.is_empty() {
-        ids
-    } else {
-        with_universal_agents(ids)
-    })
+    Ok(ids)
 }
 
-fn with_universal_agents(mut ids: Vec<String>) -> Vec<String> {
-    for target in AGENT_TARGETS
-        .iter()
-        .filter(|target| target.project == ".agents/skills")
-    {
-        if !ids.iter().any(|id| id == target.id) {
-            ids.push(target.id.to_string());
+/// Agents that install into one directory, offered as a single choice.
+struct AgentChoice {
+    dir: &'static str,
+    members: Vec<&'static AgentTarget>,
+}
+
+impl AgentChoice {
+    /// The id recorded for this choice: `universal` for the shared directory,
+    /// otherwise the agent's own.
+    fn id(&self) -> &'static str {
+        self.members
+            .iter()
+            .find(|member| member.id == "universal")
+            .unwrap_or(&self.members[0])
+            .id
+    }
+
+    fn label(&self) -> String {
+        match self.members.as_slice() {
+            [only] => format!("{} ({})  {}", only.name, only.id, self.dir),
+            members => {
+                let served = members
+                    .iter()
+                    .filter(|member| member.id != "universal")
+                    .map(|member| member.name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Universal (universal)  {}, used by {served}", self.dir)
+            }
         }
+    }
+}
+
+/// The directories this scope can install into, each with the agents it serves.
+/// Globally every agent has its own home directory, so nothing is grouped.
+fn agent_choices(global: bool) -> Vec<AgentChoice> {
+    let mut choices: Vec<AgentChoice> = Vec::new();
+    for target in AGENT_TARGETS {
+        let dir = if global {
+            match target.global {
+                Some(dir) => dir,
+                None => continue,
+            }
+        } else {
+            target.project
+        };
+        match choices.iter_mut().find(|choice| choice.dir == dir) {
+            Some(choice) => choice.members.push(target),
+            None => choices.push(AgentChoice {
+                dir,
+                members: vec![target],
+            }),
+        }
+    }
+    choices
+}
+
+/// Add the shared `.agents/skills` directory, as the single `universal` id.
+///
+/// It used to add every agent that reads that directory. In a project those
+/// all resolve to the one directory, but globally each has its own home
+/// directory, so an unattended default installed into all of them.
+fn with_universal_agents(mut ids: Vec<String>) -> Vec<String> {
+    if !ids.iter().any(|id| id == "universal") {
+        ids.push("universal".to_string());
     }
     ids
 }
@@ -1283,11 +1344,14 @@ mod tests {
         assert!(plan[0].physically_unlink);
     }
 
+    #[derive(Default)]
     struct SelectionPrompt {
         interactive: bool,
         assume_yes: bool,
         many: Vec<usize>,
         one: usize,
+        /// What the last `select_many` offered: labels and preselection.
+        offered: std::sync::Mutex<Option<(Vec<String>, Vec<bool>)>>,
     }
 
     impl crate::prompt::Prompt for SelectionPrompt {
@@ -1303,7 +1367,13 @@ mod tests {
             self.assume_yes
         }
 
-        fn select_many(&self, _question: &str, _options: &[String]) -> Result<Vec<usize>> {
+        fn select_many(
+            &self,
+            _question: &str,
+            options: &[String],
+            defaults: &[bool],
+        ) -> Result<Vec<usize>> {
+            *self.offered.lock().unwrap() = Some((options.to_vec(), defaults.to_vec()));
             Ok(self.many.clone())
         }
 
@@ -1320,9 +1390,7 @@ mod tests {
     fn selection_prompt(interactive: bool) -> SelectionPrompt {
         SelectionPrompt {
             interactive,
-            assume_yes: false,
-            many: vec![],
-            one: 0,
+            ..SelectionPrompt::default()
         }
     }
 
@@ -1330,9 +1398,8 @@ mod tests {
     fn agent_selection_prefers_explicit_then_defaults_then_prompt() {
         let prompt = SelectionPrompt {
             interactive: true,
-            assume_yes: false,
             many: vec![1, 1, 0],
-            one: 0,
+            ..SelectionPrompt::default()
         };
         assert_eq!(
             resolve_agent_ids(
@@ -1340,59 +1407,113 @@ mod tests {
                 &["claude-code".into()],
                 &["codex".into()],
                 &prompt,
+                false,
             )
             .unwrap(),
             vec!["cursor"]
         );
         assert_eq!(
-            resolve_agent_ids(&[], &["claude-code".into()], &["codex".into()], &prompt,).unwrap(),
+            resolve_agent_ids(
+                &[],
+                &["claude-code".into()],
+                &["codex".into()],
+                &prompt,
+                false
+            )
+            .unwrap(),
             vec!["claude-code"]
         );
         assert_eq!(
-            resolve_agent_ids(&[], &[], &[], &prompt).unwrap(),
-            vec!["codex", "claude-code"]
+            resolve_agent_ids(&[], &[], &[], &prompt, false).unwrap(),
+            vec!["universal", "claude-code"]
         );
     }
 
     #[test]
     fn one_detected_agent_auto_selects_the_universal_group() {
-        let ids =
-            resolve_agent_ids(&[], &[], &["claude-code".into()], &selection_prompt(false)).unwrap();
+        let ids = resolve_agent_ids(
+            &[],
+            &[],
+            &["claude-code".into()],
+            &selection_prompt(false),
+            false,
+        )
+        .unwrap();
+        assert_eq!(ids, vec!["claude-code", "universal"]);
+    }
+
+    /// Regression: checking one agent installed for every agent. The picker
+    /// offers one choice per directory, preselects what was detected, and
+    /// returns exactly what was checked -- in both scopes.
+    #[test]
+    fn interactive_selection_installs_exactly_the_checked_agents() {
+        let prompt = SelectionPrompt {
+            interactive: true,
+            many: vec![0],
+            ..SelectionPrompt::default()
+        };
+        let ids = resolve_agent_ids(
+            &[],
+            &[],
+            &["claude-code".into(), "codex".into()],
+            &prompt,
+            false,
+        )
+        .unwrap();
+        assert_eq!(ids, vec!["claude-code"]);
+        let (options, checked) = prompt.offered.lock().unwrap().clone().unwrap();
         assert_eq!(
-            ids,
-            vec![
-                "claude-code",
-                "codex",
-                "cursor",
-                "opencode",
-                "gemini-cli",
-                "github-copilot",
-                "universal",
-            ]
+            options.len(),
+            2,
+            "one choice per project directory: {options:?}"
         );
+        assert!(
+            options[0].starts_with("Claude Code (claude-code)"),
+            "{options:?}"
+        );
+        assert!(options[1].contains(".agents/skills"), "{options:?}");
+        assert!(options[1].contains("Codex"), "{options:?}");
+        assert_eq!(checked, vec![true, true], "detected agents start checked");
+
+        // Globally every agent has its own directory, so each is offered and
+        // picking one still installs only that one.
+        let prompt = SelectionPrompt {
+            interactive: true,
+            many: vec![1],
+            ..SelectionPrompt::default()
+        };
+        let ids = resolve_agent_ids(&[], &[], &[], &prompt, true).unwrap();
+        assert_eq!(ids, vec!["codex"]);
+        let (options, checked) = prompt.offered.lock().unwrap().clone().unwrap();
+        assert_eq!(options.len(), AGENT_TARGETS.len(), "{options:?}");
+        assert!(checked.iter().all(|checked| !checked));
     }
 
     #[test]
     fn yes_selects_detected_agents_or_all_agents() {
         let yes = SelectionPrompt {
-            interactive: false,
             assume_yes: true,
-            many: vec![],
-            one: 0,
+            ..SelectionPrompt::default()
         };
-        let detected =
-            resolve_agent_ids(&[], &[], &["claude-code".into(), "codex".into()], &yes).unwrap();
+        let detected = resolve_agent_ids(
+            &[],
+            &[],
+            &["claude-code".into(), "codex".into()],
+            &yes,
+            false,
+        )
+        .unwrap();
         assert!(detected.contains(&"claude-code".to_string()));
         assert!(detected.contains(&"universal".to_string()));
         assert_eq!(
-            resolve_agent_ids(&[], &[], &[], &yes).unwrap().len(),
+            resolve_agent_ids(&[], &[], &[], &yes, false).unwrap().len(),
             AGENT_TARGETS.len()
         );
     }
 
     #[test]
     fn missing_agent_fails_only_when_the_session_is_non_interactive() {
-        let error = resolve_agent_ids(&[], &[], &[], &selection_prompt(false)).unwrap_err();
+        let error = resolve_agent_ids(&[], &[], &[], &selection_prompt(false), false).unwrap_err();
         assert!(error.to_string().contains("non-interactive"));
     }
 
@@ -1400,11 +1521,10 @@ mod tests {
     fn interactive_agent_selection_rejects_invalid_prompt_indexes() {
         let prompt = SelectionPrompt {
             interactive: true,
-            assume_yes: false,
             many: vec![AGENT_TARGETS.len()],
-            one: 0,
+            ..SelectionPrompt::default()
         };
-        assert!(resolve_agent_ids(&[], &[], &[], &prompt).is_err());
+        assert!(resolve_agent_ids(&[], &[], &[], &prompt, false).is_err());
     }
 
     #[test]
@@ -1478,22 +1598,18 @@ mod tests {
     fn add_link_mode_obeys_flags_config_unique_dirs_and_choice() {
         let link_prompt = SelectionPrompt {
             interactive: true,
-            assume_yes: false,
-            many: vec![],
-            one: 0,
+            ..SelectionPrompt::default()
         };
         let copy_prompt = SelectionPrompt {
             interactive: true,
-            assume_yes: false,
-            many: vec![],
             one: 1,
+            ..SelectionPrompt::default()
         };
         let noninteractive = selection_prompt(false);
         let yes = SelectionPrompt {
-            interactive: false,
             assume_yes: true,
-            many: vec![],
             one: 1,
+            ..SelectionPrompt::default()
         };
 
         assert_eq!(

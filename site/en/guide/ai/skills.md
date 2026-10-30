@@ -86,8 +86,12 @@ directories:
 Several agents share `.agents/skills` on purpose: one install serves them all, and
 `remove` counts how many agents still reference a skill. Explicit `-a` values win,
 then `[skills].default_agents`; otherwise osdk detects installed agents. One detection
-is selected automatically together with the `.agents/skills` group; multiple or zero
-detections open the numbered picker. `--yes` accepts detections (or all agents when
+is selected automatically together with the shared directory (recorded as `universal`);
+multiple or zero detections open a checklist: arrow keys move, Space toggles, `a`
+toggles all, Enter confirms, and detected agents start checked. It offers one choice per
+directory -- agents sharing `.agents/skills` in a project are the single `universal`
+choice, while with `-g` each agent has its own -- and installs exactly what is checked.
+`--yes` accepts detections (or all agents when
 none are detected), while other non-interactive calls fail immediately. Link/copy is
 asked only for multiple physical destinations; one destination is copied directly.
 Explicit `--copy` and `[skills].link_mode` take precedence. Before writing, the

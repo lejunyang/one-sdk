@@ -16,8 +16,14 @@ pub trait Prompt: Send + Sync {
         false
     }
 
-    /// Select one or more zero-based option indexes.
-    fn select_many(&self, _question: &str, _options: &[String]) -> Result<Vec<usize>> {
+    /// Select one or more zero-based option indexes. `defaults` marks the
+    /// options that start checked; a shorter slice leaves the rest unchecked.
+    fn select_many(
+        &self,
+        _question: &str,
+        _options: &[String],
+        _defaults: &[bool],
+    ) -> Result<Vec<usize>> {
         Err(anyhow!("interactive selection is unavailable"))
     }
 
@@ -61,13 +67,41 @@ impl Prompt for TerminalPrompt {
         self.assume_yes
     }
 
-    fn select_many(&self, question: &str, options: &[String]) -> Result<Vec<usize>> {
+    /// A checklist driven by the keyboard rather than typed numbers.
+    ///
+    /// Typing indexes made the choice hard to see and easy to get wrong, and
+    /// there was no way to take everything at once. Arrow keys move, Space
+    /// toggles, `a` toggles all, Enter confirms; Esc cancels.
+    fn select_many(
+        &self,
+        question: &str,
+        options: &[String],
+        defaults: &[bool],
+    ) -> Result<Vec<usize>> {
         ensure_interactive(question)?;
+        if options.is_empty() {
+            return Err(anyhow!("cannot select from an empty option list"));
+        }
+        let mut checked: Vec<bool> = (0..options.len())
+            .map(|index| defaults.get(index).copied().unwrap_or(false))
+            .collect();
+        let term = dialoguer::console::Term::stderr();
         loop {
-            print_options(question, options, true)?;
-            match parse_multi_selection(&read_answer()?, options.len()) {
-                Ok(selected) => return Ok(selected),
-                Err(error) => eprintln!("{error}"),
+            let picked =
+                dialoguer::MultiSelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                    .with_prompt(format!(
+                        "{question} (\u{2191}/\u{2193} move, Space toggle, a all, Enter confirm)"
+                    ))
+                    .items(options)
+                    .defaults(&checked)
+                    .interact_on_opt(&term)?;
+            match picked {
+                None => return Err(anyhow!("selection cancelled")),
+                Some(picked) if picked.is_empty() => {
+                    eprintln!("Select at least one option (Space toggles, a selects all).");
+                    checked = vec![false; options.len()];
+                }
+                Some(picked) => return Ok(picked),
             }
         }
     }
@@ -78,7 +112,7 @@ impl Prompt for TerminalPrompt {
         }
         ensure_interactive(question)?;
         loop {
-            print_options(question, options, false)?;
+            print_options(question, options)?;
             match parse_single_selection(&read_answer()?, options.len(), default) {
                 Ok(selected) => return Ok(selected),
                 Err(error) => eprintln!("{error}"),
@@ -98,7 +132,7 @@ fn ensure_interactive(question: &str) -> Result<()> {
     }
 }
 
-fn print_options(question: &str, options: &[String], many: bool) -> Result<()> {
+fn print_options(question: &str, options: &[String]) -> Result<()> {
     if options.is_empty() {
         return Err(anyhow!("cannot select from an empty option list"));
     }
@@ -106,11 +140,7 @@ fn print_options(question: &str, options: &[String], many: bool) -> Result<()> {
     for (index, option) in options.iter().enumerate() {
         eprintln!("  {}) {option}", index + 1);
     }
-    if many {
-        eprint!("Choose one or more numbers (for example 1,3-5): ");
-    } else {
-        eprint!("Choose one number (Enter accepts the recommended default): ");
-    }
+    eprint!("Choose one number (Enter accepts the recommended default): ");
     io::stderr().flush()?;
     Ok(())
 }
@@ -140,45 +170,6 @@ fn parse_single_selection(answer: &str, count: usize, default: usize) -> Result<
     Ok(selected - 1)
 }
 
-fn parse_multi_selection(answer: &str, count: usize) -> Result<Vec<usize>> {
-    if count == 0 {
-        return Err(anyhow!("invalid selection options"));
-    }
-    let mut selected = std::collections::BTreeSet::new();
-    for token in answer
-        .split([',', ' ', '\t'])
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        if let Some((start, end)) = token.split_once('-') {
-            let start = parse_selection_number(start, count)?;
-            let end = parse_selection_number(end, count)?;
-            if start > end {
-                return Err(anyhow!("invalid descending selection range `{token}`"));
-            }
-            selected.extend(start..=end);
-        } else {
-            selected.insert(parse_selection_number(token, count)?);
-        }
-    }
-    if selected.is_empty() {
-        return Err(anyhow!("select at least one option"));
-    }
-    Ok(selected.into_iter().map(|index| index - 1).collect())
-}
-
-fn parse_selection_number(value: &str, count: usize) -> Result<usize> {
-    let number = value
-        .parse::<usize>()
-        .map_err(|_| anyhow!("invalid selection `{value}`: enter numbers from 1 to {count}"))?;
-    if !(1..=count).contains(&number) {
-        return Err(anyhow!(
-            "selection {number} is out of range; choose 1 through {count}"
-        ));
-    }
-    Ok(number)
-}
-
 fn is_affirmative(answer: &str) -> bool {
     matches!(
         answer.trim().to_ascii_lowercase().as_str(),
@@ -188,7 +179,7 @@ fn is_affirmative(answer: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_affirmative, parse_multi_selection, parse_single_selection};
+    use super::{is_affirmative, parse_single_selection};
 
     #[test]
     fn accepts_explicit_affirmative_answers_only() {
@@ -198,21 +189,6 @@ mod tests {
         for answer in ["", "n", "no", "true", "1"] {
             assert!(!is_affirmative(answer), "{answer}");
         }
-    }
-
-    #[test]
-    fn parses_multi_selection_ranges_and_deduplicates() {
-        assert_eq!(
-            parse_multi_selection("1, 3-5 3", 6).unwrap(),
-            vec![0, 2, 3, 4]
-        );
-    }
-
-    #[test]
-    fn rejects_empty_descending_and_out_of_range_multi_selection() {
-        assert!(parse_multi_selection("", 3).is_err());
-        assert!(parse_multi_selection("3-1", 3).is_err());
-        assert!(parse_multi_selection("4", 3).is_err());
     }
 
     #[test]
