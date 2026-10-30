@@ -864,7 +864,7 @@ pub(crate) async fn model_sync(
     // A declared model is (re-)pulled when the lock does not describe it, or
     // describes a different identity than the declaration now asks for. This is
     // what lets `sync` pick up a `[models]` entry added or edited by hand,
-    // rather than only bootstrapping when the whole model lock is empty. The
+    // rather than only bootstrapping when the whole model lock is empty.
     // The comparison covers provider, repository, requested revision, variant, and
     // the original include/exclude selectors. The lock stores those selectors
     // alongside the expanded file list, so changing either one is observable.
@@ -1081,6 +1081,7 @@ pub(crate) async fn model_sync(
         // Restores run concurrently up to `model_jobs`; each future only reads
         // `app` and downloads into the CAS. The lock-facing tail (digest check
         // against the lock, view reconcile) is serial below.
+        let configured = &configured;
         let restores = to_restore.iter().map(|(name, entry)| {
             let name = name.clone();
             async move {
@@ -1106,48 +1107,16 @@ pub(crate) async fn model_sync(
                     family: entry.family.clone(),
                     derived_from: entry.derived_from.clone(),
                 };
-                let sources = match osdk_core::model::source::ranked_sources(
-                    &app.ctx,
-                    &reference,
-                    app.refresh_sources,
-                )
-                .await
-                {
-                    Ok(sources) => sources,
-                    Err(error) => return (name, Err(anyhow::Error::from(error))),
-                };
-                let mut installed = None;
-                let mut last_error = None;
-                for source in sources {
-                    let provider = osdk_core::model::source::provider(
-                        reference.provider,
-                        source.forward_credentials,
-                    );
-                    match osdk_core::model::pull::pull(
-                        &app.ctx,
-                        provider.as_ref(),
-                        &name,
-                        &reference,
-                        &source.download_url,
-                        &options,
-                    )
-                    .await
-                    {
-                        Ok(model) => {
-                            installed = Some(model);
-                            break;
-                        }
-                        Err(error) => last_error = Some(error),
-                    }
-                }
-                let result = installed.ok_or_else(|| {
-                    anyhow!(
-                        "cannot restore model {name}: {}",
-                        last_error
-                            .map(|error| error.to_string())
-                            .unwrap_or_else(|| "no usable model source".into())
-                    )
-                });
+                let declared = configured
+                    .iter()
+                    .find(|(declared, _)| declared == &name)
+                    .and_then(|(_, declaration)| declaration.endpoint.as_deref());
+                let endpoint =
+                    restore_endpoint(declared, provider_endpoint_env(entry.provider), entry);
+                let result =
+                    pull_model_from_sources(app, &name, &reference, &options, endpoint, false)
+                        .await
+                        .with_context(|| format!("cannot restore model {name}"));
                 (name, result)
             }
         });
@@ -1451,6 +1420,28 @@ pub(crate) fn provider_endpoint_env(provider: osdk_core::model::ProviderId) -> O
         osdk_core::model::ProviderId::Civitai => std::env::var("CIVITAI_ENDPOINT").ok(),
         osdk_core::model::ProviderId::Local => None,
     }
+}
+
+/// The endpoint a locked model is restored from, or `None` to rank sources.
+///
+/// Same precedence as a pull -- the project declaration, then the provider's
+/// environment variable -- and after them the endpoint the lock recorded. The
+/// lock folds the official host and built-in mirrors into the provider's own
+/// endpoint, so a recorded endpoint that is not official is one osdk could not
+/// map: a private host that may be the only place the repository exists.
+/// Ignoring all three sent restores to the public sources, where a model pulled
+/// from a private endpoint cannot be found. Local models have no online source
+/// to replay, so their recorded endpoint is never used.
+pub(crate) fn restore_endpoint(
+    declared: Option<&str>,
+    env: Option<String>,
+    entry: &crate::lockfile::LockedModel,
+) -> Option<String> {
+    declared.map(str::to_string).or(env).or_else(|| {
+        (entry.provider != osdk_core::model::ProviderId::Local
+            && !official_model_endpoint(entry.provider, &entry.endpoint))
+        .then(|| entry.endpoint.clone())
+    })
 }
 
 pub(crate) fn official_model_endpoint(
@@ -1942,5 +1933,64 @@ pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std
             output.status,
             String::from_utf8_lossy(&output.stderr)
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restore_endpoint;
+    use crate::lockfile::LockedModel;
+    use osdk_core::model::ProviderId;
+
+    fn locked(provider: ProviderId, endpoint: &str) -> LockedModel {
+        LockedModel {
+            provider,
+            repository: "owner/repo".into(),
+            requested_revision: "main".into(),
+            revision: "abc123".into(),
+            endpoint: endpoint.into(),
+            variant: None,
+            kind: None,
+            family: None,
+            derived_from: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            files: Vec::new(),
+            views: Default::default(),
+        }
+    }
+
+    #[test]
+    fn restore_replays_the_endpoints_a_pull_would_use() {
+        let private = locked(ProviderId::HuggingFace, "https://models.internal.example");
+        let official = locked(ProviderId::HuggingFace, "https://huggingface.co");
+
+        // Declaration, then environment, then the lock's own custom endpoint.
+        assert_eq!(
+            restore_endpoint(
+                Some("https://declared.example"),
+                Some("https://env.example".into()),
+                &private
+            )
+            .as_deref(),
+            Some("https://declared.example")
+        );
+        assert_eq!(
+            restore_endpoint(None, Some("https://env.example".into()), &private).as_deref(),
+            Some("https://env.example")
+        );
+        assert_eq!(
+            restore_endpoint(None, None, &private).as_deref(),
+            Some("https://models.internal.example")
+        );
+
+        // An official endpoint in the lock leaves the choice to source ranking,
+        // so mirrors and `source pin` keep working; a local model has no online
+        // source to replay at all.
+        assert_eq!(restore_endpoint(None, None, &official), None);
+        assert_eq!(
+            restore_endpoint(None, None, &locked(ProviderId::Local, "local")),
+            None
+        );
     }
 }

@@ -175,6 +175,11 @@ osdk model sync --prune         # 删除 lock 不再声明的本地快照
 保存原始 `include`/`exclude` 与展开后的文件列表，因此选择器变化能触发重新解析。已存在且
 校验通过的快照不会重复下载；校验失败时重新获取。消费者视图也会按 lock 自动重建。
 
+还原与拉取走同一条 endpoint 解析：先看 `[models.<name>].endpoint`，再看
+`HF_ENDPOINT` 等环境变量，然后是 lock 记录的自定义 endpoint，最后才是 source pin 与测速
+排名；`--source` 同样生效。lock 里记录的官方端点不会被强制使用，因此镜像与 `source pin`
+照常起作用；而只存在于私有 endpoint 的模型，即使声明里已删掉 `endpoint`，也能按 lock 还原。
+
 `--prune` 仅适用于全项目同步，且默认关闭，因为它会删除重新获取代价较高的本地权重。
 
 ### `remove` 与 `unuse`

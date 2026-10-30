@@ -12,7 +12,7 @@ kind = "diffusion-model"
 family = "flux"
 derived_from = "hf:black-forest-labs/FLUX.1-dev@main"
 when = { os = "linux" }
-# endpoint = "https://..."             # 自定义来源，需要 trust
+# endpoint = "https://..."             # 自定义来源；不需要 trust
 
 [models.flux.views.comfyui]
 profile = "default"
@@ -31,9 +31,9 @@ profile = "default"
 | `family` | 架构/生态家族，参与快照身份 |
 | `derived_from` | 基础模型/上游血缘，参与快照身份 |
 | `when` | 平台过滤 |
-| `endpoint` | provider endpoint 覆盖；改变来源，需 trust |
+| `endpoint` | provider endpoint 覆盖，拉取与还原都会使用；主机不属于快照身份，修改它不会触发重新解析 |
 | `views.<kind>.profile` | 视图 profile，默认 `default` |
 | `views.<kind>.map` | 仓库相对前缀到消费者分类的映射 |
 
-`model use` 的 reference/include/exclude/variant/kind/family/derived_from/endpoint 会写入同名声明；`sync` 会识别这些字段的变化。模型配置不触发
+`model use` 的 reference/include/exclude/variant/kind/family/derived_from/endpoint 会写入同名声明；`sync` 会识别除 `endpoint` 以外这些字段的变化。还原时 endpoint 依次取声明、`HF_ENDPOINT` 等环境变量、lock 记录的自定义 endpoint，最后才是测速排名。模型配置不触发
 任何信任要求：模型字节是内容，osdk 不执行它们，下载仍按锁定摘要校验。`model import` 不属于 `[models]`：本地路径不可跨机器恢复，因此只创建本机快照，不写配置或 lock。

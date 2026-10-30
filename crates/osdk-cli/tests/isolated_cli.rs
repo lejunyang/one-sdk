@@ -1285,6 +1285,121 @@ fn huggingface_model_sync_materializes_and_locks_snapshot() {
     assert!(lock.contains("sha256 ="));
 }
 
+// Restoring a locked snapshot must go back to the custom endpoint the lock
+// recorded. The declaration loses its `endpoint` before the restore, so the
+// lock is the only place the private host is named; a restore that ranks the
+// public sources instead never reaches this server and the join times out.
+#[cfg(not(windows))]
+#[test]
+fn model_sync_restores_from_the_custom_endpoint_recorded_in_the_lock() {
+    let payload = br#"{"model":"fixture"}"#.to_vec();
+    let digest =
+        osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_payload = payload.clone();
+    let server = std::thread::spawn(move || {
+        // Metadata and one file for the pull, then metadata again for the
+        // restore. `model remove` drops the snapshot but leaves the bytes in the
+        // CAS, so the restore re-resolves the revision here and links the file
+        // from the store: that third request is what proves which host it used.
+        let mut paths = Vec::new();
+        for _ in 0..3 {
+            let mut stream = accept_fixture_connection(&listener, "model restore fixture");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
+            let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+            if path.starts_with("/api/") {
+                let body = format!(
+                    r#"{{"sha":"abc123","siblings":[{{"rfilename":"config.json","lfs":{{"sha256":"{digest}","size":{}}}}}]}}"#,
+                    server_payload.len()
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                )
+                .unwrap();
+                stream.write_all(&server_payload).unwrap();
+            }
+            paths.push(path);
+        }
+        paths
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let endpoint = format!("http://{address}");
+    let declaration =
+        "[models.fixture]\nsource = \"hf:owner/repo@main\"\ninclude = [\"config.json\"]\n";
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        format!("{declaration}endpoint = \"{endpoint}\"\n"),
+    )
+    .unwrap();
+    let trusted = temporary.path().to_string_lossy().into_owned();
+    let run = |args: &[&str]| {
+        let output = run_isolated_in_with_env(
+            temporary.path(),
+            temporary.path(),
+            args,
+            &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+        );
+        assert!(
+            output.status.success(),
+            "osdk {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    run(&["model", "sync", "fixture"]);
+    let lock = std::fs::read_to_string(temporary.path().join("osdk.lock")).unwrap();
+    assert!(
+        lock.contains(&format!("endpoint = \"{endpoint}\"")),
+        "{lock}"
+    );
+
+    run(&["model", "remove", "fixture"]);
+    std::fs::write(temporary.path().join("osdk.toml"), declaration).unwrap();
+    let restored = run(&["model", "sync", "fixture"]);
+    assert!(
+        String::from_utf8_lossy(&restored.stdout).contains("restored fixture"),
+        "{}",
+        String::from_utf8_lossy(&restored.stdout)
+    );
+    let paths = server.join().unwrap();
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| path.starts_with("/api/"))
+            .count(),
+        2,
+        "{paths:?}"
+    );
+
+    let path = run(&["model", "path", "fixture"]);
+    let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
+    assert_eq!(
+        std::fs::read(snapshot.join("config.json")).unwrap(),
+        payload
+    );
+}
+
 // End-to-end declarative flow (Unix, needs the fixture server): a project with
 // a `[models.<name>.views]` declaration pulls, and the pull both records the
 // views in the lock and renders the consumer view without a separate

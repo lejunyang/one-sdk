@@ -197,6 +197,12 @@ floating branch. The lock stores the original selectors as well as the expanded 
 selector change triggers resolution. An intact snapshot is not downloaded again; a corrupt one is.
 Consumer views are rebuilt from the lock as part of synchronization.
 
+Restore resolves its endpoint the same way a pull does: `[models.<name>].endpoint`, then
+`HF_ENDPOINT` and the other provider variables, then a custom endpoint recorded in the lock, and
+only then source pins and probe ranking; `--source` applies as well. An official endpoint in the
+lock is never forced, so mirrors and `source pin` keep working, while a model that exists only on
+a private endpoint restores from the lock even after `endpoint` is removed from the declaration.
+
 `--prune` applies only to whole-project synchronization and is off by default because it deletes
 weights that may be expensive to fetch again.
 
