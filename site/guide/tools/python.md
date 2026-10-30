@@ -91,6 +91,24 @@ extras 属于**安装身份**的一部分。`pypi:httpx` 和 `pypi:httpx[extras=
 被排序（`[extras=b,a]` 与 `[extras=a,b]` 等价），因为它们是集合、没有优先级；
 这一点和 conda 的 `channels` 刻意相反，后者的顺序就是求解优先级。
 
+## 默认只装 wheel
+
+osdk 安装 `pypi:` 工具时只用 wheel：uv 带 `--no-build`，pip 带 `--only-binary=:all:`，
+而且对所有依赖都生效，不只是工具本身。装 wheel 只是解包文件；构建源码包则会在安装时
+运行包作者写的 `setup.py` 或构建后端，这正是 npm 的 `--ignore-scripts` 要防的事。
+所以声明 `pypi:` 工具本身不需要[信任](../config/trust)。
+
+某个包在你的平台上没有 wheel 时，安装会失败并给出提示。只为这一条打开构建：
+
+```toml
+[tools]
+"pypi:docopt" = { version = "0.6.2", allow_builds = true }
+```
+
+`allow_builds = true`（行内写法 `pypi:docopt[allow_builds=true]@0.6.2`）和 npm 的同名键
+一样受信任管控，打开后项目需要 `osdk trust`。它只在打开时才计入安装身份，所以已有的
+仅 wheel 安装与 lock 不受影响。
+
 ## 每个工具一个环境，依赖尽量共享
 
 每个工具装在自己的虚拟环境里，这样两个需要互不兼容库版本的 CLI 不会互相打架。

@@ -1421,6 +1421,9 @@ mod tests {
             "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"yes\"\n",
             "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"esbuild\"\n",
             "[tools]\nbundler = \"npm:esbuild[allow_builds=true]@0.21\"\n",
+            // pypi's opt-in into building sdists is the same grant.
+            "[tools.\"pypi:docopt\"]\nversion = \"0.6.2\"\nallow_builds = true\n",
+            "[tools]\ndocopt = \"pypi:docopt[allow_builds=true]@0.6.2\"\n",
         ] {
             std::fs::write(&path, body).unwrap();
             let found = trust_requirements(&path, &[Scope::Install]).unwrap();

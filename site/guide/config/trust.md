@@ -31,7 +31,7 @@ osdk untrust [PATH]
 | `[sources]`、`[registries]` | 改变子进程的下载目的地 |
 | `settings` 的 `verify_signatures`、`require_checksums`、`attestations` | 关掉或降级对产物的校验 |
 | `settings` 的 `python`、`java` | 二者的 `catalog_url` 决定安装哪份运行时字节 |
-| `[tools]` 中显式打开的 `allow_builds` | 唯一让 npm 生命周期脚本得以运行的开关 |
+| `[tools]` 中显式打开的 `allow_builds` | 让 npm 生命周期脚本运行，或让 pypi 构建源码包（运行 `setup.py`/构建后端）的开关 |
 | `[tools]` 中的 `cargo:` 条目（含别名指向的） | 编译 crate 必然运行其 `build.rs` 与过程宏，没有可关闭的开关；版本变化即新代码，需重新信任 |
 | `[deps.<p>]` 的 registries/自定义 `run`/build 开关 | 重定向依赖来源或执行任意命令 |
 | `[sys.pkg]`（仅 `pkg apply`） | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
@@ -48,7 +48,7 @@ osdk untrust [PATH]
 
 **声明安装哪些工具或包本身不需要信任**，`[tools]`、`[alias.tools]` 都不需要，其中的
 `npm:`、`github:`、`http:`、`go:`、`pypi:`、`conda:` 条目也不需要：npm 安装默认
-传 `--ignore-scripts`，`http:` 制品缺 `sha256` 直接拒绝，`go:` 以 `CGO_ENABLED=0` 构建。
+传 `--ignore-scripts`，`pypi:` 默认只装 wheel，`http:` 制品缺 `sha256` 直接拒绝，`go:` 以 `CGO_ENABLED=0` 构建。
 唯一的例外是 `cargo:`：`cargo install` 只能从源码编译，而编译会执行依赖图里每个
 `build.rs` 和过程宏，所以声明它本身就是授权，见上表。
 这和在 `package.json` 里加一行依赖是同一件事——新增包、升降版本都不会要求重新信任。

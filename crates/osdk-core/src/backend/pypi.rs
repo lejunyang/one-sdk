@@ -323,8 +323,20 @@ impl PypiBackend {
         run_installer(&program, &args, &env)?;
 
         let requirement = self.requirement(&tv.version, &tv.options);
-        let (program, args) = install_command(choice, venv, &requirement);
-        run_installer(&program, &args, &env)?;
+        let allow_builds = allows_builds(&tv.options);
+        let (program, args) = install_command(choice, venv, &requirement, allow_builds);
+        run_installer(&program, &args, &env).map_err(|error| {
+            if allow_builds {
+                return error;
+            }
+            Error::other(format!(
+                "{error}\nnote: osdk installs pypi tools from wheels only, because building a \
+                 source distribution runs the package's own code. If `{}` publishes no wheel \
+                 for this platform, set `allow_builds = true` on its `[tools]` entry; the \
+                 project then needs `osdk trust`.",
+                self.project
+            ))
+        })?;
 
         // Record what was built. Kept beside the environment rather than inside
         // it, so osdk never modifies a directory the user may manage.
@@ -525,14 +537,33 @@ pub fn venv_command(
     }
 }
 
+/// Option that lets a `pypi:` install build source distributions.
+#[cfg(feature = "install")]
+pub const ALLOW_BUILDS_OPTION: &str = "allow_builds";
+
+/// Whether `options` opted this install into building sdists.
+#[cfg(feature = "install")]
+fn allows_builds(options: &BTreeMap<String, String>) -> bool {
+    options
+        .get(ALLOW_BUILDS_OPTION)
+        .is_some_and(|value| value == "true")
+}
+
 /// Build the argument list that installs `requirement` into `venv`.
+///
+/// Wheels only unless `allow_builds`: installing a wheel unpacks files, while
+/// building a source distribution runs `setup.py` or a PEP 517 backend -- code
+/// the package author wrote, executing at install time. Without this a pypi
+/// tool could do what npm's `--ignore-scripts` exists to prevent, and the
+/// trust model's claim that declaring tools runs no package code was false.
 #[cfg(feature = "install")]
 pub fn install_command(
     choice: &InstallerChoice,
     venv: &Path,
     requirement: &str,
+    allow_builds: bool,
 ) -> (PathBuf, Vec<String>) {
-    match (choice.creator, choice.uv.as_deref()) {
+    let (program, mut args) = match (choice.creator, choice.uv.as_deref()) {
         (EnvCreator::Uv, Some(uv)) => (
             uv.to_path_buf(),
             vec![
@@ -543,7 +574,6 @@ pub fn install_command(
                 // caller was invoked.
                 "--python".to_string(),
                 venv_python(venv).display().to_string(),
-                requirement.to_string(),
             ],
         ),
         _ => (
@@ -551,14 +581,17 @@ pub fn install_command(
             // install into whichever interpreter owns it, which is how packages
             // end up in a system Python nobody asked for.
             venv_python(venv),
-            vec![
-                "-m".to_string(),
-                "pip".to_string(),
-                "install".to_string(),
-                requirement.to_string(),
-            ],
+            vec!["-m".to_string(), "pip".to_string(), "install".to_string()],
         ),
+    };
+    if !allow_builds {
+        args.push(match choice.creator {
+            EnvCreator::Uv if choice.uv.is_some() => "--no-build".to_string(),
+            _ => "--only-binary=:all:".to_string(),
+        });
     }
+    args.push(requirement.to_string());
+    (program, args)
 }
 
 /// Inspect which seed packages an environment ended up with.
@@ -1749,7 +1782,7 @@ mod tests {
             uv: Some(PathBuf::from("/tools/uv.exe")),
             notice: None,
         };
-        let (program, args) = install_command(&uv_choice, &venv, "ruff==0.6.9");
+        let (program, args) = install_command(&uv_choice, &venv, "ruff==0.6.9", false);
         assert_eq!(program, PathBuf::from("/tools/uv.exe"));
         assert_eq!(&args[0..2], &["pip".to_string(), "install".to_string()]);
         // Explicit target: relying on an ambient VIRTUAL_ENV would make the
@@ -1763,7 +1796,7 @@ mod tests {
             uv: None,
             notice: None,
         };
-        let (program, args) = install_command(&stdlib_choice, &venv, "ruff==0.6.9");
+        let (program, args) = install_command(&stdlib_choice, &venv, "ruff==0.6.9", false);
         // The environment's own interpreter runs its own pip. A bare `pip` on
         // PATH would install into whichever Python owns it -- which is exactly
         // how packages end up in a system Python nobody asked for.
@@ -1772,6 +1805,51 @@ mod tests {
             &args[0..3],
             &["-m".to_string(), "pip".to_string(), "install".to_string()]
         );
+    }
+
+    /// Both installers refuse to build sdists unless the entry opted in, and
+    /// the refusal is an installer flag, so it covers every dependency too.
+    #[cfg(feature = "install")]
+    #[test]
+    fn installs_are_wheel_only_unless_builds_are_allowed() {
+        let venv = PathBuf::from("/installs/pypi/ruff/0.6.9");
+        let uv = InstallerChoice {
+            creator: EnvCreator::Uv,
+            uv: Some(PathBuf::from("/tools/uv.exe")),
+            notice: None,
+        };
+        let stdlib = InstallerChoice {
+            creator: EnvCreator::Stdlib,
+            uv: None,
+            notice: None,
+        };
+
+        let (_, args) = install_command(&uv, &venv, "ruff==0.6.9", false);
+        assert!(args.contains(&"--no-build".to_string()), "{args:?}");
+        let (_, args) = install_command(&stdlib, &venv, "ruff==0.6.9", false);
+        assert!(
+            args.contains(&"--only-binary=:all:".to_string()),
+            "{args:?}"
+        );
+        // The requirement stays last, after every flag.
+        assert_eq!(args.last().map(String::as_str), Some("ruff==0.6.9"));
+
+        for choice in [&uv, &stdlib] {
+            let (_, args) = install_command(choice, &venv, "ruff==0.6.9", true);
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == "--no-build" || arg.starts_with("--only-binary")),
+                "{args:?}"
+            );
+        }
+
+        let options =
+            |value: &str| BTreeMap::from([(ALLOW_BUILDS_OPTION.to_string(), value.into())]);
+        assert!(allows_builds(&options("true")));
+        assert!(!allows_builds(&options("false")));
+        assert!(!allows_builds(&BTreeMap::new()));
+        assert!(reject_unsafe_installer_args(["--no-build", "--only-binary=:all:"]).is_ok());
     }
 
     /// Absent uv falls back with an explanation; `require_uv` fails closed.

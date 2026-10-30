@@ -33,7 +33,7 @@ Governed keys and their reasons:
 | `[sources]`, `[registries]` | Change where subprocesses download from |
 | `settings.verify_signatures`, `settings.require_checksums`, `settings.attestations` | Disable or downgrade artifact verification |
 | `settings.python`, `settings.java` | Both carry `catalog_url`, which decides which runtime bytes get installed |
-| `allow_builds`, explicitly enabled in `[tools]` | The only switch that lets npm lifecycle scripts run |
+| `allow_builds`, explicitly enabled in `[tools]` | Lets npm lifecycle scripts run, or lets pypi build source distributions (running `setup.py` or a build backend) |
 | `cargo:` entries in `[tools]`, including aliases that name one | Compiling a crate always runs its `build.rs` and procedural macros, with no switch to turn that off; a version change is new code and needs re-approval |
 | registries/`run`/build switches under `[deps.<p>]` | Redirect dependency bytes or run an arbitrary command |
 | `[sys.pkg]` (`pkg apply` only) | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
@@ -53,7 +53,7 @@ Two narrowings worth stating:
 **Declaring which tools or packages to install never requires trust on its own.**
 That covers `[tools]` and `[alias.tools]`, including their `npm:`, `github:`, `http:`,
 `go:`, `pypi:` and `conda:` entries: npm installs pass
-`--ignore-scripts` by default, an `http:` artifact without a `sha256` is refused
+`--ignore-scripts` by default, `pypi:` installs use wheels only, an `http:` artifact without a `sha256` is refused
 outright, and `go:` builds run with `CGO_ENABLED=0`. The one exception is
 `cargo:`: `cargo install` can only build from source, and building runs every
 `build.rs` and procedural macro in the dependency graph, so the declaration is

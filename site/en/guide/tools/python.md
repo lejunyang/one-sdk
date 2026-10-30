@@ -104,6 +104,27 @@ installed. Extras are sorted (`[extras=b,a]` equals `[extras=a,b]`) because they
 are a set with no precedence. This is deliberately the opposite of conda's
 `channels`, where order *is* solver precedence.
 
+## Wheels only, unless builds are allowed
+
+osdk installs `pypi:` tools from wheels only -- uv runs with `--no-build`, pip with
+`--only-binary=:all:` -- and the rule covers every dependency, not just the tool.
+Installing a wheel unpacks files; building a source distribution runs the
+package's own `setup.py` or build backend at install time, which is exactly what
+npm's `--ignore-scripts` exists to prevent. That is why declaring a `pypi:` tool
+needs no [trust](../config/trust).
+
+A package that publishes no wheel for your platform fails with a note saying so.
+Opt that entry into building:
+
+```toml
+[tools]
+"pypi:docopt" = { version = "0.6.2", allow_builds = true }
+```
+
+`allow_builds = true` (inline: `pypi:docopt[allow_builds=true]@0.6.2`) is a trusted
+key, like npm's, so the project then needs `osdk trust`. It is part of the install
+identity only when on, so existing wheel-only installs and locks are unchanged.
+
 ## One environment per tool, dependencies still shared
 
 Each tool gets its own virtual environment, so two CLIs that need incompatible

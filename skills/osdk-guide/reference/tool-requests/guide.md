@@ -23,11 +23,11 @@
 | 形式 | 示例 | 关键选项 |
 | --- | --- | --- |
 | `npm:<package>` | `npm:prettier@3`、`npm:@antfu/ni` | `installer=npm\|pnpm`、`allow_builds=a,b` |
-| `cargo:<crate>` | `cargo:ripgrep@14` | `features=a,b`、`no-default-features=true` |
-| `cargo:<https-git-url>` | `cargo:https://github.com/o/r.git@tag:v1` | `package=`、`bins=` |
+| `cargo:<crate>` | `cargo:ripgrep@14` | `features=a,b`、`default-features=false`、`locked=true`、`bin=`；需要 `osdk trust`（编译会运行 `build.rs`） |
+| `cargo:<https-git-url>` | `cargo:https://github.com/o/r.git@tag:v1` | `crate=`、`bin=`，及上一行的构建选项 |
 | `go:<module-or-command>` | `go:golang.org/x/tools/gopls@0.20.0` | `tags=`、`env=K=V,...` |
 | `conda:<package>` | `conda:cuda-toolkit@12.8` | `channels=`、`with=` |
-| `pypi:<project>` | `pypi:httpie@3` | `python=`、`extras=`、`index=`、`extra-index=`、`allow-build-from-source=true` |
+| `pypi:<project>` | `pypi:httpie@3` | `extras=a,b`、`allow_builds=true`（默认只装 wheel；打开即允许构建 sdist，需要 `osdk trust`） |
 | `github:owner/repo` | `github:sharkdp/fd@10` | `asset-regex=` / `asset-template=`、`os=` / `arch=` / `libc=`、`bin=` / `bins=`、`strip-components=` |
 | `http:https://...{version}` | 直接 HTTPS 制品 | `sha256=`、`kind=file\|zip\|tar.gz\|tar.xz`、`bin=` / `bins=`、`subdir=`、`rename=`、`strip-components=` |
 

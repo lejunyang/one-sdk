@@ -845,13 +845,26 @@ const GO_OPTIONS: &[OptionDefinition] = &[
 /// `pypi:httpx[extras=socks]` and plain `pypi:httpx` at one version install
 /// different closures. Leaving it out of the identity would let the second
 /// request quietly reuse the first one's environment.
-const PYPI_OPTIONS: &[OptionDefinition] = &[option(
-    "extras",
-    "extras",
-    OptionEffect::Artifact,
-    true,
-    canonical_pypi_extras,
-)];
+///
+/// `allow_builds` is identity for the same reason: a closure that may build
+/// source distributions can differ from the wheel-only one. Off, its default,
+/// it is dropped from the identity, so existing installs and locks keep theirs.
+const PYPI_OPTIONS: &[OptionDefinition] = &[
+    option(
+        "allow_builds",
+        "allow_builds",
+        OptionEffect::Artifact,
+        true,
+        canonical_pypi_allow_builds,
+    ),
+    option(
+        "extras",
+        "extras",
+        OptionEffect::Artifact,
+        true,
+        canonical_pypi_extras,
+    ),
+];
 
 const CONDA_OPTIONS: &[OptionDefinition] = &[
     option(
@@ -1650,6 +1663,21 @@ fn canonical_pypi_subject(value: &str) -> Result<String> {
 /// resolver unions into one closure -- so sorting them makes
 /// `[extras=b,a]` and `[extras=a,b]` the same identity instead of two
 /// environments holding identical packages.
+/// Whether a `pypi:` install may build source distributions.
+///
+/// Building runs package-authored code (`setup.py`, PEP 517 backends), so the
+/// default is wheels only and enabling it is a trust-governed opt-in, the
+/// pypi counterpart of npm's `allow_builds`.
+fn canonical_pypi_allow_builds(value: &str) -> Result<Option<String>> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(Some("true".into())),
+        "false" => Ok(None),
+        _ => Err(Error::config(
+            "pypi option `allow_builds` must be `true` or `false`",
+        )),
+    }
+}
+
 fn canonical_pypi_extras(value: &str) -> Result<Option<String>> {
     let mut extras: Vec<String> = Vec::new();
     for entry in value.split(',') {
@@ -2920,6 +2948,19 @@ mod tests {
         assert!(canonical_pypi_extras("").is_err());
         assert!(canonical_pypi_extras(" , ").is_err());
         assert!(canonical_pypi_extras("bad extra").is_err());
+    }
+
+    /// `allow_builds` joins the identity only when on, so turning builds off
+    /// (the default) reuses existing wheel-only installs and locks unchanged.
+    #[test]
+    fn pypi_allow_builds_is_identity_only_when_enabled() {
+        let plain = ToolSpec::parse("pypi:ruff@0.8").unwrap();
+        let off = ToolSpec::parse("pypi:ruff[allow_builds=false]@0.8").unwrap();
+        let on = ToolSpec::parse("pypi:ruff[allow_builds=TRUE]@0.8").unwrap();
+        assert_eq!(plain.options, off.options);
+        assert_ne!(plain.options, on.options);
+        assert_eq!(on.to_string(), "pypi:ruff[allow_builds=true]@0.8");
+        assert!(ToolSpec::parse("pypi:ruff[allow_builds=yes]@0.8").is_err());
     }
 
     /// End-to-end through the public parser, including identity semantics.
