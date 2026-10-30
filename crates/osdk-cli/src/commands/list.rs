@@ -146,9 +146,7 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     let mut any = false;
     for backend in backends {
         let selection = osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &cwd)?;
-        if !selection.evidence.is_empty() {
-            println!("{}", serde_json::to_string(&selection.evidence)?);
-        }
+        let overridden = overridden_declarations(&selection.evidence);
         if let Some(osdk_core::execution::ExecutionTarget::System(system)) = &selection.target {
             any = true;
             println!(
@@ -157,6 +155,7 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
                 system.version.as_deref().unwrap_or("unknown; not probed"),
                 system.executable.display()
             );
+            print_overridden(&overridden);
             continue;
         }
         if let Some(av) = selection
@@ -180,6 +179,13 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
                     .map(describe_origin)
                     .unwrap_or_else(|| "config value".to_string())
             );
+            print_overridden(&overridden);
+        } else if !overridden.is_empty() {
+            // Declarations exist but none applies; say why rather than staying
+            // silent about a file the user can see.
+            any = true;
+            println!("{} (no applicable declaration)", backend.id());
+            print_overridden(&overridden);
         }
     }
     // Excluded entries are reported here rather than omitted. A tool that is
@@ -197,6 +203,37 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
         println!("{}", t!("msg.no_active"));
     }
     Ok(())
+}
+
+/// The declarations that lost to the selected one, as readable lines.
+///
+/// `current` used to print the raw selection evidence as a JSON array above
+/// every tool -- including the common case of a single declaration, where it
+/// said nothing the next line did not. Only a choice between several
+/// declarations is worth explaining, so only the losers are listed, indented
+/// under the tool. The full structured record stays on `current TOOL --sources
+/// --json`.
+fn overridden_declarations(
+    evidence: &[osdk_core::version::resolver::SelectionEvidence],
+) -> Vec<String> {
+    evidence
+        .iter()
+        .filter(|entry| entry.status != "winner")
+        .map(|entry| {
+            let place = entry
+                .path
+                .as_ref()
+                .map(|path| format!("{} in {}", entry.field, path.display()))
+                .unwrap_or_else(|| entry.field.clone());
+            format!("  {}: {place} ({})", entry.status, entry.reason)
+        })
+        .collect()
+}
+
+fn print_overridden(lines: &[String]) {
+    for line in lines {
+        println!("{line}");
+    }
 }
 
 pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()> {

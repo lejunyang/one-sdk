@@ -83,7 +83,7 @@ osdk reshim
 | --- | --- |
 | `list [TOOL]` | List local versions with completion markers; without a tool, include registered backends and inventory-backed dynamic tools found on disk, including GitHub, Cargo, and Go command tools |
 | `list-remote TOOL [FILTER]` | List stable remote versions; optional `FILTER` is a string prefix |
-| `current [TOOL]` | Show the raw request and discovery source for the current directory; the request need not be installed or remotely resolved |
+| `current [TOOL]` | Show the raw request and discovery source for the current directory; the request need not be installed or remotely resolved. When several declarations compete, the losing ones are listed indented under the tool (`shadowed`/`ignored` with the reason); `current TOOL --sources --json` has the full structured record |
 | `where TOOL[@VERSION]` | With an explicit selector (including prefixes such as `21` or build-number-less `21.0.12`), select only from installed versions using the same matching rules as install and error when nothing matches, without reading the project selection; a bare tool resolves the active version (project ecosystem files, config, dynamic shim request), falling back to the last installed entry |
 | `reshim` | Regenerate shims for installed built-in and inventory-backed dynamic tools, and coordinate npm/npx routing |
 

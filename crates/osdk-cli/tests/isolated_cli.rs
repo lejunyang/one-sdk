@@ -9045,10 +9045,19 @@ fn configurable_tool_order_and_conflict_evidence_are_shared_by_cli_selection() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(stdout.contains("node 22.1.0"));
-    assert!(stdout.contains("\"status\":\"winner\""));
-    assert!(stdout.contains("\"status\":\"shadowed\""));
-    assert!(stdout.contains("tools.node"));
+    assert!(stdout.contains("node 22.1.0"), "{stdout}");
+    // The losing declarations are explained as readable lines under the tool,
+    // not dumped as a JSON array above it.
+    assert!(!stdout.contains("\"status\""), "{stdout}");
+    let shadowed: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("  shadowed: "))
+        .collect();
+    assert_eq!(shadowed.len(), 2, "{stdout}");
+    assert!(
+        shadowed.iter().any(|line| line.contains("tools.node")),
+        "{stdout}"
+    );
     std::fs::write(p.join("osdk.toml"),"[tools]\nnode='20.0.0'\n[settings.precedence]\ntool_order=['.node-version']\ntool_conflicts='error'\n").unwrap();
     let result = run_isolated(p, &["current", "node"]);
     assert!(!result.status.success());
@@ -9091,8 +9100,16 @@ fn current_reports_ignored_declarations_even_without_a_winner() {
     let result = run_isolated(t.path(), &["current", "npm"]);
     assert!(result.status.success());
     let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(stdout.contains("\"status\":\"ignored\""));
-    assert!(stdout.contains("\"tool\":\"npm\""));
+    assert!(
+        stdout.contains("npm (no applicable declaration)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("  ignored: ") && line.contains("packageManager")),
+        "{stdout}"
+    );
     assert!(!stdout.contains("SECRET"));
 }
 

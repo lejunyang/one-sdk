@@ -74,7 +74,7 @@ osdk reshim
 | --- | --- |
 | `list [TOOL]` | 列出带完成标记的本地版本；无参数时包括全部已注册 backend 和磁盘上发现的 inventory 型动态工具，包括 GitHub、Cargo 与 Go command 工具 |
 | `list-remote TOOL [FILTER]` | 列出远端稳定版本；可选 `FILTER` 是字符串前缀，不列预发布版本 |
-| `current [TOOL]` | 显示当前目录解析到的原始版本请求和来源；不保证版本已安装，也不是远端解析后的精确版本 |
+| `current [TOOL]` | 显示当前目录解析到的原始版本请求和来源；不保证版本已安装，也不是远端解析后的精确版本。多个声明竞争时，在该工具下缩进列出落选的声明（`shadowed`/`ignored` 及原因）；完整结构化记录用 `current TOOL --sources --json` |
 | `where TOOL[@VERSION]` | 带显式选择器（含 `21`、`21.0.12` 这类前缀或省略 build 号的版本）时，只按与安装相同的匹配规则在已安装版本中选择，选不到即报错，不读取项目当前版本；裸工具名解析当前激活版本（项目生态文件、配置、动态 shim 请求），都没有时取已安装列表最后一项 |
 | `reshim` | 为所有已安装的内置及 inventory 型动态工具重新生成 shim，并协调 npm/npx 路由 |
 
