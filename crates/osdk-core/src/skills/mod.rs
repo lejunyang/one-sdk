@@ -184,6 +184,19 @@ impl SkillSource {
             return Err(Error::config("empty skill source"));
         }
 
+        // The lock's own spelling of a local source (`canonical` writes it).
+        // Without this the lock could not be read back: `local:C:/x` and
+        // `local:/home/x` fell through to the GitHub shorthand and failed, so
+        // `skills update` aborted on any lock holding a local skill.
+        if let Some(path) = trimmed.strip_prefix("local:") {
+            if path.is_empty() {
+                return Err(Error::config("empty local skill path in `local:`"));
+            }
+            return Ok(SkillSource::Local {
+                path: PathBuf::from(path),
+            });
+        }
+
         // Explicit local markers first: these can never be a GitHub shorthand.
         if trimmed.starts_with("./")
             || trimmed.starts_with("../")
@@ -591,6 +604,21 @@ mod tests {
             // Canonical form re-parses to the same source.
             assert_eq!(SkillSource::parse(&parsed.canonical()).unwrap(), parsed);
         }
+
+        // Local sources too, in both path styles on every host: the lock is
+        // written on one machine and read on another.
+        for (input, canonical) in [
+            ("/home/me/skills", "local:/home/me/skills"),
+            (r"C:\Users\me\skills", "local:C:/Users/me/skills"),
+            ("./skills", "local:./skills"),
+        ] {
+            let parsed = SkillSource::parse(input).unwrap();
+            assert_eq!(parsed.canonical(), canonical);
+            let reparsed = SkillSource::parse(canonical).unwrap();
+            assert!(matches!(reparsed, SkillSource::Local { .. }), "{canonical}");
+            assert_eq!(reparsed.canonical(), canonical);
+        }
+        assert!(SkillSource::parse("local:").is_err());
     }
 
     #[test]
