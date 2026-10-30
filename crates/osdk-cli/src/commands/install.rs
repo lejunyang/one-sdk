@@ -1766,14 +1766,21 @@ pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result
                     .map(|entry| entry.to_request_options())
                     .unwrap_or_default(),
             });
-        } else if let Ok(mut request) = ToolRequest::parse(spec) {
-            if !request.backend.contains(':') || app.registry.get(&request.backend).is_err() {
-                continue;
-            }
+        } else if let Some(mut request) = ToolRequest::parse(spec).ok().filter(|request| {
+            request.backend.contains(':') && app.registry.get(&request.backend).is_ok()
+        }) {
             if let Some(entry) = app.ctx.config.tool_configs.get(tool) {
                 request.options.extend(entry.to_request_options());
             }
             out.push(request);
+        } else {
+            // Neither a backend nor an alias for one: usually a typo in the key.
+            // Skipping it without a word made a bare `install` report "no config
+            // pins found" for a file that plainly has one.
+            tracing::warn!(
+                "{}",
+                t!("warn.unresolved_tool_entry", tool = tool, spec = spec)
+            );
         }
     }
     let cwd = std::env::current_dir()?;

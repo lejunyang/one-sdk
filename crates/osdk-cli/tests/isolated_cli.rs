@@ -2205,6 +2205,30 @@ fn bare_project_install_does_not_enumerate_unrelated_global_tools() {
 }
 
 #[test]
+fn bare_install_warns_about_tools_entries_that_name_no_backend() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\ntypo-tool = \"1.2.3\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "install", "--no-deps"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ignoring [tools] entry `typo-tool = \"1.2.3\"`"),
+        "unresolvable entry was dropped silently: {stderr}"
+    );
+}
+
+#[test]
 fn lock_still_records_a_global_tool_when_it_is_named_explicitly() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

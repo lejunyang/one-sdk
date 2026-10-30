@@ -311,6 +311,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "warn.unresolved_tool_entry",
+        (
+            "warning: ignoring [tools] entry `{tool} = \"{spec}\"`: `{tool}` is not a known backend and `{spec}` does not name one (e.g. `npm:pkg@1`); check the spelling",
+            "警告：已忽略 [tools] 条目 `{tool} = \"{spec}\"`：`{tool}` 不是已知 backend，`{spec}` 也没有指向任何 backend（例如 `npm:pkg@1`）；请检查拼写",
+        ),
+    );
+    m.insert(
         "warn.env_source_invalid",
         (
             "warning: ignoring {variable} for {tool}: {reason}. osdk will select among its built-in sources instead; pass --source-mode env to require this value.",
