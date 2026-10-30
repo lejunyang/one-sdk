@@ -102,6 +102,15 @@ pub struct TrustRequirement {
 pub enum TrustReason {
     /// Runs arbitrary code on this machine during install.
     ExecutesCode,
+    /// Installing compiles the package, which runs code the package ships --
+    /// a `cargo:` tool's `build.rs` and procedural macros.
+    ///
+    /// Separate from [`Self::ExecutesCode`] because it matters only to a
+    /// command that installs. The shim cannot install and never compiles, so
+    /// gating dispatch on it would make `cargo --version` fail in every
+    /// project that declares a `cargo:` tool, for a reason that command can
+    /// never act on.
+    BuildsFromSource,
     /// Silently changes *how* a command the user asked for gets executed.
     ///
     /// Distinct from [`Self::ExecutesCode`], which is about code running at a
@@ -121,6 +130,7 @@ impl TrustReason {
     pub fn describe(self) -> String {
         match self {
             Self::ExecutesCode => crate::t!("trust.reason.executes_code"),
+            Self::BuildsFromSource => crate::t!("trust.reason.builds_from_source"),
             Self::RedirectsExecution => crate::t!("trust.reason.redirects_execution"),
             Self::WeakensVerification => crate::t!("trust.reason.weakens_verification"),
         }
@@ -351,6 +361,10 @@ const ALLOW_BUILDS_OPTION: &str = "allow_builds";
 /// by scope: the narrowing is the shim's alone, and each of those paths
 /// reaches keys the shim never does.
 pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
+    // Compiling happens only when installing, which the shim never does.
+    if requirement.reason == TrustReason::BuildsFromSource {
+        return false;
+    }
     // Match on the top-level table: a requirement key is either a bare table
     // name or `table.key`.
     let table = requirement
@@ -674,7 +688,7 @@ fn collect_tools_requirements(value: &toml::Value, found: &mut Vec<TrustRequirem
         } else if compiles_from_source(name, entry) {
             found.push(TrustRequirement {
                 key: format!("tools.{name}"),
-                reason: TrustReason::ExecutesCode,
+                reason: TrustReason::BuildsFromSource,
             });
         }
     }
@@ -1470,7 +1484,10 @@ mod tests {
             let found = trust_requirements(&path, &[Scope::Install]).unwrap();
             assert_eq!(found.len(), 1, "{body}");
             assert_eq!(found[0].key, key, "{body}");
-            assert_eq!(found[0].reason, TrustReason::ExecutesCode, "{body}");
+            assert_eq!(found[0].reason, TrustReason::BuildsFromSource, "{body}");
+            // The shim cannot install, so it must not refuse to run `cargo`
+            // (or anything else) because of this entry.
+            assert!(!affects_tool_dispatch(&found[0]), "{body}");
             // Only installing compiles; a task run is not gated by it.
             assert!(
                 trust_requirements(&path, &[Scope::Run]).unwrap().is_empty(),

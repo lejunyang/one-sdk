@@ -1535,6 +1535,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "trust.reason.builds_from_source",
+        (
+            "compiles the package during install, which runs its build scripts",
+            "安装时会编译该包，从而运行它的构建脚本",
+        ),
+    );
+    m.insert(
         "trust.reason.redirects_execution",
         (
             "decides which interpreter runs your tasks, so a task may not run what it says",
