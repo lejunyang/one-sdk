@@ -52,6 +52,7 @@ pub async fn install(
     let (mut requests, trusted_replay, supplemented_lock, inherit_cross_platform) = if use_lock {
         match requests_from_lock(app)? {
             Some(mut requests) => {
+                warn_about_lock_drift(app, &requests);
                 let supplemented = include_lazy
                     && supplement_locked_requests_with_lazy(
                         app,
@@ -88,6 +89,73 @@ pub async fn install(
         println!("updated {}", path.display());
     }
     Ok(())
+}
+
+/// Say so when a replayed lock no longer matches what the project declares.
+///
+/// A bare install replays the lock's tool table as-is and never compares it
+/// with osdk.toml (see the lockfile guide); `osdk lock` is how the two are
+/// reconciled. Nothing said that, so a tool removed from osdk.toml kept being
+/// installed and reported as "already installed" -- it looked like a global
+/// tool leaking into the project -- and a newly declared one was silently not
+/// installed. The replay itself is unchanged; this only names the drift.
+///
+/// The expected set is what a fresh `osdk lock` would write: the project's own
+/// declarations plus the runtimes osdk injects for them (node for npm tools, uv
+/// for uv-installed pypi tools, ...). Lazy declarations are left out of the
+/// missing side, because a lock written by a default install omits them.
+fn warn_about_lock_drift(app: &App, locked: &[ToolRequest]) {
+    let Ok(declared) = gather_install_requests(app, Vec::new()) else {
+        return;
+    };
+    let eager: Vec<String> = declared
+        .iter()
+        .filter(|request| !configured_request_is_lazy(app, request))
+        .map(|request| request.backend.clone())
+        .collect();
+    let Ok(expected) = inject_managed_dependencies(app, declared) else {
+        return;
+    };
+    let expected: Vec<String> = expected
+        .into_iter()
+        .map(|request| request.backend)
+        .collect();
+    let locked: Vec<String> = locked
+        .iter()
+        .map(|request| request.backend.clone())
+        .collect();
+    let (stale, missing) = lock_drift(&locked, &expected, &eager);
+    if !stale.is_empty() {
+        eprintln!(
+            "{}",
+            t!("warn.lock_tools_not_declared", tools = stale.join(", "))
+        );
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "{}",
+            t!("warn.lock_tools_missing", tools = missing.join(", "))
+        );
+    }
+}
+
+/// Locked tools nothing expects, and eagerly declared tools the lock lacks.
+pub(crate) fn lock_drift(
+    locked: &[String],
+    expected: &[String],
+    eager: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let stale = locked
+        .iter()
+        .filter(|backend| !expected.contains(backend))
+        .cloned()
+        .collect();
+    let missing = eager
+        .iter()
+        .filter(|backend| !locked.contains(backend))
+        .cloned()
+        .collect();
+    (stale, missing)
 }
 
 /// Add lazy declarations omitted by an earlier default install to a lock replay.
@@ -2350,7 +2418,29 @@ pub(crate) fn inject_rust_dependency_at(
 
 #[cfg(test)]
 mod tests {
-    use super::platform_exclusion;
+    use super::{lock_drift, platform_exclusion};
+
+    #[test]
+    fn lock_drift_names_removed_and_newly_declared_tools() {
+        let strings = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        // bun was dropped from osdk.toml; zig was added; node is injected for
+        // the npm tool, so it is expected even though nobody declared it.
+        let locked = strings(&["bun", "node", "npm:prettier", "pnpm"]);
+        let expected = strings(&["node", "npm:prettier", "pnpm", "zig"]);
+        let eager = strings(&["npm:prettier", "pnpm", "zig"]);
+        let (stale, missing) = lock_drift(&locked, &expected, &eager);
+        assert_eq!(stale, ["bun"]);
+        assert_eq!(missing, ["zig"]);
+
+        // In step: nothing to say.
+        let (stale, missing) = lock_drift(&expected, &expected, &eager);
+        assert!(stale.is_empty() && missing.is_empty());
+    }
     use std::collections::BTreeMap;
 
     #[test]

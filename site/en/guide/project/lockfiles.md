@@ -343,11 +343,17 @@ recording none.
 
 ## Stale project locks
 
-osdk currently does not compare `osdk.toml` and `osdk.lock` timestamps or
-content. If the nearest lock contains a current-platform section, no-argument
-`install` uses that section completely even after project configuration changes.
-An existing but empty tool map also does not fall back. Only a missing current-
-platform section falls back to project discovery.
+If the nearest lock contains a current-platform section, no-argument `install`
+uses that section completely even after project configuration changes. An existing
+but empty tool map also does not fall back. Only a missing current-platform section
+falls back to project discovery.
+
+The replay does compare the two and names any drift: a tool the lock pins that the
+project no longer declares (drop `bun` from `osdk.toml` and it is still installed from
+the lock and reported as `already installed`), or a newly declared tool the lock lacks
+(not installed this time). The comparison uses the set a fresh `osdk lock` would write,
+including runtimes osdk injects such as node for npm tools, so those are not flagged.
+The warning only names the drift; the replay is unchanged.
 
 After changing project requests, run one of:
 

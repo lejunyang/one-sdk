@@ -307,6 +307,20 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "warn.lock_tools_not_declared",
+        (
+            "warning: osdk.lock still pins {tools}, which the project no longer declares; they are installed from the lock as-is. Run `osdk lock` to rebuild it from osdk.toml",
+            "警告：osdk.lock 仍固定了 {tools}，但项目已不再声明；本次仍按 lock 原样安装。运行 `osdk lock` 按 osdk.toml 重建 lock",
+        ),
+    );
+    m.insert(
+        "warn.lock_tools_missing",
+        (
+            "warning: the project declares {tools}, which osdk.lock does not pin, so this install skips them. Run `osdk lock` to add them",
+            "警告：项目声明了 {tools}，但 osdk.lock 中没有，本次安装不会安装它们。运行 `osdk lock` 补上",
+        ),
+    );
+    m.insert(
         "warn.unresolved_tool_entry",
         (
             "warning: ignoring [tools] entry `{tool} = \"{spec}\"`: `{tool}` is not a known backend and `{spec}` does not name one (e.g. `npm:pkg@1`); check the spelling",
