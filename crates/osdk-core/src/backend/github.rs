@@ -12,13 +12,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 
+use crate::backend::github_asset::{choose_asset, AssetChoice, AssetTarget};
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::dirs::InstallLocator;
 use crate::error::{Error, Result};
 use crate::http;
 use crate::inventory::{DynamicToolBin, DynamicToolManifest};
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
-use crate::platform::{Arch, Os};
+use crate::platform::{Arch, Libc, Os};
 use crate::source::Source;
 use crate::tool::{InstallIdentity, InstallScope};
 use crate::verification::GithubAttestation;
@@ -596,76 +597,6 @@ impl GithubBackend {
             urls,
             checksum,
         })
-    }
-
-    /// Score how well an asset name matches the host platform. Higher is better;
-    /// None means it clearly doesn't match (wrong os/arch).
-    fn score_asset(&self, name: &str, ctx: &Ctx, rules: Option<&AssetRules>) -> Option<i32> {
-        let n = name.to_ascii_lowercase();
-        // Skip checksums/signatures/source archives.
-        if n.ends_with(".sha256")
-            || n.ends_with(".asc")
-            || n.ends_with(".sig")
-            || n.ends_with(".pem")
-            || n.contains("sha256sums")
-            || n.contains("checksums")
-        {
-            return None;
-        }
-
-        let target_os = rules
-            .and_then(|rules| rules.os.as_deref())
-            .unwrap_or_else(|| os_token(ctx));
-        let os_ok = match target_os {
-            "linux" => n.contains("linux"),
-            "macos" | "darwin" => {
-                n.contains("darwin")
-                    || n.contains("macos")
-                    || n.contains("apple")
-                    || n.contains("osx")
-            }
-            "windows" | "win" => n.contains("windows") || n.contains("win") || n.ends_with(".exe"),
-            _ => false,
-        };
-        // Some assets omit OS (bare binaries); allow but score lower.
-        let mut score = 0;
-        if os_ok {
-            score += 10;
-        } else if mentions_other_os_token(&n, target_os) {
-            return None; // explicitly a different OS
-        }
-
-        let target_arch = rules
-            .and_then(|rules| rules.arch.as_deref())
-            .unwrap_or_else(|| arch_token(ctx));
-        let arch_ok = match target_arch {
-            "x64" | "x86_64" | "amd64" => {
-                n.contains("x86_64") || n.contains("amd64") || n.contains("x64")
-            }
-            "arm64" | "aarch64" => n.contains("aarch64") || n.contains("arm64"),
-            "x86" | "i686" => n.contains("i686") || n.contains("i386") || n.contains("x86"),
-            "arm" | "armv7" => n.contains("armv7") || n.contains("armhf") || n.contains("arm"),
-            _ => false,
-        };
-        if arch_ok {
-            score += 10;
-        } else if mentions_other_arch_token(&n, target_arch) {
-            return None;
-        }
-
-        // Prefer archives we can extract; then musl/gnu preferences on linux.
-        if ArchiveKind::from_name(&n).is_ok() {
-            score += 3;
-        }
-        if target_os == "linux" {
-            if n.contains("musl") {
-                score += 1; // static, more portable
-            }
-            if n.contains("gnu") {
-                score += 1;
-            }
-        }
-        Some(score)
     }
 }
 
@@ -1675,22 +1606,59 @@ fn select_asset(
             .collect();
         return unique_asset(matching, "asset-regex");
     }
-    let mut scored = assets
+    let target = asset_target(ctx, rules);
+    let names = assets
         .iter()
-        .filter_map(|asset| {
-            backend
-                .score_asset(&asset.name, ctx, Some(rules))
-                .map(|score| (score, asset.clone()))
-        })
+        .map(|asset| asset.name.as_str())
         .collect::<Vec<_>>();
-    scored.sort_by_key(|item| item.0);
-    scored.pop().map(|(_, asset)| asset).ok_or_else(|| {
-        Error::other(format!(
-            "no release asset for {} matches this platform ({})",
+    match choose_asset(&names, &target) {
+        AssetChoice::Selected(index) => Ok(assets[index].clone()),
+        AssetChoice::NoMatch => Err(Error::other(format!(
+            "no release asset for {} matches this platform ({}); \
+             choose one with -o asset-regex=REGEX",
             backend.id(),
-            ctx.platform
-        ))
-    })
+            target.platform
+        ))),
+        AssetChoice::Ambiguous(candidates) => Err(Error::other(format!(
+            "release assets of {} fit this platform ({}) equally well: {}; \
+             choose one with -o asset-regex=REGEX",
+            backend.id(),
+            target.platform,
+            candidates.join(", ")
+        ))),
+    }
+}
+
+/// The host platform with any `os=` / `arch=` / `libc=` override applied.
+fn asset_target(ctx: &Ctx, rules: &AssetRules) -> AssetTarget {
+    let mut platform = ctx.platform;
+    if let Some(os) = rules.os.as_deref() {
+        platform.os = match os {
+            "linux" => Os::Linux,
+            "macos" | "darwin" => Os::Macos,
+            _ => Os::Windows,
+        };
+    }
+    if let Some(arch) = rules.arch.as_deref() {
+        platform.arch = match arch {
+            "x64" | "x86_64" | "amd64" => Arch::X64,
+            "arm64" | "aarch64" => Arch::Arm64,
+            "x86" | "i686" => Arch::X86,
+            _ => Arch::Arm,
+        };
+    }
+    if let Some(libc) = rules.libc.as_deref() {
+        platform.libc = match libc {
+            "gnu" => Libc::Glibc,
+            "musl" => Libc::Musl,
+            _ => Libc::None,
+        };
+    }
+    AssetTarget {
+        platform,
+        arch_pinned: rules.arch.is_some(),
+        libc_pinned: rules.libc.is_some(),
+    }
 }
 
 fn unique_asset(assets: Vec<GhAsset>, rule: &str) -> Result<GhAsset> {
@@ -1890,27 +1858,6 @@ fn normalize_executable_name(name: &str, os: Os) -> String {
     } else {
         name.to_string()
     }
-}
-
-fn mentions_other_os_token(name: &str, os: &str) -> bool {
-    let others: &[&str] = match os {
-        "linux" => &["darwin", "apple", "macos", "windows", ".exe"],
-        "macos" | "darwin" => &["linux", "windows", ".exe"],
-        "windows" | "win" => &["linux", "darwin", "apple", "macos"],
-        _ => &[],
-    };
-    others.iter().any(|o| name.contains(o))
-}
-
-fn mentions_other_arch_token(name: &str, arch: &str) -> bool {
-    let others: &[&str] = match arch {
-        "x64" | "x86_64" | "amd64" => &["aarch64", "arm64"],
-        "arm64" | "aarch64" => &["x86_64", "amd64"],
-        "x86" | "i686" => &["aarch64", "arm64", "x86_64", "amd64"],
-        "arm" | "armv7" => &["aarch64", "x86_64", "amd64"],
-        _ => &[],
-    };
-    others.iter().any(|o| name.contains(o))
 }
 
 #[cfg(test)]

@@ -29,9 +29,21 @@ osdk list-remote github:sharkdp/fd
 | `catalog-sha256=HEX` | 使用 `catalog-url` 时必填，验证其精确内容 |
 | `catalog-subdir=PATH` | 为锁定 artifact 记录/恢复 archive 内子目录 |
 
-`asset-regex` 与 `asset-template` 互斥。未给规则时按 host OS、架构、archive 类型
-启发式评分，并排除 checksum、signature 和 source asset；零命中或多命中都失败。
-未知 archive 后缀按裸二进制处理，Windows 自动补 `.exe`。
+`asset-regex` 与 `asset-template` 互斥。未给规则时，osdk 从文件名识别 OS、架构与
+libc（Rust triple、goreleaser 的 `linux_amd64` / `darwin_all`、`win64` 等常见写法都能
+识别），只在与本机（或 `os=` / `arch=` / `libc=` 指定的目标）相符的 asset 中挑选：
+
+- 永远不会退而选择其他 OS 的产物；musl 系统上不会选 glibc 产物；
+- checksum、signature、SBOM、`.deb` / `.msi` 等安装包、源码包以及 osdk 无法解压的
+  `.gz` / `.bz2` 单文件压缩都会被排除；
+- 同时存在时，Linux 优先静态 musl 构建，Windows 优先 MSVC 构建，并优先 archive 与
+  非 debug 构建；
+- Windows arm64 与 Apple Silicon 上，release 没有原生构建时会退而使用系统可仿真运行
+  的 x64 构建；显式给出 `arch=` 时不做这种退让。
+
+没有合适的 asset，或多个不同产物同样合适（例如 `tool` 与 `toolctl`），都会失败并提示
+用 `asset-regex` 指定；同一构建的 `.tar.gz` 与 `.zip` 不算歧义。未知 archive 后缀按裸
+二进制处理，Windows 自动补 `.exe`。
 对 osdk 自有 GitHub 安装，受支持的 asset、平台、catalog 摘要与布局选项属于动态安装
 身份。`catalog-url` 可用于获取，
 但不会持久化到动态身份；必填的 `catalog-sha256` 标识 catalog 内容。含 userinfo、查询参数或

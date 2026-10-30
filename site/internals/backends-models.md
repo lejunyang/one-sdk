@@ -182,5 +182,5 @@ npm 的同一族坑）。`model sync` 复现快照后同样调用 reconcile，�
 - 在线 provider 身份贯穿引用、metadata/ranking/download cache、snapshot key、manifest 与 lock；本地 import 则以 `provider=local` 留在 manifest/机器输出中，明确不进入 source 或 lock。但顶层 `models` map 和本地 `current.json` 以用户提供的逻辑名为键。用同一逻辑名拉取另一 provider 会切换该名字的 current snapshot，并覆盖 lock 中该名字的记录。
 - Hugging Face 非 LFS blob 可以没有远端 SHA-256；osdk 会在下载后计算并锁定，但这不等同于服务端提供的独立摘要。ModelScope 要求 API manifest 给出合法 SHA-256；Civitai 也要求所选权重提供合法 SHA-256。
 - metadata 在线请求失败时可以回退到 stale cache。自定义 endpoint 必须实现所选 provider 的真实 API；仅兼容文件 host 或替换域名并不足够。
-- GitHub backend 的自动 asset 评分是启发式；命名含糊或一个 release 含多个相似产物时应使用显式 asset 规则或可信静态 catalog。
+- GitHub backend 的自动 asset 选择（[`github_asset.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github_asset.rs)）把文件名切成字母数字 token 再分类，而不是做子串匹配：子串匹配下 `win` 命中 `darwin`、`x86` 命中 `x86_64`、`arm` 命中 `arm64`，曾让 Windows 选中 macOS 产物、32 位主机选中 64 位产物。候选按 OS、架构、libc / 工具链、非 debug、archive 的字典序排名，而不是把分数相加；最高名次若有多个不同构建（去掉 archive 扩展名后不同）就报歧义，不再由 API 或 HTML 回退列表恰好给出的顺序决定。只要 release 中有 asset 标注了 OS，未标注 OS 的文件就不再是候选，因为它们通常是脚本、源码或文档。仿真回退只覆盖 OS 自带的仿真（Windows on Arm、WOW64、Rosetta 2），且排在任何原生或未标注架构的构建之后。启发式仍可能误判非常规命名，这时应使用显式 asset 规则或可信静态 catalog。
 - Rust 是委托型 backend，toolchain 由隔离 rustup 管理，不享受普通 archive backend 的逐文件 CAS 去重。Maven、Gradle、Kotlin 当前使用内置单版本 catalog，并非完整远端版本索引。

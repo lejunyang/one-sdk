@@ -30,8 +30,25 @@ Pass every option through repeatable `-o|--opt KEY=VALUE`:
 | `catalog-subdir=PATH` | Record/restore an archive subdirectory for a locked artifact |
 
 `asset-regex` and `asset-template` are mutually exclusive. Without a rule, osdk
-scores by host OS, architecture, and archive type while excluding checksum,
-signature, and source assets. Zero or multiple matches fail. Unknown archive
+reads the OS, architecture, and libc from each file name (Rust triples,
+goreleaser's `linux_amd64` / `darwin_all`, `win64`, and similar spellings) and
+chooses only among assets that fit the host, or the target given with `os=` /
+`arch=` / `libc=`:
+
+- a build for another OS is never a fallback, and a musl system is never given
+  a glibc build;
+- checksums, signatures, SBOMs, installer packages such as `.deb` / `.msi`,
+  source bundles, and single-file `.gz` / `.bz2` compression osdk cannot
+  extract are excluded;
+- when both exist, Linux prefers the static musl build and Windows the MSVC
+  build, and archives and non-debug builds win;
+- on Windows arm64 and Apple Silicon, a release without a native build falls
+  back to the x64 build the OS runs under emulation; an explicit `arch=`
+  disables that fallback.
+
+No fitting asset, or several different programs that fit equally well (say
+`tool` and `toolctl`), fails with a hint to choose one with `asset-regex`; the
+same build offered as `.tar.gz` and `.zip` is not ambiguous. Unknown archive
 extensions are treated as bare binaries; Windows normalizes `.exe`.
 For osdk-owned GitHub installs, the supported asset, platform, catalog-digest,
 and layout options are part of the dynamic installation identity. `catalog-url` is accepted for acquisition but is

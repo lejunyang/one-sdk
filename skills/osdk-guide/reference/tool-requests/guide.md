@@ -28,7 +28,7 @@
 | `go:<module-or-command>` | `go:golang.org/x/tools/gopls@0.20.0` | `tags=`、`env=K=V,...` |
 | `conda:<package>` | `conda:cuda-toolkit@12.8` | `channels=`、`with=` |
 | `pypi:<project>` | `pypi:httpie@3` | `python=`、`extras=`、`index=`、`extra-index=`、`allow-build-from-source=true` |
-| `github:owner/repo` | `github:sharkdp/fd@10` | `asset=`、`bin=` / `bins=`、`strip-components=` |
+| `github:owner/repo` | `github:sharkdp/fd@10` | `asset-regex=` / `asset-template=`、`os=` / `arch=` / `libc=`、`bin=` / `bins=`、`strip-components=` |
 | `http:https://...{version}` | 直接 HTTPS 制品 | `sha256=`、`kind=file\|zip\|tar.gz\|tar.xz`、`bin=` / `bins=`、`subdir=`、`rename=`、`strip-components=` |
 
 动态工具名作为 TOML 键时要加引号：
