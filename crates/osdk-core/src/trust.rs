@@ -1012,10 +1012,10 @@ impl RecordState {
 
     pub fn label_key(self) -> &'static str {
         match self {
-            Self::Active => "trust.state.active",
-            Self::Changed => "trust.state.changed",
-            Self::Missing => "trust.state.missing",
-            Self::Unreachable => "trust.state.unreachable",
+            Self::Active => "label.trust.active",
+            Self::Changed => "label.trust.changed",
+            Self::Missing => "label.trust.missing",
+            Self::Unreachable => "label.trust.unreachable",
         }
     }
 }
