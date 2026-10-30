@@ -1018,27 +1018,35 @@ mod tests {
         drop(listener);
         ctx.config.sources.registries.npm.urls = vec![url];
         ctx.config.sources.registries.npm.probe_timeout_ms = 10;
+        // The real environment and the directories above the fixture can hold
+        // the developer's own npm configuration, which would turn the
+        // all-sources-failed path into a native pass-through.
+        crate::package_registry::confine_ancestor_scan(temp.path());
+        let home = temp.path().join("home").display().to_string();
+        let ambient = |key: &str| (key == "HOME").then(|| home.clone());
         let mut env = BTreeMap::new();
         ctx.config.settings.offline = true;
-        apply(
+        apply_with_environment(
             &ctx,
             temp.path(),
             "npm",
             None,
             &["install".into()],
             &mut env,
+            &ambient,
         )
         .await
         .unwrap();
         assert!(env.is_empty());
         ctx.config.settings.offline = false;
-        let error = apply(
+        let error = apply_with_environment(
             &ctx,
             temp.path(),
             "npm",
             None,
             &["install".into()],
             &mut env,
+            &ambient,
         )
         .await
         .unwrap_err();

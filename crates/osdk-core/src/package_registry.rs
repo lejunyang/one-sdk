@@ -819,7 +819,7 @@ where
         PackageManager::Bun => &[".npmrc", "bunfig.toml"],
         _ => &[".npmrc"],
     };
-    for directory in cwd.ancestors() {
+    for directory in config_ancestors(cwd) {
         for name in extra_names {
             if let Err(path) = push_if_present(directory.join(name), &mut files) {
                 return Ok(unreadable_native_config(path));
@@ -1083,7 +1083,7 @@ fn push_nearest(
     name: &str,
     files: &mut Vec<PathBuf>,
 ) -> std::result::Result<(), PathBuf> {
-    for directory in cwd.ancestors() {
+    for directory in config_ancestors(cwd) {
         let path = directory.join(name);
         match std::fs::symlink_metadata(&path) {
             Ok(_) => {
@@ -1095,6 +1095,41 @@ fn push_nearest(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The highest directory the ancestor scans may reach in this test thread.
+    ///
+    /// Every ancestor's project configuration is read on purpose, so a fixture
+    /// cannot shadow what lies above it with empty files. Tests live under the
+    /// system temp directory, which on Windows is inside the real user profile,
+    /// and without this bound they read the developer's own `~/.npmrc`.
+    static ANCESTOR_CEILING: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Confine this test thread's native-configuration search to `root`.
+#[cfg(test)]
+pub(crate) fn confine_ancestor_scan(root: &Path) {
+    ANCESTOR_CEILING.with(|ceiling| *ceiling.borrow_mut() = Some(root.to_path_buf()));
+}
+
+/// `cwd` and the directories above it that native project configuration can
+/// come from.
+fn config_ancestors(cwd: &Path) -> Vec<&Path> {
+    #[cfg(test)]
+    let ceiling = ANCESTOR_CEILING.with(|ceiling| ceiling.borrow().clone());
+    #[cfg(not(test))]
+    let ceiling: Option<PathBuf> = None;
+    let mut directories = Vec::new();
+    for directory in cwd.ancestors() {
+        directories.push(directory);
+        if ceiling.as_deref() == Some(directory) {
+            break;
+        }
+    }
+    directories
 }
 
 fn push_if_present(path: PathBuf, files: &mut Vec<PathBuf>) -> std::result::Result<(), PathBuf> {
@@ -2323,6 +2358,42 @@ npmRegistries:
     }
 
     #[test]
+    fn every_ancestor_npmrc_is_read_up_to_the_test_ceiling() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        let cwd = fixture.join("project/nested");
+        let home = fixture.join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        // Shadowed by the nearer empty file for `push_nearest`, but still read
+        // by the every-ancestor scan: auth above the project is honoured.
+        std::fs::write(fixture.join("project/.npmrc"), b"").unwrap();
+        std::fs::write(
+            temp.path().join(".npmrc"),
+            "//packages.test/:_authToken=secret\n",
+        )
+        .unwrap();
+        let ctx = test_ctx(temp.path(), Vec::new(), false);
+        let home_value = home.display().to_string();
+        let decide = || {
+            native_registry_candidates(&ctx, &cwd, PackageManager::Npm, |key| {
+                (key == "HOME").then(|| home_value.clone())
+            })
+            .unwrap()
+        };
+
+        isolate_ancestors(temp.path());
+        assert!(
+            matches!(decide(), NativeDecision::PassThrough(reason) if reason.contains("authentication"))
+        );
+        isolate_ancestors(&fixture);
+        assert!(
+            !matches!(decide(), NativeDecision::PassThrough(_)),
+            "the ceiling must keep configuration above the fixture out of the scan"
+        );
+    }
+
+    #[test]
     fn both_home_candidates_are_inspected_and_redirects_pass_through() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("project");
@@ -2843,9 +2914,7 @@ npmRegistries:
     /// first ancestor that has one. Empty sentinels keep that search inside the
     /// fixture while contributing no registry, credential, or policy findings.
     fn isolate_ancestors(root: &Path) {
-        for name in [".npmrc", ".yarnrc", ".yarnrc.yml", "bunfig.toml"] {
-            std::fs::write(root.join(name), b"").unwrap();
-        }
+        super::confine_ancestor_scan(root);
     }
 
     /// A working directory whose native-configuration search is confined to the
