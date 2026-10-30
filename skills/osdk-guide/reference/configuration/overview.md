@@ -42,17 +42,17 @@ osdk 读取两类 TOML，字段形状相同：
 只生成新布局。
 
 平台过滤在 `[tools]`、`[tasks]`、`[models]`、`[skills]` 和 `[sys.pkg]` 的包条目中
-复用同一组 OS/arch token。前四者放在 `when` 下：
+复用同一组 OS/arch token，都放在 `when` 下：
 
 ```toml
 when = { os = ["linux", "macos"], arch = "arm64" }
 ```
 
-系统包对象直接使用 `os` / `arch` 字段：
+系统包条目同样如此（旧的顶层 `os` / `arch` 写法仍可读取，`osdk config migrate` 会改写）：
 
 ```toml
 [sys.pkg]
-"apt:gcc" = { version = "latest", os = "linux", arch = ["x86_64", "arm64"] }
+"apt:gcc" = { version = "latest", when = { os = "linux", arch = ["x86_64", "arm64"] } }
 ```
 
 OS token：`windows`、`macos`（也接受 `darwin`）、`linux`；arch token：

@@ -41,7 +41,7 @@ Governed keys and their reasons:
 Two narrowings worth stating:
 
 - **`[sys.pkg]` gates only `pkg apply`, and only when an entry applies here.** A
-  config whose packages all carry `os = "linux"` blocks no command on a Mac, and
+  config whose packages all carry `when = { os = "linux" }` blocks no command on a Mac, and
   an entry whose manager cannot exist on this OS (such as an `apt:` entry on
   Windows) is ignored too -- a package that can never execute here needs no
   review. `pkg status`/`plan`/`doctor` are read-only anyway and are not gated.

@@ -39,7 +39,7 @@ osdk untrust [PATH]
 两个值得注意的收紧：
 
 - **`[sys.pkg]` 只挡 `pkg apply`，且只在有适用条目时。** 一个所有包都声明为
-  `os = "linux"` 的配置，在 Mac 上不挡任何命令；管理器在本机不存在的条目（如
+  `when = { os = "linux" }` 的配置，在 Mac 上不挡任何命令；管理器在本机不存在的条目（如
   Windows 上的 `apt:` 条目）同样不挡——在这里永远不会执行的包不需要审阅。
   `pkg status`/`plan`/`doctor` 本来就只读，同样不要求信任。
 - **`[models]` 在任何命令里都不要求信任，** 包括写了 `endpoint` 的条目。模型

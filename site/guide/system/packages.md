@@ -79,16 +79,21 @@ no_elevate = false
 
 "winget:BurntSushi.ripgrep.MSVC" = "latest"
 "winget:Microsoft.PowerToys" = "0.101.0"
-"winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
-"winget:Only.OnWindowsArm" = { version = "latest", os = "windows", arch = "arm64" }
-"winget:Either.Arch" = { version = "latest", arch = ["x64", "arm64"] }
+"winget:Some.MacOnlyTool" = { version = "latest", when = { os = "macos" } }
+"winget:Only.OnWindowsArm" = { version = "latest", when = { os = "windows", arch = "arm64" } }
+"winget:Either.Arch" = { version = "latest", when = { arch = ["x64", "arm64"] } }
 ```
 
-`os` 与 `arch` 都可写单值或数组：维度内是「任一命中」，两个维度之间是「都要命中」。
+平台过滤写在 `when` 里，与 `[tools]`、`[tasks]`、`[models]` 同一写法。`os` 与 `arch` 都可写单值或数组：
+维度内是「任一命中」，两个维度之间是「都要命中」。
 不匹配的条目视为不适用，`pkg status` 报告为 `not for this platform`，不会算作缺失。
 无法识别的取值（例如 `windwos`、`arm65`）**直接报错**，而不是默默永不匹配——后者会让
 包在所有机器上都不安装，而报告看起来与一条正确的限定毫无区别。
 `arch` 接受 `x64`/`arm64`/`x86`/`arm` 及 `amd64`、`x86_64`、`aarch64` 等常见别名。
+条目里的未知键（例如把 `os` 拼成 `oss`）同样直接报错。
+
+早期版本把 `os`/`arch` 直接写在条目上（`{ version = "latest", os = "linux" }`），这种写法
+仍可读取，但不能与 `when` 混用。`osdk config migrate` 会把它们改写为 `when`，并保留原值与注释。
 
 管理器前缀是必需的。包 ID 不跨平台通用——winget 的 `PackageIdentifier` 区分大小写且
 对应仓库路径，brew 还要再分 formula 和 cask——所以 osdk 不做跨管理器的名称映射，
@@ -97,7 +102,7 @@ no_elevate = false
 ::: warning `pkg apply` 需要先信任
 只有 `osdk pkg apply` 会真正安装软件，所以只有它要求先 `osdk trust`；
 `pkg status`/`plan`/`doctor` 只读，未信任也照常可用。而且只在有包**在本机适用**
-时才检查：所有条目都通过 `os` 限定为别的系统，或其管理器在本机不存在（如
+时才检查：所有条目都通过 `when` 限定为别的系统，或其管理器在本机不存在（如
 Windows 上的 apt）时，这台机器上不会有任何门。
 
 **范围只到 `pkg apply`。** 声明 `[sys.pkg]` 不影响该目录下别的工具：`cargo`、

@@ -85,11 +85,12 @@ no_elevate = false
 
 "winget:BurntSushi.ripgrep.MSVC" = "latest"
 "winget:Microsoft.PowerToys" = "0.101.0"
-"winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
-"winget:Only.OnWindowsArm" = { version = "latest", os = "windows", arch = "arm64" }
-"winget:Either.Arch" = { version = "latest", arch = ["x64", "arm64"] }
+"winget:Some.MacOnlyTool" = { version = "latest", when = { os = "macos" } }
+"winget:Only.OnWindowsArm" = { version = "latest", when = { os = "windows", arch = "arm64" } }
+"winget:Either.Arch" = { version = "latest", when = { arch = ["x64", "arm64"] } }
 ```
 
+The platform filter lives in `when`, written as in `[tools]`, `[tasks]` and `[models]`.
 `os` and `arch` each take a single token or a list: values within one dimension are
 OR, and the two dimensions are AND. A non-matching entry is inapplicable rather
 than missing, and `pkg status` reports it as `not for this platform`.
@@ -97,7 +98,13 @@ An unrecognized value such as `windwos` or `arm65` is **an error**, not a filter
 that never matches: the latter would stop the package installing on every machine
 while the report still looked exactly like a correct restriction.
 `arch` accepts `x64`/`arm64`/`x86`/`arm` plus the usual aliases (`amd64`,
-`x86_64`, `aarch64`).
+`x86_64`, `aarch64`). An unknown key in an entry, such as `oss` for `os`, is an
+error too.
+
+Earlier versions put `os`/`arch` directly on the entry
+(`{ version = "latest", os = "linux" }`). That spelling still reads, but cannot be
+mixed with `when`; `osdk config migrate` rewrites it to `when`, keeping the values and
+comments.
 
 The manager prefix is required. Package ids are not portable across managers —
 winget's `PackageIdentifier` is case-sensitive and mirrors a repository path,

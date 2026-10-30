@@ -37,27 +37,11 @@ pub struct PackageRequest {
     ///
     /// An unrestricted filter means "every platform where the manager exists",
     /// which is what an entry without `os`/`arch` gets.
-    #[serde(skip_serializing_if = "PlatformFilter::is_unrestricted")]
-    #[serde(serialize_with = "serialize_filter")]
+    #[serde(
+        rename = "when",
+        skip_serializing_if = "PlatformFilter::is_unrestricted"
+    )]
     pub platform: PlatformFilter,
-}
-
-/// Serialize the filter back as the `os`/`arch` token lists it was written as.
-fn serialize_filter<S: serde::Serializer>(
-    filter: &PlatformFilter,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    use serde::ser::SerializeMap;
-    let mut map = serializer.serialize_map(None)?;
-    if !filter.os.is_empty() {
-        let tokens: Vec<_> = filter.os.iter().map(|os| os.config_token()).collect();
-        map.serialize_entry("os", &tokens)?;
-    }
-    if !filter.arch.is_empty() {
-        let tokens: Vec<_> = filter.arch.iter().map(|arch| arch.config_token()).collect();
-        map.serialize_entry("arch", &tokens)?;
-    }
-    map.end()
 }
 
 impl PackageRequest {
@@ -77,11 +61,16 @@ impl PackageRequest {
 /// `"winget:Foo" = "latest"` and `"winget:Foo" = { version = "1.2" }` mean the
 /// same thing, and rejecting either would be a papercut with no upside.
 ///
-/// `os` and `arch` each accept a single token or a list. An unrecognized token
-/// is a hard error here rather than a filter that never matches: the previous
-/// behavior compared `os` as a bare string, so `os = "windwos"` silently made
-/// the package inapplicable on every host while the status report still said
-/// `not applicable`, which reads exactly like a correct restriction.
+/// The platform filter is `when = { os = ..., arch = ... }`, the spelling
+/// `[tools]`, `[tasks]` and `[models]` use. The original top-level `os`/`arch`
+/// keys still parse so existing files keep working (`osdk config migrate`
+/// rewrites them), but the two cannot be mixed in one entry.
+///
+/// Unknown keys are an error. The table used to be read leniently, so a
+/// `when = { os = "linux" }` -- the spelling every other section taught -- or a
+/// typo such as `oss` was dropped without a word and the package applied on
+/// every platform. An unrecognized token inside a filter is likewise a hard
+/// error rather than a filter that never matches.
 impl<'de> Deserialize<'de> for PackageRequest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -101,32 +90,63 @@ impl<'de> Deserialize<'de> for PackageRequest {
         }
 
         #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Version(String),
-            Table {
-                #[serde(default)]
-                version: String,
-                #[serde(default)]
-                os: Option<Tokens>,
-                #[serde(default)]
-                arch: Option<Tokens>,
-            },
+        #[serde(deny_unknown_fields)]
+        struct Table {
+            #[serde(default)]
+            version: String,
+            #[serde(default)]
+            when: Option<PlatformFilter>,
+            #[serde(default)]
+            os: Option<Tokens>,
+            #[serde(default)]
+            arch: Option<Tokens>,
         }
 
-        Ok(match Raw::deserialize(deserializer)? {
-            Raw::Version(version) => PackageRequest {
-                version,
-                platform: PlatformFilter::default(),
-            },
-            Raw::Table { version, os, arch } => {
-                let os = os.map(Tokens::into_vec).unwrap_or_default();
-                let arch = arch.map(Tokens::into_vec).unwrap_or_default();
-                let platform = PlatformFilter::parse(&os, &arch)
-                    .map_err(<D::Error as serde::de::Error>::custom)?;
-                PackageRequest { version, platform }
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = PackageRequest;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a version string or a table with `version` and `when`")
             }
-        })
+
+            fn visit_str<E: serde::de::Error>(self, version: &str) -> Result<Self::Value, E> {
+                Ok(PackageRequest {
+                    version: version.to_string(),
+                    platform: PlatformFilter::default(),
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let table = Table::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                let legacy = table.os.is_some() || table.arch.is_some();
+                let platform = match (table.when, legacy) {
+                    (Some(_), true) => {
+                        return Err(A::Error::custom(
+                            "use `when = { os = ..., arch = ... }` or the legacy top-level \
+                             `os`/`arch`, not both",
+                        ))
+                    }
+                    (Some(filter), false) => filter,
+                    (None, _) => {
+                        let os = table.os.map(Tokens::into_vec).unwrap_or_default();
+                        let arch = table.arch.map(Tokens::into_vec).unwrap_or_default();
+                        PlatformFilter::parse(&os, &arch).map_err(A::Error::custom)?
+                    }
+                };
+                Ok(PackageRequest {
+                    version: table.version,
+                    platform,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -641,6 +661,77 @@ mirrors = false
                 message.contains("expected one of"),
                 "message must list the accepted tokens: {message}"
             );
+        }
+    }
+
+    /// `when` is the canonical filter, the spelling every other section uses;
+    /// the legacy top-level keys still parse to the same filter, and new output
+    /// is written as `when`.
+    #[test]
+    fn when_is_the_filter_and_the_legacy_keys_still_parse() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            package: PackageRequest,
+        }
+        let parse = |body: &str| toml::from_str::<Wrapper>(body).map(|wrapper| wrapper.package);
+        let linux = Platform {
+            os: Os::Linux,
+            arch: Arch::X64,
+            libc: Libc::None,
+        };
+        let windows = Platform {
+            os: Os::Windows,
+            arch: Arch::X64,
+            libc: Libc::None,
+        };
+
+        let when = parse("package = { version = \"1\", when = { os = \"linux\" } }").unwrap();
+        let legacy = parse("package = { version = \"1\", os = \"linux\" }").unwrap();
+        assert_eq!(when, legacy);
+        assert!(when.applies_to(&linux));
+        assert!(!when.applies_to(&windows));
+
+        let rendered = toml::to_string(&SyspkgConfig {
+            packages: BTreeMap::from([("apt:gcc".to_owned(), when)]),
+            ..SyspkgConfig::default()
+        })
+        .unwrap();
+        // Written as a `when` table, and read back to the same filter.
+        assert!(rendered.contains("[\"apt:gcc\".when]"), "{rendered}");
+        let reread: SyspkgConfig = toml::from_str(&rendered).unwrap();
+        assert!(reread.packages["apt:gcc"].applies_to(&linux), "{rendered}");
+        assert!(
+            !reread.packages["apt:gcc"].applies_to(&windows),
+            "{rendered}"
+        );
+    }
+
+    /// The table used to be read leniently, so `when` (before it was
+    /// supported) and any typo were dropped and the package applied
+    /// everywhere. Both kinds of mistake are now errors, as is mixing the two
+    /// filter spellings in one entry.
+    #[test]
+    fn unknown_keys_and_mixed_filter_spellings_are_rejected() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[allow(dead_code)]
+            package: PackageRequest,
+        }
+        for (body, expected) in [
+            ("package = { version = \"1\", oss = \"linux\" }", "oss"),
+            (
+                "package = { version = \"1\", when = { oss = \"linux\" } }",
+                "oss",
+            ),
+            (
+                "package = { version = \"1\", os = \"linux\", when = { arch = \"x64\" } }",
+                "not both",
+            ),
+        ] {
+            let message = toml::from_str::<Wrapper>(body)
+                .expect_err(&format!("should be rejected: {body}"))
+                .to_string();
+            assert!(message.contains(expected), "{body}: {message}");
         }
     }
 }
