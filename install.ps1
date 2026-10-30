@@ -105,6 +105,7 @@ if (-not $Target) {
     $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
     switch ($architecture) {
         "X64" { $Target = "x86_64-pc-windows-msvc" }
+        "Arm64" { $Target = "aarch64-pc-windows-msvc" }
         default {
             throw "Unsupported Windows architecture: $architecture. Pass -Target to override."
         }

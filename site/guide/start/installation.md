@@ -36,7 +36,9 @@ irm https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/mai
 这些示例既代理 Raw 安装脚本，也通过 `OSDK_DOWNLOAD_BASE_URL` 代理脚本后续
 下载的 GitHub Release 二进制和 `SHA256SUMS`。
 
-默认安装到 `%LOCALAPPDATA%\Programs\osdk\bin`。
+默认安装到 `%LOCALAPPDATA%\Programs\osdk\bin`。安装器按操作系统架构自动选择 x64
+（`x86_64-pc-windows-msvc`）或 arm64（`aarch64-pc-windows-msvc`）归档；即使在 arm64
+设备上以 x64 仿真运行 PowerShell，选中的也是原生 arm64 归档。
 
 ## 安装后的 shell 配置
 

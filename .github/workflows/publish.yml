@@ -163,9 +163,29 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: zip
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      # aws-lc-sys assembles its AArch64 sources with clang-cl; MSVC's cl cannot.
+      # Its build script only warns when clang-cl is missing and then fails deep
+      # in the C build, so resolve it here and fail with the actual cause.
+      - name: Configure clang-cl for Windows ARM64
+        if: ${{ matrix.target == 'aarch64-pc-windows-msvc' }}
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Get-Command clang-cl.exe -ErrorAction SilentlyContinue)?.Source,
+            "$env:ProgramFiles\LLVM\bin\clang-cl.exe"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          $clang = $candidates | Select-Object -First 1
+          if (-not $clang) {
+            throw "clang-cl.exe was not found on the Windows ARM64 runner."
+          }
+          & $clang --version
+          "CC_aarch64_pc_windows_msvc=$clang" >> $env:GITHUB_ENV
       - name: Install musl linker
         if: ${{ endsWith(matrix.target, '-linux-musl') }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools

@@ -167,6 +167,7 @@ pub fn asset_name(platform: Platform) -> Option<String> {
         (Os::Macos, Arch::X64, _) => "x86_64-apple-darwin",
         (Os::Macos, Arch::Arm64, _) => "aarch64-apple-darwin",
         (Os::Windows, Arch::X64, _) => "x86_64-pc-windows-msvc",
+        (Os::Windows, Arch::Arm64, _) => "aarch64-pc-windows-msvc",
         _ => return None,
     };
     let extension = if matches!(platform.os, Os::Windows) {
@@ -615,9 +616,13 @@ mod tests {
             asset_name(platform(Os::Windows, Arch::X64)).unwrap(),
             "osdk-x86_64-pc-windows-msvc.zip"
         );
+        assert_eq!(
+            asset_name(platform(Os::Windows, Arch::Arm64)).unwrap(),
+            "osdk-aarch64-pc-windows-msvc.zip"
+        );
         // No release is published for these, so an upgrade must say so rather
         // than download a 404 page.
-        assert!(asset_name(platform(Os::Windows, Arch::Arm64)).is_none());
+        assert!(asset_name(platform(Os::Windows, Arch::X86)).is_none());
         assert!(asset_name(linux(Arch::X86, Libc::Glibc)).is_none());
 
         let expected_targets = [
@@ -628,6 +633,7 @@ mod tests {
             "x86_64-apple-darwin",
             "aarch64-apple-darwin",
             "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();

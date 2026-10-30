@@ -33,7 +33,10 @@ Run this in PowerShell:
 irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
-The default destination is `%LOCALAPPDATA%\Programs\osdk\bin`.
+The default destination is `%LOCALAPPDATA%\Programs\osdk\bin`. The installer
+picks the x64 (`x86_64-pc-windows-msvc`) or arm64 (`aarch64-pc-windows-msvc`)
+archive from the operating system's architecture, so an x64 PowerShell running
+under emulation on an arm64 device still installs the native arm64 build.
 
 ## Shell setup
 

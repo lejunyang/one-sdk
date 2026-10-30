@@ -17,7 +17,7 @@
 
 ## 一次发布会生成什么
 
-流水线先并行构建 Linux x64/arm64、macOS Intel/Apple Silicon 和 Windows x64 的三个
+流水线先并行构建 Linux x64/arm64、macOS Intel/Apple Silicon 和 Windows x64/arm64 的两个
 程序，并上传临时 artifact。构建全部成功后，它按以下依赖顺序发布 crates.io package：
 
 1. `osdk-core`；
@@ -29,9 +29,14 @@
 省略。core 在自身上传前经过 dry-run，两个依赖它的 package 则在 core 可见后一起
 经过 `cargo publish --locked --dry-run`。发布 job 会移除仓库的构建镜像配置，并使用官方
 crates.io index 与仓库 lockfile 校验可发布依赖。只有 crate
-发布全部成功后，流水线才创建 GitHub tag/Release、归档七个平台产物并生成
-`SHA256SUMS`：x64/arm64 Linux 各有 GNU 和 musl 两份，加上两份 macOS 和 Windows x64。
-这样不会在 crates.io 发布失败时留下一个看似完整的 GitHub Release。
+发布全部成功后，流水线才创建 GitHub tag/Release、归档八个平台产物并生成
+`SHA256SUMS`：x64/arm64 Linux 各有 GNU 和 musl 两份，加上 macOS 与 Windows 的
+x64/arm64 各一份。这样不会在 crates.io 发布失败时留下一个看似完整的 GitHub Release。
+
+每个目标都在对应架构的 runner 上原生构建，没有交叉编译；Windows arm64 使用
+`windows-11-arm`。aws-lc-sys 的 AArch64 汇编只能由 clang-cl 编译，缺失时它的构建脚本
+只发一条 warning、随后在 C 构建深处失败，所以流水线先显式定位 clang-cl 并写入
+`CC_aarch64_pc_windows_msvc`，找不到就直接以真实原因失败。
 
 两个 GNU/Linux 归档按各自架构在 `ubuntu:20.04` 容器里原生构建，因此明确以 glibc 2.31
 为最低版本，不会继承滚动 GitHub runner 当时恰好安装的 libc。打包前会先用 `--version`

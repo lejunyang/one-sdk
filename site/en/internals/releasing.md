@@ -22,7 +22,7 @@ This patch prepares configurable tool source precedence and opt-in existing syst
 ## What one release publishes
 
 The workflow first builds both programs for Linux x64/arm64, macOS
-Intel/Apple Silicon, and Windows x64 in parallel and uploads temporary
+Intel/Apple Silicon, and Windows x64/arm64 in parallel and uploads temporary
 artifacts. Once every build succeeds, it publishes crates.io packages in this
 dependency order:
 
@@ -38,9 +38,17 @@ visible. The publish job removes the repository build-mirror configuration and
 validates publishable dependencies against the official crates.io index and
 the repository lockfile. The workflow
 creates the GitHub tag and Release only after every crate has published, then
-attaches seven platform archives and `SHA256SUMS`: GNU and musl Linux archives
-for x64 and arm64, two macOS archives, and Windows x64. A crates.io failure
-therefore cannot leave behind a GitHub Release that appears complete.
+attaches eight platform archives and `SHA256SUMS`: GNU and musl Linux archives
+for x64 and arm64, plus one x64 and one arm64 archive each for macOS and
+Windows. A crates.io failure therefore cannot leave behind a GitHub Release
+that appears complete.
+
+Every target is built natively on a runner of its own architecture; nothing is
+cross-compiled, and Windows arm64 uses `windows-11-arm`. aws-lc-sys can only
+assemble its AArch64 sources with clang-cl, and when clang-cl is missing its
+build script merely warns and then fails deep inside the C build. The workflow
+therefore resolves clang-cl explicitly and exports
+`CC_aarch64_pc_windows_msvc`, failing with the real cause when it is absent.
 
 The two GNU/Linux archives are built natively by architecture inside an
 `ubuntu:20.04` container. This makes glibc 2.31 the declared minimum instead of
