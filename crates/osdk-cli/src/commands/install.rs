@@ -1668,6 +1668,29 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
     Ok(requests)
 }
 
+/// The `[tools]` key an operand names when configuration excluded it here.
+///
+/// The selector cannot be split off at the first `@`: a scoped npm package
+/// starts with one, so `npm:@scope/pkg@1` would be looked up as `npm:` and an
+/// excluded entry would fall through to a real install. The tool parser knows
+/// where the selector begins; the plain split stays as the fallback for
+/// operands it rejects, such as an alias that names no backend.
+fn platform_exclusion<'a>(
+    excluded: &'a std::collections::BTreeMap<String, String>,
+    operand: &str,
+) -> Option<(&'a str, &'a str)> {
+    let lookup = |name: &str| {
+        excluded
+            .get_key_value(name)
+            .map(|(name, restriction)| (name.as_str(), restriction.as_str()))
+    };
+    let plain = operand.split_once('@').map_or(operand, |(name, _)| name);
+    ToolRequest::parse(operand)
+        .ok()
+        .and_then(|request| lookup(&request.backend))
+        .or_else(|| lookup(plain))
+}
+
 pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
         // A shell that split one operand into several is worth naming before
@@ -1682,11 +1705,9 @@ pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result
         // unknown tool, sending the user to check their spelling instead of the
         // `os`/`arch` line that is working as intended.
         for operand in &tools {
-            let name = operand
-                .split_once('@')
-                .map(|(name, _)| name)
-                .unwrap_or(operand);
-            if let Some(restriction) = app.ctx.config.excluded_tools.get(name) {
+            if let Some((name, restriction)) =
+                platform_exclusion(&app.ctx.config.excluded_tools, operand)
+            {
                 return Err(anyhow::anyhow!(osdk_core::t!(
                     "err.tool_excluded_by_platform",
                     tool = name,
@@ -2318,4 +2339,42 @@ pub(crate) fn inject_rust_dependency_at(
             .unwrap_or_default(),
     });
     Ok(requests)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::platform_exclusion;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn platform_exclusion_finds_scoped_npm_and_alias_operands() {
+        let excluded = BTreeMap::from([
+            ("npm:@scope/pkg".to_string(), "os=linux".to_string()),
+            ("npm:cowsay".to_string(), "os=linux".to_string()),
+            ("fd".to_string(), "os=macos".to_string()),
+        ]);
+        for operand in [
+            "npm:@scope/pkg",
+            "npm:@scope/pkg@1.0.0",
+            "npm:@scope/pkg@latest",
+        ] {
+            assert_eq!(
+                platform_exclusion(&excluded, operand),
+                Some(("npm:@scope/pkg", "os=linux")),
+                "{operand}"
+            );
+        }
+        assert_eq!(
+            platform_exclusion(&excluded, "npm:cowsay@1.6.0"),
+            Some(("npm:cowsay", "os=linux"))
+        );
+        assert_eq!(
+            platform_exclusion(&excluded, "fd@10"),
+            Some(("fd", "os=macos"))
+        );
+        // Not excluded: a different scope, and the bare namespace a naive
+        // first-`@` split used to produce.
+        assert_eq!(platform_exclusion(&excluded, "npm:@other/pkg@1"), None);
+        assert_eq!(platform_exclusion(&excluded, "node@20"), None);
+    }
 }
