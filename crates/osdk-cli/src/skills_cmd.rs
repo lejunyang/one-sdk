@@ -302,10 +302,36 @@ fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Re
         .cloned()
         .collect();
 
-    // Resolve each agent's on-disk directory. Several agents share one skills
-    // directory (codex / cursor / opencode all use `.agents/skills`), so a plan
-    // decides which removed agents should physically unlink and which only drop
-    // ownership because a *remaining* agent still points at the same directory.
+    let removed_any = unlink_agents(name, &remove_from, &remaining, &scope_root, global)?;
+
+    // Update the lock: drop the whole entry when no agent still holds it,
+    // otherwise keep it with the remaining agents.
+    if remaining.is_empty() {
+        lock.skills.remove(name);
+    } else if let Some(existing) = lock.skills.get_mut(name) {
+        existing.agents = remaining;
+    }
+    lockfile::save(&lock_path, &lock)?;
+
+    if !removed_any {
+        println!("`{name}` was not linked into any of the targeted agents");
+    }
+    Ok(())
+}
+
+/// Unlink `name` from `remove_from`, keeping files a `remaining` agent shares.
+///
+/// Several agents share one skills directory (codex / cursor / opencode all
+/// use `.agents/skills`), so a plan decides which removed agents physically
+/// unlink and which only drop ownership because a *remaining* agent still
+/// points at the same directory. Returns whether anything was dropped.
+fn unlink_agents(
+    name: &str,
+    remove_from: &[String],
+    remaining: &[String],
+    scope_root: &Path,
+    global: bool,
+) -> Result<bool> {
     let mut dir_of: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
     for agent_id in remove_from.iter().chain(remaining.iter()) {
         let Some(target) = agent_target(agent_id) else {
@@ -314,18 +340,18 @@ fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Re
             }
             continue;
         };
-        let dir = agent_dir(target, &scope_root, global)?;
+        let dir = agent_dir(target, scope_root, global)?;
         let canonical = dir.canonicalize().unwrap_or(dir);
         dir_of.insert(agent_id.clone(), canonical);
     }
-    let plan = plan_unlinks(&remove_from, &remaining, &dir_of);
+    let plan = plan_unlinks(remove_from, remaining, &dir_of);
 
     let mut removed_any = false;
     for step in &plan {
         if step.physically_unlink {
             let dir = agent_dir(
                 agent_target(&step.agent).expect("planned agent exists"),
-                &scope_root,
+                scope_root,
                 global,
             )?;
             if install::unlink_from(&dir, name)? {
@@ -342,20 +368,96 @@ fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Re
             );
         }
     }
+    Ok(removed_any)
+}
 
-    // Update the lock: drop the whole entry when no agent still holds it,
-    // otherwise keep it with the remaining agents.
-    if remaining.is_empty() {
-        lock.skills.remove(name);
-    } else if let Some(existing) = lock.skills.get_mut(name) {
-        existing.agents = remaining;
-    }
-    lockfile::save(&lock_path, &lock)?;
+/// The agents the project now declares for `name`, when it declares any.
+///
+/// Same fallback as installing: the entry's own `agents`, else
+/// `[skills].default_agents`. `None` means the configuration says nothing, so
+/// the lock's record stands.
+fn declared_agents(app: &App, name: &str) -> Option<Vec<String>> {
+    let declaration = app.ctx.config.skills.get(name)?;
+    let agents = if declaration.agents.is_empty() {
+        &app.ctx.config.skills_defaults.default_agents
+    } else {
+        &declaration.agents
+    };
+    (!agents.is_empty()).then(|| agents.clone())
+}
 
-    if !removed_any {
-        println!("`{name}` was not linked into any of the targeted agents");
+/// Bring a locked skill's agents in line with its declaration.
+///
+/// `update` only ever re-resolved the source, so editing `agents` in osdk.toml
+/// (dropping `claude-code`, say) changed nothing: the lock kept the old list
+/// and the skill stayed installed where the project no longer asks for it.
+/// Dropped agents are unlinked the way `remove --agent` does it; added ones
+/// get the copy the lock already pins. Returns whether the lock changed.
+async fn reconcile_declared_agents(
+    app: &App,
+    lock: &mut lockfile::Lockfile,
+    name: &str,
+    scope_root: &Path,
+    global: bool,
+    mode: LinkMode,
+) -> Result<bool> {
+    let Some(declared) = declared_agents(app, name) else {
+        return Ok(false);
+    };
+    let Some(entry) = lock.skills.get(name).cloned() else {
+        return Ok(false);
+    };
+    let removed: Vec<String> = entry
+        .agents
+        .iter()
+        .filter(|agent| !declared.contains(agent))
+        .cloned()
+        .collect();
+    let added: Vec<String> = declared
+        .iter()
+        .filter(|agent| !entry.agents.contains(agent))
+        .cloned()
+        .collect();
+    if removed.is_empty() && added.is_empty() {
+        return Ok(false);
     }
-    Ok(())
+    for agent in &added {
+        agent_target(agent).with_context(|| {
+            format!("unknown agent `{agent}` (run `osdk skills agents` for the list)")
+        })?;
+    }
+
+    if !removed.is_empty() {
+        let kept: Vec<String> = entry
+            .agents
+            .iter()
+            .filter(|agent| declared.contains(agent))
+            .cloned()
+            .collect();
+        unlink_agents(name, &removed, &kept, scope_root, global)?;
+    }
+    if !added.is_empty() {
+        let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
+        if !staged.exists() {
+            staged = refetch_staged(app, name, &entry, mode)
+                .await?
+                .with_context(|| {
+                    format!("skill `{name}` has no staged copy to install for the added agents")
+                })?;
+        }
+        let targets = added
+            .iter()
+            .filter_map(|agent| agent_target(agent))
+            .collect::<Vec<_>>();
+        for agent_dir in agent_dirs_by_path(&targets, scope_root, global)?.keys() {
+            install::link_into(agent_dir, name, &staged, mode)?;
+        }
+    }
+    if let Some(existing) = lock.skills.get_mut(name) {
+        existing.agents = declared.clone();
+    }
+    println!("`{name}`: agents now {}", declared.join(", "));
+    Ok(true)
 }
 
 /// Reproduce every skill the lock declares (the counterpart to `add`).
@@ -490,6 +592,11 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
         let mode = install_mode_for_entry(&entry, name, &scope_root, global, fallback_mode)?;
+        if reconcile_declared_agents(app, &mut lock, name, &scope_root, global, mode).await? {
+            changed = true;
+        }
+        // Re-read: the re-link below must target the agents now declared.
+        let entry = lock.skills.get(name).cloned().expect("entry checked above");
         let source = SkillSource::parse(&entry.source)?;
         let SkillSource::GitHub {
             owner,

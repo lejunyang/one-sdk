@@ -47,7 +47,10 @@ and install mode recorded in the lock. `update` re-resolves the lock's
 repository commit advances but the selected skill's content hash does not, only the
 lock commit advances; changed skill content is reinstalled. A bare 40-hex commit
 left by an older project is migrated to default-branch intent; spell an intentional
-permanent pin as `ref = "rev:<commit>"`. `use` installs nothing and writes no
+permanent pin as `ref = "rev:<commit>"`. `update` also makes the install follow the
+project's `[skills.<name>].agents` (or `[skills].default_agents` when empty): an agent
+removed there is unlinked, keeping a directory a still-declared agent shares, an added
+one gets the copy the lock pins, and the lock's `agents` is rewritten. `use` installs nothing and writes no
 lock — it uses one skill on the fly: with no `-a` it writes the generated prompt
 to stdout (pipe it, e.g. `osdk skills use owner/repo | claude`), and with `-a <id>`
 it starts that agent's CLI interactively with the prompt. `init` scaffolds a
