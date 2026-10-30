@@ -14,7 +14,9 @@ use crate::http;
 use crate::pipeline::{self, ArchiveKind, Checksum, HashAlgo, InstallPlan, PipelineCtx};
 use crate::platform::{Arch, Os};
 use crate::source::Source;
-use crate::version::{select_version, ToolRequest, ToolVersion, VersionInfo, VersionSpec};
+use crate::version::{
+    select_version_with_prerelease, ToolRequest, ToolVersion, VersionInfo, VersionSpec,
+};
 
 pub struct NodeBackend;
 
@@ -72,6 +74,25 @@ impl NodeBackend {
             // preferred source's metadata.
             merged.entry(version).or_insert(lts);
         }
+    }
+
+    /// Turn the merged index into ascending (oldest-first) candidates.
+    ///
+    /// The official index lists pre-releases next to GA lines (it published
+    /// `v27.0.0-alpha.0.0.0` above `v26.13.0`), so stability has to be read from
+    /// the version itself: marking everything stable made `latest` resolve to
+    /// an alpha and left the prerelease policy nothing to filter.
+    fn versions_from_merged(merged: BTreeMap<String, Option<String>>) -> Vec<VersionInfo> {
+        let mut out: Vec<VersionInfo> = merged
+            .into_iter()
+            .map(|(version, lts)| VersionInfo {
+                stable: !version.contains('-'),
+                version,
+                lts,
+            })
+            .collect();
+        out.sort_by(|a, b| crate::backend::python::cmp_versions(&a.version, &b.version));
+        out
     }
 
     /// The node file token for the current platform, e.g. `linux-x64`,
@@ -263,17 +284,7 @@ impl Backend for NodeBackend {
             );
         }
 
-        // Sort ascending (oldest-first) by numeric components.
-        let mut out: Vec<VersionInfo> = merged
-            .into_iter()
-            .map(|(version, lts)| VersionInfo {
-                version,
-                stable: true,
-                lts,
-            })
-            .collect();
-        out.sort_by(|a, b| crate::backend::python::cmp_versions(&a.version, &b.version));
-        Ok(out)
+        Ok(Self::versions_from_merged(merged))
     }
 
     #[cfg(feature = "install")]
@@ -314,16 +325,16 @@ impl Backend for NodeBackend {
             show_progress: ctx.show_progress,
         };
         let versions = self.list_remote_versions(&target_ctx).await?;
-        let chosen = select_version(&req.spec, &versions).ok_or_else(|| {
-            crate::error::Error::VersionResolve {
-                tool: self.id().to_string(),
-                spec: req.spec.to_string(),
-                hint: Some(format!(
-                    "no matching version ships a {} asset",
-                    target_arch.node_token()
-                )),
-            }
-        })?;
+        let chosen =
+            select_version_with_prerelease(&req.spec, &versions, ctx.config.settings.prerelease)
+                .ok_or_else(|| crate::error::Error::VersionResolve {
+                    tool: self.id().to_string(),
+                    spec: req.spec.to_string(),
+                    hint: Some(format!(
+                        "no matching version ships a {} asset",
+                        target_arch.node_token()
+                    )),
+                })?;
         let mut resolved = ToolVersion::new(self.id(), &chosen.version);
         resolved.options = req.options.clone();
         resolved
@@ -556,6 +567,42 @@ mod tests {
 
         assert_eq!(merged.get("20.0.0"), Some(&Some("iron".into())));
         assert!(merged.contains_key("22.0.0"));
+    }
+
+    #[test]
+    fn index_prereleases_are_not_stable_and_latest_skips_them() {
+        use crate::config::PrereleasePolicy;
+        // Shape of the real nodejs.org index: an alpha placeholder for the next
+        // major sits above the newest GA release.
+        let merged = BTreeMap::from([
+            ("26.13.0".to_string(), Some("lithium".to_string())),
+            ("27.0.0-alpha.0.0.0".to_string(), None),
+        ]);
+        let versions = NodeBackend::versions_from_merged(merged);
+        let alpha = versions
+            .iter()
+            .find(|candidate| candidate.version == "27.0.0-alpha.0.0.0")
+            .unwrap();
+        assert!(!alpha.stable);
+
+        let pick = |spec: VersionSpec, policy| {
+            select_version_with_prerelease(&spec, &versions, policy)
+                .map(|candidate| candidate.version.clone())
+        };
+        let default = PrereleasePolicy::default();
+        assert_eq!(
+            pick(VersionSpec::Latest, default).as_deref(),
+            Some("26.13.0")
+        );
+        assert_eq!(pick(VersionSpec::parse("27"), default), None);
+        assert_eq!(
+            pick(VersionSpec::parse("27.0.0-alpha.0.0.0"), default).as_deref(),
+            Some("27.0.0-alpha.0.0.0")
+        );
+        assert_eq!(
+            pick(VersionSpec::Latest, PrereleasePolicy::Allow).as_deref(),
+            Some("27.0.0-alpha.0.0.0")
+        );
     }
 
     #[test]
