@@ -928,6 +928,15 @@ fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<(
         .into();
     }
 
+    // A bare name is left to the OS, but Windows `CreateProcess` only tries
+    // `.exe`: a custom `run = "pnpm ..."` missed the managed `pnpm.cmd` on the
+    // PATH built above and failed with "program not found". Resolve it against
+    // that same PATH first; explicit paths and Unix are left untouched.
+    let program = crate::commands::resolve_program_in_dirs(
+        &program,
+        &std::env::split_paths(&path).collect::<Vec<_>>(),
+    );
+
     // Already absolute: the provider resolved \[deps.<p>].dir\ against the project
     // root. Joining again would be a no-op for an absolute path but would quietly
     // change meaning if a provider ever returned a relative one.

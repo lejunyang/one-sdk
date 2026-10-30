@@ -521,3 +521,59 @@ fn local_child_verification_reads_its_own_lock() {
         "not a lockfile"
     );
 }
+
+// A custom `run` names its program bare, the way a user writes it. On Windows
+// the program is often only a `.cmd` launcher -- pnpm's managed install ships
+// `pnpm.cmd` and nothing else -- and `CreateProcess` searches PATH for `.exe`
+// alone, so handing it the bare name failed with "program not found" for a
+// launcher sitting on the PATH osdk had just built.
+#[test]
+fn custom_run_reaches_a_launcher_only_found_through_executable_extensions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("launchers");
+    std::fs::create_dir_all(&bin).unwrap();
+    if cfg!(windows) {
+        write(&bin, "fixture-launcher.cmd", "@echo called>called.txt\r\n");
+    } else {
+        write(
+            &bin,
+            "fixture-launcher",
+            "#!/bin/sh\necho called > called.txt\n",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = bin.join("fixture-launcher");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    write(
+        root,
+        "osdk.toml",
+        "[deps.launcher]\nrun = \"fixture-launcher\"\n",
+    );
+    let mut path = std::ffi::OsString::from(&bin);
+    if let Some(inherited) = std::env::var_os("PATH") {
+        path.push(if cfg!(windows) { ";" } else { ":" });
+        path.push(inherited);
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_osdk"))
+        .args(["deps"])
+        .current_dir(root)
+        .env("PATH", path)
+        .env("OSDK_CONFIG_DIR", root.join("state/config"))
+        .env("OSDK_DATA_DIR", root.join("state/data"))
+        .env("OSDK_CACHE_DIR", root.join("state/cache"))
+        .env("OSDK_TRUSTED_CONFIG_PATHS", root.join("osdk.toml"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("called.txt"))
+            .unwrap()
+            .trim(),
+        "called"
+    );
+}
