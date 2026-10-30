@@ -977,7 +977,7 @@ fn canonical_fixed_name(value: &str) -> Result<String> {
             .chars()
             .any(|character| matches!(character, ':' | '@' | '[' | ']' | '/' | '\\'))
     {
-        return Err(Error::other(format!("invalid tool request `{value}`")));
+        return Err(invalid_request(value));
     }
     Ok(value.to_string())
 }
@@ -2790,7 +2790,10 @@ fn write_option_value(formatter: &mut fmt::Formatter<'_>, value: &str) -> fmt::R
 }
 
 fn invalid_request(input: &str) -> Error {
-    Error::other(format!("invalid tool request `{input}`"))
+    Error::other(crate::i18n::trf(
+        "err.invalid_tool_request",
+        &[("val", input)],
+    ))
 }
 
 #[cfg(test)]
