@@ -627,11 +627,13 @@ fn collect_tool_section_requirements(
     }
 }
 
-/// Inspect `[tools]` for the one option that grants code execution.
+/// Inspect `[tools]` for entries whose install executes package-authored code.
 ///
-/// Declaring `npm:prettier` or `github:cli/cli` is not itself a reason: those
-/// installs execute no package-authored code. `allow_builds` is, and it can
-/// arrive either as a table field or inline in the request string.
+/// Declaring `npm:prettier`, `pypi:ruff` or `github:cli/cli` is not itself a
+/// reason: those installs run no package code. Two things are. `allow_builds`
+/// opts an npm or pypi install into build scripts, either as a table field or
+/// inline in the request string; and a `cargo:` entry compiles, which has no
+/// way to avoid running build scripts at all.
 fn collect_tools_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
     let Some(tools) = value.as_table() else {
         return;
@@ -669,8 +671,34 @@ fn collect_tools_requirements(value: &toml::Value, found: &mut Vec<TrustRequirem
                 key: format!("tools.{name}.{ALLOW_BUILDS_OPTION}"),
                 reason: TrustReason::ExecutesCode,
             });
+        } else if compiles_from_source(name, entry) {
+            found.push(TrustRequirement {
+                key: format!("tools.{name}"),
+                reason: TrustReason::ExecutesCode,
+            });
         }
     }
+}
+
+/// Whether installing this `[tools]` entry compiles package-authored code.
+///
+/// A `cargo:` install has no prebuilt path: `cargo install` builds the crate,
+/// and building runs every `build.rs` and procedural macro in its dependency
+/// graph. There is no switch like npm's `--ignore-scripts` to turn that off,
+/// so the declaration itself is the grant, and approving it covers the whole
+/// entry -- a version bump is new code to compile, as with `allow_builds`.
+/// The backend can be named by the key or, for an alias, by the value.
+fn compiles_from_source(name: &str, entry: &toml::Value) -> bool {
+    let spec = match entry {
+        toml::Value::String(spec) => Some(spec.as_str()),
+        toml::Value::Table(fields) => fields.get("version").and_then(toml::Value::as_str),
+        _ => None,
+    };
+    [Some(name), spec]
+        .into_iter()
+        .flatten()
+        .filter_map(|text| crate::version::ToolRequest::parse(text).ok())
+        .any(|request| request.backend.starts_with("cargo:"))
 }
 
 /// Inspect `[skills]` entries for keys that redirect the byte source.
@@ -1347,6 +1375,8 @@ mod tests {
     /// The whole point of the revision: declaring a dependency is not a reason
     /// to ask for approval. Every namespace here installs without running
     /// package-authored code, so a project may add and bump tools freely.
+    /// `cargo:` is the exception -- compiling runs build scripts -- and is
+    /// covered by its own test.
     #[test]
     fn declaring_tools_and_aliases_never_requires_trust() {
         let temp = tempfile::tempdir().unwrap();
@@ -1362,7 +1392,6 @@ mod tests {
             "npm:prettier",
             "github:cli/cli",
             "go:github.com/user/cmd/tool",
-            "cargo:ripgrep",
             "pypi:ruff",
             "conda:nasm",
             "http:https://downloads.example.test/tool-{version}",
@@ -1405,6 +1434,51 @@ mod tests {
             "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = false\n",
             "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"off\"\n",
             "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"\"\n",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert!(!requires_trust(&path).unwrap(), "{body}");
+        }
+    }
+
+    /// A `cargo:` entry is trust-gated however it is spelled, because building
+    /// a crate runs its `build.rs` and procedural macros; other backends that
+    /// install prebuilt artifacts stay free to declare.
+    #[test]
+    fn cargo_entries_require_trust_because_compiling_runs_build_scripts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        for (body, key) in [
+            (
+                "[tools]\n\"cargo:jscpd\" = \"5.3.2\"\n",
+                "tools.cargo:jscpd",
+            ),
+            (
+                "[tools]\n\"cargo:jscpd\" = { version = \"5.3.2\", locked = \"true\" }\n",
+                "tools.cargo:jscpd",
+            ),
+            ("[tools]\ndup = \"cargo:jscpd@5.3.2\"\n", "tools.dup"),
+            (
+                "[tools.dup]\nversion = \"cargo:jscpd@5.3.2\"\n",
+                "tools.dup",
+            ),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let found = trust_requirements(&path, &[Scope::Install]).unwrap();
+            assert_eq!(found.len(), 1, "{body}");
+            assert_eq!(found[0].key, key, "{body}");
+            assert_eq!(found[0].reason, TrustReason::ExecutesCode, "{body}");
+            // Only installing compiles; a task run is not gated by it.
+            assert!(
+                trust_requirements(&path, &[Scope::Run]).unwrap().is_empty(),
+                "{body}"
+            );
+        }
+
+        for body in [
+            "[tools]\nrust = \"1.98.0\"\n",
+            "[tools]\n\"pypi:ruff\" = \"0.8\"\n",
+            "[tools]\n\"go:golang.org/x/tools/cmd/goimports\" = \"latest\"\n",
         ] {
             std::fs::write(&path, body).unwrap();
             assert!(!requires_trust(&path).unwrap(), "{body}");

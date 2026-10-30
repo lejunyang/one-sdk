@@ -1502,8 +1502,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "err.untrusted_config",
         (
-            "project config is not trusted: {path}\nthese keys need review because they affect what runs on this machine:{requirements}\nreview them, then run `osdk --yes trust {path}` (or set OSDK_TRUSTED_CONFIG_PATHS). Declaring which tools or packages to install never needs trust on its own.",
-            "项目配置尚未受信任：{path}\n以下键会影响本机实际执行的内容，需要你审阅：{requirements}\n请审阅后运行 `osdk --yes trust {path}`（或配置 OSDK_TRUSTED_CONFIG_PATHS）。仅声明安装哪些工具或包本身不需要信任。",
+            "project config is not trusted: {path}\nthese keys need review because they affect what runs on this machine:{requirements}\nreview them, then run `osdk --yes trust {path}` (or set OSDK_TRUSTED_CONFIG_PATHS). Declaring which tools or packages to install needs no trust on its own, except `cargo:` entries, whose build runs package code.",
+            "项目配置尚未受信任：{path}\n以下键会影响本机实际执行的内容，需要你审阅：{requirements}\n请审阅后运行 `osdk --yes trust {path}`（或配置 OSDK_TRUSTED_CONFIG_PATHS）。仅声明安装哪些工具或包本身不需要信任，`cargo:` 条目除外：其编译会运行包里的代码。",
         ),
     );
     m.insert(

@@ -25,7 +25,7 @@ zig = { version = "0.15", when = { os = ["linux", "macos"] } }
 - 其余字段：backend 专属选项，等价于命令行 `-o KEY=VALUE`。
 
 同名配置按层级整体替换，不做字段级拼接。被 `when` 排除的工具仍会保留排除原因，
-命令点名时会报告平台不匹配。仅声明 `[tools]` 不需要 trust。
+命令点名时会报告平台不匹配。仅声明 `[tools]` 不需要 trust，`cargo:` 条目除外：编译必然运行 `build.rs` 与过程宏，所以安装前要 `osdk trust`。
 
 `[tools]` 使用普通版本选择语义：`pnpm = "9"`、`pnpm = "9.15"` 会分别解析最新稳定的
 `9.x`、`9.15.x`，精确结果写入 `osdk.lock`。这不同于 `package.json#packageManager`，

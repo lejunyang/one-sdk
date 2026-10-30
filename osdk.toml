@@ -18,6 +18,8 @@ rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-pc
 # scripts/test-installers.sh serves the fixture archives over `python3 -m
 # http.server`. Without it the installer smoke exits before printing anything.
 python = "3.12"
+# `cargo:` entries are trust-gated: building the crate runs its build scripts.
+# Run `osdk trust` once after reviewing this file (and again after a bump).
 "cargo:jscpd" = { version = "5.3.2", locked = "true" }
 # Only the documentation task needs Bun. Explicit task dependencies install
 # lazy tools before constructing the task environment.
