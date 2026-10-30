@@ -189,7 +189,9 @@ Registry。
 Berry（Yarn 2+）的 cache 完全由项目 `.yarn` 配置决定，osdk 不强制改
 `enableGlobalCache` 或 `cacheFolder`。
 
-这些缓存变量通过当前 backend 的 shim/`exec` 和 shell hook 注入，并默认保留用户已有值。
+这些缓存变量通过当前 backend 的 shim/`exec`、`osdk deps` 和 shell hook 注入，并默认保留用户已有值。
+`deps` 自己注入而不依赖 shell 是否已激活，所以在 IDE 任务、CI 或 `pwsh -NoProfile` 里，
+pnpm 也会用 osdk 的 store，不会因 store 位置不同而拒绝已有的 `node_modules`。
 `osdk cache clean` 只删除 osdk 下载归档，**不会**删除上述原生缓存。完整存储边界见
 [存储、Shell 与扩展](../config/storage)。
 

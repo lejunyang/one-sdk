@@ -692,6 +692,9 @@ struct ReadyTool {
     role: ToolRole,
     bin_dirs: Vec<PathBuf>,
     system: Option<osdk_core::execution::SystemTarget>,
+    /// The backend's own process environment -- the managed package caches,
+    /// such as pnpm's store. Empty for a system tool, which keeps the user's.
+    env: BTreeMap<String, String>,
 }
 
 /// Resolve every tool a provider needs, installing the missing ones through
@@ -778,6 +781,7 @@ async fn ensure_tools_in_context(
                     role: required.role,
                     bin_dirs: vec![target.bin_dir().to_path_buf()],
                     system: Some(target),
+                    env: BTreeMap::new(),
                 });
                 continue;
             }
@@ -842,12 +846,16 @@ async fn ensure_tools_in_context(
         let bin_dirs = backend
             .bin_paths(&app.ctx, &version)
             .with_context(|| format!("resolving bin directories for {}", version.backend))?;
+        let env = backend
+            .exec_env(&app.ctx, &version)
+            .with_context(|| format!("resolving environment for {}", version.backend))?;
         ready.push(ReadyTool {
             id: required.id.to_string(),
             version: version.version.clone(),
             role: required.role,
             bin_dirs,
             system: None,
+            env,
         });
     }
     let mut env = item.plan.env.clone();
@@ -951,13 +959,12 @@ fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<(
     if tools.iter().any(|t| t.system.is_some()) {
         command.env_clear().envs(&external_env);
     }
+    let child_env = child_env(&item.plan.env, tools);
     command
         .args(&item.plan.args)
         .current_dir(cwd)
-        .env("PATH", &path);
-    for (key, value) in &item.plan.env {
-        command.env(key, value);
-    }
+        .env("PATH", &path)
+        .envs(&child_env);
 
     println!("{}", display_command(item));
 
@@ -969,14 +976,39 @@ fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<(
         if tools.iter().any(|t| t.system.is_some()) {
             prelude.env_clear().envs(&external_env);
         }
-        prelude.args(step).current_dir(cwd).env("PATH", &path);
-        for (key, value) in &item.plan.env {
-            prelude.env(key, value);
-        }
+        prelude
+            .args(step)
+            .current_dir(cwd)
+            .env("PATH", &path)
+            .envs(&child_env);
         run_bounded(prelude, item.config.timeout)?;
     }
     run_bounded(command, item.config.timeout)?;
     Ok(())
+}
+
+/// The environment a deps command adds on top of what it inherits.
+///
+/// Each managed tool contributes what `osdk exec` would give it -- above all
+/// the shared package caches. Without them the install depended on whether the
+/// calling shell happened to be activated: from an IDE task, CI or
+/// `pwsh -NoProfile`, pnpm picked its default store and refused a
+/// `node_modules` that osdk had linked from the managed one
+/// (`ERR_PNPM_UNEXPECTED_STORE`). The project's `[deps].env` is applied last so
+/// an explicit setting still wins, and `PATH` stays the one `run_plan` built.
+fn child_env(plan_env: &BTreeMap<String, String>, tools: &[ReadyTool]) -> BTreeMap<String, String> {
+    let mut env: BTreeMap<String, String> = tools
+        .iter()
+        .flat_map(|tool| &tool.env)
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("PATH"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    env.extend(
+        plan_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    env
 }
 
 /// Locate the installer program among the resolved bin directories.
@@ -1474,7 +1506,7 @@ fn report_undeclared(cwd: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_options, command_line, resolve_program, ReadyTool, ToolRole};
+    use super::{auto_options, child_env, command_line, resolve_program, ReadyTool, ToolRole};
     use osdk_core::deps::{
         node, DetectedProject, Ecosystem, InstallerChoice, InstallerOrigin, ProviderConfig,
     };
@@ -1584,6 +1616,39 @@ mod tests {
     }
 
     #[test]
+    fn deps_child_env_carries_tool_caches_under_the_project_env() {
+        let tool = |id: &str, env: &[(&str, &str)]| ReadyTool {
+            id: id.into(),
+            version: "1".into(),
+            role: ToolRole::Installer,
+            bin_dirs: Vec::new(),
+            system: None,
+            env: env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        };
+        let tools = [
+            tool(
+                "pnpm",
+                &[
+                    ("pnpm_config_store_dir", "/managed/pnpm-store"),
+                    ("PNPM_HOME", "/managed/pnpm"),
+                    ("PATH", "/must/not/replace/the/built/path"),
+                ],
+            ),
+            tool("node", &[("npm_config_cache", "/managed/npm")]),
+        ];
+        let plan_env = BTreeMap::from([("PNPM_HOME".to_string(), "/project/choice".to_string())]);
+
+        let env = child_env(&plan_env, &tools);
+        assert_eq!(env["pnpm_config_store_dir"], "/managed/pnpm-store");
+        assert_eq!(env["npm_config_cache"], "/managed/npm");
+        assert_eq!(env["PNPM_HOME"], "/project/choice");
+        assert!(!env.contains_key("PATH"), "{env:?}");
+    }
+
+    #[test]
     fn dependency_program_selection_uses_host_launchers() {
         let temp = tempfile::tempdir().unwrap();
         let project = DetectedProject {
@@ -1615,6 +1680,7 @@ mod tests {
             role: ToolRole::Installer,
             bin_dirs: vec![temp.path().to_path_buf()],
             system: None,
+            env: BTreeMap::new(),
         }];
         let expected = if cfg!(windows) { "yarn.cmd" } else { "yarn" };
         assert_eq!(

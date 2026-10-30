@@ -204,8 +204,11 @@ variables: they locate the global install root, covered below under
 Berry (Yarn 2+) cache is entirely a matter of project `.yarn` configuration; osdk does
 not force `enableGlobalCache` or `cacheFolder`.
 
-Shims, `exec`, and shell hooks apply these cache variables when the relevant backend
-is active and preserve an existing user value by default. `osdk cache clean`
+Shims, `exec`, `osdk deps`, and shell hooks apply these cache variables when the
+relevant backend is active and preserve an existing user value by default. `deps`
+applies them itself rather than relying on an activated shell, so from an IDE task, CI,
+or `pwsh -NoProfile` pnpm still uses osdk's store instead of rejecting an existing
+`node_modules` linked from it. `osdk cache clean`
 removes only osdk's downloaded SDK archives, not these native caches. See
 [Storage, Shell, and Extensions](../config/storage) for the complete boundary.
 
