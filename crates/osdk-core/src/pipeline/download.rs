@@ -62,6 +62,12 @@ pub fn suspend<R>(f: impl FnOnce() -> R) -> R {
     PROGRESS.suspend(f)
 }
 
+/// A bar when the size is known, otherwise a running byte count.
+///
+/// Without `Content-Length` -- GitHub's generated source tarballs, which every
+/// skill download is -- there is no fraction to draw. The bar template then
+/// rendered an empty bar against a `0 B` total, which read as a stalled
+/// download; showing how much has arrived is the honest version.
 fn new_download_bar(
     multi: &MultiProgress,
     total: Option<u64>,
@@ -69,16 +75,26 @@ fn new_download_bar(
     position: u64,
 ) -> ProgressBar {
     let pb = match total {
-        Some(t) => ProgressBar::new(t),
-        None => ProgressBar::new_spinner(),
+        Some(total) => {
+            let pb = ProgressBar::new(total);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})",
+                )
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .progress_chars("=>-"),
+            );
+            pb
+        }
+        None => {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::with_template("{spinner} {msg} {bytes} ({bytes_per_sec})")
+                    .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+            );
+            pb
+        }
     };
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})",
-        )
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .progress_chars("=>-"),
-    );
     pb.set_message(label.to_string());
     pb.set_position(position);
     multi.add(pb)
@@ -509,6 +525,27 @@ mod tests {
         assert!(
             lines.iter().all(|line| line.contains("50 B/100 B")),
             "{lines:?}"
+        );
+    }
+
+    /// Without a known size the line is a byte count, not an empty bar
+    /// against a `0 B` total.
+    #[test]
+    fn unknown_size_downloads_show_bytes_without_a_bar() {
+        let term = FakeTerm::default();
+        let multi = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::term_like(
+            Box::new(term.clone()),
+        ));
+        let bar = new_download_bar(&multi, None, "owner/skills", 0);
+        drive(std::slice::from_ref(&bar));
+        let lines = term.visible_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("owner/skills"), "{lines:?}");
+        assert!(lines[0].contains("50 B"), "{lines:?}");
+        assert!(!lines[0].contains('['), "no bar without a size: {lines:?}");
+        assert!(
+            !lines[0].contains("0 B/"),
+            "no total without a size: {lines:?}"
         );
     }
 
