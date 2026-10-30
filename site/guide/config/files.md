@@ -81,7 +81,7 @@ Python 与 npm 各自的探测超时是 `[registries.python]` / `[registries.npm
 别名，`[sys.pkg]` 是系统域下的包管理器设置。于是 `osdk task` 操作 `[tasks]` 中的一个
 任务，而不是要求集合表也改成单数。
 
-旧版四组写法暂时仍可读取，并可一次迁移：
+这些旧写法暂时仍可读取，并可一次迁移：
 
 ```bash
 osdk config migrate --dry-run   # 预览当前项目
@@ -91,7 +91,8 @@ osdk config migrate --global    # 改写用户 config.toml
 
 迁移关系是 `[aliases]` → `[alias.tools]`、`[containers]` → `[container]`、
 `[task_config]` → `[task]`、`[syspkg]` → `[sys.pkg]`，以及把临时的
-`[sys.pkg.packages]` 条目扁平到 `[sys.pkg]`。命令保留注释及其他段；如果一组
+`[sys.pkg.packages]` 条目扁平到 `[sys.pkg]`，以及把 `[sys.pkg]` 条目顶层的 `os`/`arch`
+移进 `when = { ... }`。命令保留注释及其他段；如果一组
 新旧写法同时存在，它会拒绝猜测合并顺序并保持文件不变。osdk 的写命令只生成新布局。
 
 ## 最小项目配置

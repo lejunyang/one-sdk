@@ -60,17 +60,17 @@ bun = { version = "1.4.3", lazy = true }
 # macOS is deliberately absent: `cc` comes from the Xcode Command Line Tools
 # (`xcode-select --install`), not from any package manager osdk drives, so an
 # entry here could only ever be wrong. See the note below.
-"apt:build-essential" = { version = "latest", os = "linux" }
-"apt:musl-tools" = { version = "latest", os = "linux" }
-"dnf:gcc" = { version = "latest", os = "linux" }
-"pacman:gcc" = { version = "latest", os = "linux" }
-"apk:build-base" = { version = "latest", os = "linux" }
+"apt:build-essential" = { version = "latest", when = { os = "linux" } }
+"apt:musl-tools" = { version = "latest", when = { os = "linux" } }
+"dnf:gcc" = { version = "latest", when = { os = "linux" } }
+"pacman:gcc" = { version = "latest", when = { os = "linux" } }
+"apk:build-base" = { version = "latest", when = { os = "linux" } }
 
 # The Windows cross-compilation linker, needed only by `wine-tests`.
-"apt:mingw-w64" = { version = "latest", os = "linux" }
-"dnf:mingw64-gcc" = { version = "latest", os = "linux" }
-"pacman:mingw-w64-gcc" = { version = "latest", os = "linux" }
-"apk:mingw-w64-gcc" = { version = "latest", os = "linux" }
+"apt:mingw-w64" = { version = "latest", when = { os = "linux" } }
+"dnf:mingw64-gcc" = { version = "latest", when = { os = "linux" } }
+"pacman:mingw-w64-gcc" = { version = "latest", when = { os = "linux" } }
+"apk:mingw-w64-gcc" = { version = "latest", when = { os = "linux" } }
 
 # Not declared here: a C compiler for macOS. `cc` is just as required there, but
 # it ships with the Xcode Command Line Tools and is installed by

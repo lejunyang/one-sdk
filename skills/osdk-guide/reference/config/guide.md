@@ -34,7 +34,7 @@ osdk config migrate --global
 配置分层与全部 TOML 段从 `reference/configuration/overview.md` 进入；`config set`
 不是任意 TOML 编辑器，复杂声明使用对应配置 reference。
 
-`migrate` 只移动四组旧布局：`[aliases]` → `[alias.tools]`、`[containers]` →
+`migrate` 只处理这些旧写法：`[aliases]` → `[alias.tools]`、`[containers]` →
 `[container]`、`[task_config]` → `[task]`、`[syspkg]` → `[sys.pkg]`，并将临时的
-`[sys.pkg.packages]` 条目扁平到 `[sys.pkg]`。它保留注释和
+`[sys.pkg.packages]` 条目扁平到 `[sys.pkg]`，并把 `[sys.pkg]` 条目顶层的 `os`/`arch` 移进 `when`。它保留注释和
 其他配置；如果同一组的新旧写法同时存在，会拒绝猜测合并顺序并保持文件不变。

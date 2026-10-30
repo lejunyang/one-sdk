@@ -424,6 +424,10 @@ const CONFIG_MIGRATIONS: &[ConfigMigration] = &[
         from: "sys.pkg.packages",
         to: "sys.pkg",
     },
+    ConfigMigration {
+        from: "sys.pkg.*.os/arch",
+        to: "sys.pkg.*.when",
+    },
 ];
 
 /// Rewrite temporary legacy config sections while preserving unrelated
@@ -460,6 +464,7 @@ fn migrate_config_layout(doc: &mut toml_edit::DocumentMut) -> Result<Vec<ConfigM
     ensure_nested_migration(doc, "aliases", "alias", "tools")?;
     ensure_nested_migration(doc, "syspkg", "sys", "pkg")?;
     ensure_system_packages_can_flatten(doc)?;
+    ensure_system_package_filters_can_migrate(doc)?;
 
     let mut applied = Vec::new();
     if migrate_top_level_section(doc, "containers", "container")? {
@@ -477,7 +482,89 @@ fn migrate_config_layout(doc: &mut toml_edit::DocumentMut) -> Result<Vec<ConfigM
     if flatten_system_packages(doc)? {
         applied.push(CONFIG_MIGRATIONS[4]);
     }
+    // After flattening, so entries from a legacy `[sys.pkg.packages]` are
+    // rewritten in the same run.
+    if migrate_system_package_filters(doc)? {
+        applied.push(CONFIG_MIGRATIONS[5]);
+    }
     Ok(applied)
+}
+
+/// The legacy platform keys a `[sys.pkg]` entry may carry at its top level.
+const LEGACY_PLATFORM_KEYS: [&str; 2] = ["os", "arch"];
+
+/// Every `[sys.pkg]` entry table, in either location, for a read-only pass.
+fn system_package_entries(
+    doc: &toml_edit::DocumentMut,
+) -> Vec<(String, &dyn toml_edit::TableLike)> {
+    let mut entries = Vec::new();
+    for path in [
+        &["sys", "pkg"][..],
+        &["sys", "pkg", "packages"],
+        &["syspkg"],
+        &["syspkg", "packages"],
+    ] {
+        let Ok(Some(table)) = table_at(doc.as_table(), path) else {
+            continue;
+        };
+        for (key, item) in table.iter() {
+            if let Some(entry) = item.as_table_like() {
+                entries.push((format!("{}.{key}", path.join(".")), entry));
+            }
+        }
+    }
+    entries
+}
+
+fn ensure_system_package_filters_can_migrate(doc: &toml_edit::DocumentMut) -> Result<()> {
+    for (name, entry) in system_package_entries(doc) {
+        let legacy = LEGACY_PLATFORM_KEYS
+            .iter()
+            .any(|key| entry.contains_key(key));
+        if legacy && entry.contains_key("when") {
+            anyhow::bail!(
+                "`{name}` sets both `when` and the legacy top-level `os`/`arch`; keep one \
+                 before migrating"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Move each `[sys.pkg]` entry's top-level `os`/`arch` into `when = { ... }`,
+/// the filter spelling the rest of the config uses. Values are moved as
+/// written, so a list stays a list and a comment beside it is kept.
+fn migrate_system_package_filters(doc: &mut toml_edit::DocumentMut) -> Result<bool> {
+    let Some(pkg) = doc
+        .get_mut("sys")
+        .and_then(toml_edit::Item::as_table_mut)
+        .and_then(|system| system.get_mut("pkg"))
+        .and_then(toml_edit::Item::as_table_mut)
+    else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for (_, item) in pkg.iter_mut() {
+        let Some(entry) = item.as_table_like_mut() else {
+            continue;
+        };
+        let mut when = toml_edit::InlineTable::new();
+        for key in LEGACY_PLATFORM_KEYS {
+            if let Some(value) = entry.remove(key) {
+                let value = value
+                    .into_value()
+                    .map_err(|_| anyhow::anyhow!("`{key}` in `[sys.pkg]` is not a value"))?;
+                when.insert(key, value);
+            }
+        }
+        if when.is_empty() {
+            continue;
+        }
+        when.fmt();
+        entry.insert("when", toml_edit::value(when));
+        changed = true;
+    }
+    Ok(changed)
 }
 
 fn ensure_system_packages_can_flatten(doc: &toml_edit::DocumentMut) -> Result<()> {
@@ -1472,6 +1559,7 @@ work = "20"
 managers = ["apt"]
 [syspkg.packages]
 "apt:gcc" = "latest"
+"apt:make" = { version = "latest", os = "linux" }
 "#
         .parse()
         .unwrap();
@@ -1555,6 +1643,60 @@ mirrors = false
             "{migrated}"
         );
         assert!(migrated.contains("\"apt:gcc\" = \"latest\""), "{migrated}");
+    }
+
+    /// `[sys.pkg]` filters move into `when`, in both entry forms, keeping the
+    /// values exactly as written; a second run finds nothing left to do.
+    #[test]
+    fn config_migration_moves_system_package_filters_into_when() {
+        let mut doc: toml_edit::DocumentMut = r#"[sys.pkg]
+mirrors = false
+"apt:gcc" = { version = "latest", os = "linux" }
+"winget:Git.Git" = { version = "latest", os = ["windows"], arch = "x64" }
+"brew:jq" = "latest"
+
+# keep the table-form explanation
+["sys".pkg."apt:make"]
+version = "latest"
+arch = ["x64", "arm64"]
+"#
+        .parse()
+        .unwrap();
+
+        let migrations = migrate_config_layout(&mut doc).unwrap();
+        assert_eq!(migrations, vec![CONFIG_MIGRATIONS[5]]);
+        let migrated = doc.to_string();
+        assert!(
+            migrated.contains(r#""apt:gcc" = { version = "latest", when = { os = "linux" } }"#),
+            "{migrated}"
+        );
+        assert!(
+            migrated.contains(r#"when = { os = ["windows"], arch = "x64" }"#),
+            "{migrated}"
+        );
+        assert!(migrated.contains(r#""brew:jq" = "latest""#), "{migrated}");
+        assert!(
+            migrated.contains(r#"when = { arch = ["x64", "arm64"] }"#),
+            "{migrated}"
+        );
+        assert!(
+            migrated.contains("# keep the table-form explanation"),
+            "{migrated}"
+        );
+        assert!(migrated.contains("mirrors = false"), "{migrated}");
+
+        // The result is what the parser accepts, and it is a fixed point.
+        let parsed: toml::Value = toml::from_str(&migrated).unwrap();
+        let config: osdk_core::syspkg::SyspkgConfig =
+            parsed["sys"]["pkg"].clone().try_into().unwrap();
+        assert_eq!(config.packages.len(), 4);
+        assert!(migrate_config_layout(&mut doc).unwrap().is_empty());
+
+        // An entry carrying both spellings is ambiguous: refuse, change nothing.
+        let source = "[sys.pkg]\n\"apt:gcc\" = { version = \"1\", os = \"linux\", when = { arch = \"x64\" } }\n";
+        let mut doc: toml_edit::DocumentMut = source.parse().unwrap();
+        assert!(migrate_config_layout(&mut doc).is_err());
+        assert_eq!(doc.to_string(), source);
     }
 
     #[test]
