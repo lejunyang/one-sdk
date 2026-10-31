@@ -27,6 +27,10 @@ osdk use npm:prettier@3 -o installer=pnpm
 `use` 不写项目 lock；依赖原生安装图的全局 npm/Go 工具继续使用用户 lock。相关配置见
 `reference/configuration/tools.md`；请求语法见 `reference/tool-requests/guide.md`。
 
+GitHub 工具若已配置 `catalog-url` / `catalog-sha256`，`use` 会继承它们：`latest` 只取
+catalog 内的最新版本，改成显式版本也不会查询在线 Releases。要恢复 GitHub 版本发现，
+从对应项目或用户配置的工具条目中同时移除这两项，再运行 `use`；清缓存不能解除该限制。
+
 隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他 TLS 覆盖设置仍受隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
 
 全局 `npm:` 工具（npm/pnpm 安装器）匿名安装。用户 npmrc/环境中的认证本身不再阻断公共包，

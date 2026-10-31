@@ -127,6 +127,9 @@ validated as public identity inputs and stored in the schema-1 dynamic install m
 required `catalog-sha256` identifies content without persisting the catalog
 location in the dynamic inventory. HTTP(S) catalog URLs containing userinfo,
 query parameters, or fragments are rejected.
+An explicitly configured catalog is authoritative for version resolution; a missing
+version never falls back to live Releases. Floating specs warn about the pinned
+catalog, and missing-version errors explain how to remove both catalog options.
 Consequently, a complete marker alone cannot reuse a GitHub install produced by
 different options or by a legacy inventory. Locked replay additionally matches
 the persisted artifact receipt's filename, checksum, and subdirectory. The
