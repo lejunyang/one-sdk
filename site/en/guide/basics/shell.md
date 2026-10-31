@@ -74,7 +74,10 @@ for the full semantics and pattern syntax.
 
 Patterns accept `*` and `?` and ignore case; a `backend:name` pattern applies to
 that backend only. Excluding a name only withholds the shim -- the tool stays
-installed, stays on PATH once activated, and `osdk exec` still reaches it. Run
+installed, stays on PATH once activated, and `osdk exec` still reaches it. The
+exception is an install that shares its prefix with a dependency closure, such as
+conda: activation puts none of its directories on PATH and reaches it through its
+shims only (see [Choosing which commands reach PATH](./path-control)). Run
 `osdk reshim` to apply a change.
 
 Generation and routing read the same decision, so an excluded backend cannot

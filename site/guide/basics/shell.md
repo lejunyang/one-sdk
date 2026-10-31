@@ -65,7 +65,9 @@ expose = ["make", "sh"]           # 按工具覆盖，未写的字段继承全�
 [控制哪些命令进 PATH](./path-control)。
 
 模式支持 `*` 与 `?`，忽略大小写；带 `backend:name` 前缀时只作用于该 backend。
-排除只是不生成 shim——工具仍然装着，激活后仍在 PATH 上，`osdk exec` 也可用。
+排除只是不生成 shim——工具仍然装着，激活后仍在 PATH 上，`osdk exec` 也可用。例外是
+conda 这类与依赖闭包共用 prefix 的安装：激活不把它的目录放上 PATH，只经 shim 触达，
+详见[依赖闭包里的命令](./path-control)。
 改完执行 `osdk reshim` 生效。
 
 生成与路由读的是同一份判定，因此被排除的 backend 也不会在运行时抢到某个
