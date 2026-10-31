@@ -5,8 +5,16 @@ an entire dependency closure, and an Android NDK ships 172 of them.
 `[settings.shims]` decides which ones get a shim and reach PATH.
 
 Withholding a shim is not the same as not installing: the file stays in the
-install directory and remains available through `osdk exec` and an activated
-shell.
+install directory and remains available through `osdk exec`. A command removed
+by `include` / `exclude` also stays available in an activated shell.
+
+The exception is a **dependency closure's commands**. In a conda prefix the
+requested package's commands share directories with the ones its dependencies
+brought, and PATH can only take a whole directory, so an activated shell does
+not put such an install's directories on PATH at all and reaches it through its
+shims only. Otherwise the `python` and `openssl` inside `conda:ffmpeg`'s closure
+would shadow your own. To use one of the closure's commands, give it a shim with
+`expose`.
 
 ## The three lists
 

@@ -164,6 +164,18 @@ shim，回收侧不认它、随即删掉——用户点名要回的命令看起�
 `shim_is_enabled_for`。少接一处，就会退化成「shim 存在但路由不到」或者「生成完
 又被删」。详见 `docs/bugs/008`。
 
+**激活的 PATH 必须和 shim 层是同一个决定。** shim 层按归属把闭包命令挡下，激活却
+把 `bin_paths` 返回的整组目录放上 PATH——prefix 根、`Library\bin`、`Scripts`——等于
+把刚挡下的东西从另一扇门放了回来。`osdk use -g conda:ffmpeg` 之后，激活的 shell
+里 `python` 解析到闭包自带的 Python 3.15、`openssl` 解析到闭包的 openssl，而且按
+工具 id 排序后 `conda\ffmpeg` 排在 `python\3.12` 前面。PATH 以目录为粒度，挑出
+owned 命令所在的目录也没用：`ffmpeg.exe` 和依赖的 `openssl.exe`、`zstd.exe` 就在
+同一个 `Library\bin` 里。硬链接到独立目录也不行，Windows 加载器在可执行文件所在
+目录找 DLL。所以只要 manifest 里有任何未归属命令，激活就不为这个安装贡献目录
+（`ValidatedDynamicInstall::activation_bin_paths`），它的命令只经 shim 触达，而 shim
+目录本来就排在最前面。shim 启动工具时仍把完整 prefix 交给那个进程，它需要靠这个
+找到自己的库。没有闭包的安装行为不变。
+
 没有 `paths.json` 或清单为空时回退到导出整个 prefix。方向是刻意的：多导出几个命令
 用户可以再收窄，一个都不导出会让安装彻底失效。
 

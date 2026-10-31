@@ -725,6 +725,25 @@ impl ValidatedDynamicInstall {
             .collect()
     }
 
+    /// Directories shell activation may put on PATH.
+    ///
+    /// PATH exposes whole directories, so a prefix shared with a dependency
+    /// closure cannot publish the requested package's commands without
+    /// publishing the closure's as well: `conda:ffmpeg` keeps `ffmpeg.exe`
+    /// beside its dependencies' `openssl.exe` and `zstd.exe` in `Library\bin`,
+    /// and a complete Python at the prefix root. Activation put all of that on
+    /// PATH ahead of the user's own tools, undoing the withholding the shim
+    /// layer had just done. Such an install is reached through its shims only;
+    /// a shim still hands the full prefix to the tool's own process, which
+    /// needs it to find its libraries.
+    pub fn activation_bin_paths(&self) -> Vec<std::path::PathBuf> {
+        if self.unowned.is_empty() {
+            self.bin_paths()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn executable(&self, name: &str) -> Option<std::path::PathBuf> {
         self.bins.get(name).cloned()
     }

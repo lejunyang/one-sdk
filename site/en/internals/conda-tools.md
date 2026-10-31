@@ -208,6 +208,24 @@ shim's own command routing all share one `shim_is_enabled_for`. Miss any one of
 the three and it degrades into "the shim exists but cannot route" or "generated,
 then deleted". See `docs/bugs/008`.
 
+**Activation's PATH has to be the same decision as the shim layer.** The shim
+layer withholds the closure's commands by ownership, but activation put every
+directory `bin_paths` returns on PATH -- the prefix root, `Library\bin`,
+`Scripts` -- letting back in through one door what had just been turned away at
+the other. After `osdk use -g conda:ffmpeg`, an activated shell resolved
+`python` to the closure's own Python 3.15 and `openssl` to the closure's
+openssl, and since tool ids sort `conda\ffmpeg` ahead of `python\3.12`, the
+closure won. PATH works per directory, so picking only the directories that
+hold owned commands does not help: `ffmpeg.exe` sits in the same `Library\bin`
+as its dependencies' `openssl.exe` and `zstd.exe`. Hardlinking the owned
+commands into a separate directory does not work either, because the Windows
+loader looks for DLLs beside the executable. So once a manifest records any
+unowned command, activation contributes no directories for that install
+(`ValidatedDynamicInstall::activation_bin_paths`) and its commands are reached
+only through shims, whose directory already leads PATH. A shim launching the
+tool still hands the full prefix to that process, which needs it to find its
+libraries. Installs without a closure are unchanged.
+
 When `paths.json` is missing or empty, the fallback is to export the whole
 prefix. The asymmetry is deliberate: extra commands can be narrowed later,
 whereas exporting none makes the install useless.

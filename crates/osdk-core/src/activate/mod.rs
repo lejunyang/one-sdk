@@ -405,7 +405,7 @@ pub fn compute_env_delta(
             has_generated_shim = true;
         }
         let bins = if let Some(install) = dynamic_install.as_ref() {
-            install.bin_paths()
+            install.activation_bin_paths()
         } else {
             backend.bin_paths(ctx, &tv).unwrap_or_default()
         };
@@ -1777,6 +1777,162 @@ mod tests {
         std::fs::write(receipt_path, tampered).unwrap();
         let message = activation_error(&ctx, &project);
         assert!(message.contains("receipt"), "{message}");
+    }
+
+    /// Install a configured `http:` tool exporting `bins` as
+    /// `(relative path, name, owned)` and return its install root.
+    fn http_install_fixture(
+        ctx: &mut Ctx,
+        backend: &str,
+        bins: &[(&str, &str, bool)],
+    ) -> std::path::PathBuf {
+        let receipt_url = backend
+            .trim_start_matches("http:")
+            .replace("{version}", "1.2.3");
+        let file_name = receipt_url.rsplit('/').next().unwrap().to_string();
+        let digest = "a".repeat(64);
+        let options: BTreeMap<String, String> = BTreeMap::from([
+            ("sha256".into(), digest.clone()),
+            ("kind".into(), "file".into()),
+            ("rename".into(), bins[0].1.into()),
+        ]);
+        ctx.config.tools.insert(backend.into(), "1.2.3".into());
+        ctx.config.tool_configs.insert(
+            backend.into(),
+            crate::config::ToolConfigEntry::structured(
+                "1.2.3",
+                options
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            crate::config::ToolConfigValue::String(value.clone()),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        let mut version = ToolVersion::new(backend, "1.2.3");
+        version.options = options;
+        version.options.extend(BTreeMap::from([
+            (
+                crate::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                receipt_url.clone(),
+            ),
+            (
+                crate::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                file_name.clone(),
+            ),
+            (
+                crate::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                format!("sha256:{digest}"),
+            ),
+        ]));
+        let locator = crate::backend::http::HttpBackend::install_locator_for(
+            &ctx.dirs,
+            ctx.platform,
+            backend,
+            &version,
+        )
+        .unwrap();
+        let root = locator.install_root().to_path_buf();
+        let mut manifest =
+            crate::inventory::DynamicToolManifest::from_identity(locator.identity().clone())
+                .unwrap();
+        for (path, name, owned) in bins {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"fixture").unwrap();
+            manifest.bins.push(crate::inventory::DynamicToolBin {
+                name: (*name).into(),
+                path: (*path).into(),
+                owned: *owned,
+            });
+        }
+        manifest.write_atomic(&root).unwrap();
+        std::fs::write(
+            root.join(".osdk-artifact.json"),
+            format!(
+                r#"{{"url":{receipt_url:?},"file_name":{file_name:?},"checksum":"sha256:{digest}"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        std::fs::create_dir_all(ctx.dirs.shims()).unwrap();
+        for (_, name, owned) in bins {
+            if *owned {
+                std::fs::write(ctx.dirs.shims().join(name), b"shim").unwrap();
+            }
+        }
+        root
+    }
+
+    /// Regression: `osdk use -g conda:ffmpeg` put the whole conda prefix on
+    /// PATH, so an activated shell resolved `python` to the closure's Python
+    /// and `openssl` to the closure's openssl, although the shim layer had
+    /// withheld both. Two closure installs, because one alone cannot show
+    /// that each keeps its dependencies to itself, and a plain install as the
+    /// control that activation still exposes directories at all.
+    #[test]
+    fn activation_reaches_dependency_closures_only_through_shims() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut ctx = test_ctx(temporary.path(), &[]);
+        ctx.config.settings.offline = true;
+        let media = http_install_fixture(
+            &mut ctx,
+            "http:https://downloads.example.test/media-{version}",
+            &[
+                ("Library/bin/media", "media", true),
+                ("Library/bin/openssl", "openssl", false),
+                ("python", "python", false),
+            ],
+        );
+        let build = http_install_fixture(
+            &mut ctx,
+            "http:https://downloads.example.test/build-{version}",
+            &[
+                ("Library/bin/build", "build", true),
+                ("Scripts/pydoc", "pydoc", false),
+            ],
+        );
+        let plain = http_install_fixture(
+            &mut ctx,
+            "http:https://downloads.example.test/plain-{version}",
+            &[("bin/plain", "plain", true)],
+        );
+
+        let delta = compute_env_delta(&ctx, &Registry::new(), &project).unwrap();
+        for leaked in [
+            media.clone(),
+            media.join("Library/bin"),
+            build.join("Library/bin"),
+            build.join("Scripts"),
+        ] {
+            assert!(
+                !delta
+                    .path_prepend
+                    .iter()
+                    .any(|path| same_existing_path(path, &leaked)),
+                "{} exposes a dependency closure on PATH: {:?}",
+                leaked.display(),
+                delta.path_prepend
+            );
+        }
+        assert!(
+            delta
+                .path_prepend
+                .iter()
+                .any(|path| same_existing_path(path, &plain.join("bin"))),
+            "an install without a closure keeps its directory: {:?}",
+            delta.path_prepend
+        );
+        assert_eq!(
+            delta.path_prepend.first(),
+            Some(&ctx.dirs.shims()),
+            "closure commands are reached through the shims, which must lead"
+        );
     }
 
     #[test]

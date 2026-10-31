@@ -3,8 +3,13 @@
 一个安装往往带来比你想要的更多可执行文件：conda prefix 装着整个依赖闭包，Android
 NDK 有 172 个可执行文件。`[settings.shims]` 决定其中哪些生成 shim、进入 PATH。
 
-不生成 shim 不等于没装：文件仍在 install 目录里，`osdk exec` 和激活的 shell 里照样
-可用。
+不生成 shim 不等于没装：文件仍在 install 目录里，`osdk exec` 里照样可用；被
+`include` / `exclude` 收掉的命令在激活的 shell 里也照样可用。
+
+例外是**依赖闭包里的命令**。conda 这类 prefix 里，请求包自己的命令和依赖带进来的
+命令混在同一批目录下，而 PATH 只能整个目录加入，所以激活的 shell 不把这类安装的
+目录放上 PATH，只通过 shim 触达它。否则 `conda:ffmpeg` 闭包里的 `python`、
+`openssl` 会盖住你自己的同名命令。要用闭包里的某个命令，用 `expose` 给它生成 shim。
 
 ## 三个列表
 
