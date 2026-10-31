@@ -1394,6 +1394,20 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("binary download failed: {err}", "二进制下载失败：{err}"),
     );
     m.insert(
+        "log.github_static_catalog",
+        (
+            "catalog-url is configured; resolving only within the pinned catalog, without checking live GitHub Releases",
+            "已配置 catalog-url；只在固定 catalog 内解析版本，不查询在线 GitHub Releases",
+        ),
+    );
+    m.insert(
+        "err.github_static_catalog_version",
+        (
+            "no matching static catalog release; catalog-url restricts version resolution to the pinned catalog. Update the catalog and its digest, or remove catalog-url and catalog-sha256 from the tool configuration to query live GitHub Releases",
+            "静态 catalog 中没有匹配版本；catalog-url 将版本解析限定在固定 catalog 内。请更新 catalog 及其摘要，或从工具配置中同时移除 catalog-url 和 catalog-sha256，以查询在线 GitHub Releases",
+        ),
+    );
+    m.insert(
         "log.github_public_fallback",
         (
             "GitHub API quota exhausted; using best-effort public release metadata (recent, public releases only)",

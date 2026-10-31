@@ -103,7 +103,9 @@ CLI。流水线本来就把 attestation 证据当作 authenticated checksum，�
 其受支持的 asset、平台、catalog 摘要、rename、bin 与 strip 选项会先作为公开身份输入
 校验，再写入 schema 1 动态安装 manifest。`catalog-url` 可用于获取，但会被刻意排除；必填的
 `catalog-sha256` 在不把 catalog 位置写入动态 inventory 时标识内容，且含 userinfo、查询参数或 fragment 的 HTTP(S)
-catalog URL 会被拒绝。因此，单有完成
+catalog URL 会被拒绝。显式配置 catalog 时，版本解析只使用其内容，不会因缺少版本而回退到
+在线 Releases；浮动版本会输出固定 catalog 提示，缺失版本的错误会提示移除这两个配置项。
+因此，单有完成
 标记不能复用由不同选项或旧 inventory 生成的 GitHub 安装；锁定重放还会核对已持久化
 artifact receipt 的文件名、checksum 与子目录。身份不匹配时必须先卸载再重新安装该版本。
 inventory 会先于完成标记发布，因此中断的收尾过程不会被误认为可复用安装。

@@ -693,8 +693,17 @@ impl Backend for GithubBackend {
             .ok_or_else(|| Error::VersionResolve {
                 tool: self.id().into(),
                 spec: req.spec.to_string(),
-                hint: Some("no matching static catalog release".into()),
+                hint: Some(crate::i18n::tr("err.github_static_catalog_version")),
             })?;
+            if !matches!(req.spec, VersionSpec::Exact(_)) {
+                tracing::warn!(
+                    tool = %self.id(),
+                    spec = %req.spec,
+                    version = %selected.version,
+                    "{}",
+                    crate::i18n::tr("log.github_static_catalog")
+                );
+            }
             let mut resolved = ToolVersion::new(self.id(), &selected.version);
             resolved.options = req.options.clone();
             let rules = Self::rules(&resolved.options)?;
@@ -2359,7 +2368,7 @@ mod tests {
         let bytes = serde_json::to_vec_pretty(&catalog).unwrap();
         std::fs::write(&catalog_path, &bytes).unwrap();
         let digest = pipeline::verify::hash_bytes(&bytes, pipeline::HashAlgo::Sha256);
-        let ctx = test_ctx(temp.path());
+        let mut ctx = test_ctx(temp.path());
         let backend = GithubBackend::from_id("github:example/tool").unwrap();
         let mut request = ToolRequest::parse("github:example/tool@latest").unwrap();
         request
@@ -2372,6 +2381,56 @@ mod tests {
             resolved.options[pipeline::LOCKED_ARTIFACT_URL_OPTION],
             "https://artifacts.example/tool.tar.gz"
         );
+
+        // A persisted catalog is authoritative even for an explicit version.
+        // Explain how to return to live Releases instead of suggesting that
+        // the requested version does not exist upstream.
+        request.spec = VersionSpec::Exact("1.2.4".into());
+        let error = backend.resolve_version(&ctx, &request).await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("catalog-url"), "{message}");
+        assert!(message.contains("catalog-sha256"), "{message}");
+        assert!(message.contains("GitHub Releases"), "{message}");
+
+        // Removing the opt-in catalog restores ordinary explicit-tag lookup;
+        // no installed version or catalog cache should keep it pinned.
+        request.options.remove("catalog-url");
+        request.options.remove("catalog-sha256");
+        let resolved = backend.resolve_version(&ctx, &request).await.unwrap();
+        assert_eq!(resolved.version, "1.2.4");
+        assert!(!resolved
+            .options
+            .contains_key(pipeline::LOCKED_ARTIFACT_URL_OPTION));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let size = stream.read(&mut buffer).unwrap();
+                assert_ne!(size, 0);
+                request.extend_from_slice(&buffer[..size]);
+            }
+            assert!(String::from_utf8(request).unwrap().contains("/releases?"));
+            let body = r#"[{"tag_name":"v1.2.4","assets":[]}]"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        ctx.config.sources.per_tool.insert(
+            backend.id().into(),
+            ToolSources {
+                pin: Some("fixture".into()),
+                disable: vec!["github".into(), "ghproxy".into()],
+                custom: vec![Source::official("fixture", &format!("http://{address}/"))
+                    .with_index(&format!("http://{address}/"))],
+                ..Default::default()
+            },
+        );
+        request.spec = VersionSpec::Latest;
+        let resolved = backend.resolve_version(&ctx, &request).await.unwrap();
+        assert_eq!(resolved.version, "1.2.4");
+        server.join().unwrap();
     }
 
     #[test]

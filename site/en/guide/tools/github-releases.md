@@ -86,6 +86,15 @@ asset contains `name`, `url`, `checksum`, `os`, and `arch`, with optional `libc`
 artifact URLs must be HTTP(S). Online HTTP catalogs are cached by digest, while
 offline mode reads that cache. Local files can be read offline directly.
 
+With `catalog-url` configured, `latest` means **the newest version in that catalog**,
+and explicit versions must also be present there. New GitHub Releases are not queried.
+`osdk use` preserves existing tool options, so changing only `@VERSION` keeps catalog
+mode enabled. Floating-version resolution warns that it uses a pinned catalog, and
+missing-version errors explain the restriction. To resume live release discovery,
+remove both `catalog-url` and `catalog-sha256` from the tool entry in the applicable
+project `osdk.toml` or user `config.toml`, then run `osdk use` again. Clearing the
+download cache does not change this configuration.
+
 ## GitHub access, failover, and tokens
 
 Token priority is `OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, then `GH_TOKEN`.

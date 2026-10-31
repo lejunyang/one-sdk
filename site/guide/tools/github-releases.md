@@ -71,6 +71,13 @@ catalog 可为 HTTP(S)、`file://` 或普通本地路径；schema 1 的每个 as
 `name`、`url`、`checksum`、`os`、`arch`，`libc` 可选，artifact URL 必须 HTTP(S)。
 HTTP catalog 在线时以摘要缓存，offline 从缓存读取；本地文件可直接离线读取。
 
+配置 `catalog-url` 后，`latest` 表示 **catalog 内的最新版本**，显式版本也必须在其中；
+不会再查询 GitHub 上的新 Release。`osdk use` 会保留已有工具选项，因此只改 `@VERSION`
+不会退出 catalog 模式。浮动版本解析会提示正在使用固定 catalog；缺失版本的错误也会说明
+这一限制。要恢复在线 Release 发现，请在对应项目 `osdk.toml` 或用户 `config.toml` 的
+工具条目中同时移除 `catalog-url` 和 `catalog-sha256`，再执行 `osdk use`。
+清理下载缓存不会改变这个配置。
+
 ## GitHub 访问、回退与 token
 
 token 优先级是 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN`、`GH_TOKEN`。Authorization
