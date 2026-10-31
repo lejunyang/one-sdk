@@ -86,11 +86,16 @@ osdk reshim
 ## 临时执行
 
 ```text
-osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
+osdk exec [(-t|--tool TOOL[@VERSION])...] -- COMMAND [ARG ...]
 ```
 
-`-t/--tool` 至少一个且可重复。osdk 先安装指定版本，再把 backend bin 和环境加入
-单个子进程；不修改项目 pin，也不读取 lock。
+`-t/--tool` 可重复。osdk 先安装指定版本，再把 backend bin 和环境加入单个子进程；
+不修改项目 pin，也不读取 lock。
+
+一个 `--tool` 都不带时，命令以激活的 shell 在当前目录下会有的环境运行，不安装任何
+东西。这是给没有 shell 钩子的 IDE 任务、CI 步骤和计划任务用的入口，详见
+[没有 shell 钩子时](./shell#没有-shell-钩子时)，那里也介绍了导出这个环境的
+`osdk env`。
 
 **不带 `@` 时继承当前生效的 pin。** `-t java` 表示「这个项目选定的那个 Java」，按
 [工作目录解析优先级](../config/tool-selection#可配置的声明优先级)向上查找

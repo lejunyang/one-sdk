@@ -45,6 +45,35 @@ hook 在 prompt/目录变化时重新计算环境。PATH 顺序为：
 它还导出 backend 环境、下游缓存和已启用的模型 adapter。osdk 保存所有被管理变量
 的原值；`deactivate` 移除 hook 并恢复环境。PowerShell hook 带重入保护。
 
+### 没有 shell 钩子时
+
+IDE、CI 步骤、容器、计划任务和 `pwsh -NoProfile` 都不会运行钩子。shim 在持久 PATH
+上，所以命令本身仍按目录选对版本；缺的是钩子导出的变量——backend 环境
+（`JAVA_HOME`、`ANDROID_HOME`……）、下游缓存目录和模型 adapter——以及没有 shim 的
+命令。两个入口补上这部分，都与钩子共用同一份计算：
+
+```bash
+osdk env                           # dotenv，默认格式
+osdk env --format json
+osdk env --format bash             # 或 zsh、fish、powershell
+osdk exec -- cargo build           # 不带 --tool，在这个环境里运行
+```
+
+- **dotenv / json** 写出完整的 PATH，因为读文件的一方没法表达「在原 PATH 前追加」。
+  PATH 以激活之前的那份为基础，所以在已激活的 shell 里导出，也不会把别的目录的工具
+  写进文件。dotenv 的值不加引号：`docker --env-file` 会把引号当成值的一部分，而大多
+  数 dotenv 解析器会去掉它。含换行的值写不进 dotenv，会报错并提示改用 json。
+- **shell 格式**只做在原 PATH 前追加的 `export`，没有钩子的 `OSDK_ORIG_*` /
+  `OSDK_MANAGED_ENV` 簿记，适合在未激活的 shell 或 CI 脚本里执行一次，
+  例如 `eval "$(osdk env --format bash)"`。不要放进 rc 文件代替 `activate`：它不会
+  随目录切换。
+- **`osdk exec -- <命令>`** 不带 `--tool` 时什么都不安装，选中但未安装的工具会像在
+  激活的 shell 里一样报错，请先 `osdk install`。从已激活的 shell 调用时，外层激活设置
+  而当前目录不设置的变量，会恢复成激活前的值。带 `--tool` 时行为不变。
+
+导出的是**当前目录**的环境，项目选择随目录不同而不同；IDE 打开别的项目时需要重新
+导出。
+
 ### 挑选要生成的 shim
 
 默认给每个可执行文件都生成 shim。`[settings.shims]` 可以收窄范围：

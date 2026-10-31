@@ -60,7 +60,16 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_arg("tools", |a| a.help(h("help.install.arg.tools")))
             .mut_arg("opts", |a| a.help(h("help.opt")))
     })
-    .mut_subcommand("exec", |c| c.about(h("help.exec.about")))
+    .mut_subcommand("exec", |c| {
+        c.about(h("help.exec.about"))
+            .long_about(h("help.exec.long"))
+            .mut_arg("tools", |a| a.help(h("help.exec.flag.tool")))
+    })
+    .mut_subcommand("env", |c| {
+        c.about(h("help.env.about"))
+            .long_about(h("help.env.long"))
+            .mut_arg("format", |a| a.help(h("help.env.flag.format")))
+    })
     .mut_subcommand("completions", |c| c.about(h("help.completions.about")))
     .mut_subcommand("alias", |c| c.about(h("help.alias.about")))
     .mut_subcommand("list", |c| {

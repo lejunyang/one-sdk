@@ -2417,6 +2417,55 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.exec.long",
+        (
+            "Install the requested tools if needed and run a command with their exact \
+             environment.\n\nWithout --tool, run it with the environment an activated shell \
+             would have in this directory, installing nothing. Use this where no shell hook \
+             runs: IDE tasks, CI steps, scheduled jobs.\n\nEXAMPLES:\n  osdk exec --tool \
+             node@22 -- node -v\n  osdk exec -- cargo build",
+            "按需安装指定工具，并在它们的确切环境中运行命令。\n\n不带 --tool 时，使用激活的 \
+             shell 在当前目录下会有的环境运行，不安装任何东西。适用于没有 shell 钩子的场合：\
+             IDE 任务、CI 步骤、计划任务。\n\n示例：\n  osdk exec --tool node@22 -- node -v\n  \
+             osdk exec -- cargo build",
+        ),
+    );
+    m.insert(
+        "help.exec.flag.tool",
+        (
+            "Tool request to expose, repeatable (e.g. --tool node@20); omit to use this directory's own selection",
+            "要暴露的工具请求，可重复（如 --tool node@20）；省略则使用当前目录自己的选择",
+        ),
+    );
+    m.insert(
+        "help.env.about",
+        (
+            "Print the environment an activated shell would have here",
+            "打印激活的 shell 在此目录下会有的环境",
+        ),
+    );
+    m.insert(
+        "help.env.long",
+        (
+            "Print the environment an activated shell would have in this directory, for \
+             IDEs, CI, containers and scripts that run without a shell hook.\n\ndotenv and json \
+             spell out the complete PATH; the shell formats prepend to the existing one and \
+             are meant to be evaluated once, in a shell that is not activated.\n\nEXAMPLES:\n  \
+             osdk env > .env\n  osdk env --format json\n  eval \"$(osdk env --format bash)\"",
+            "打印激活的 shell 在当前目录下会有的环境，供没有 shell 钩子的 IDE、CI、容器和脚本\
+             使用。\n\ndotenv 和 json 写出完整的 PATH；shell 格式在现有 PATH 前追加，用于在未\
+             激活的 shell 里执行一次。\n\n示例：\n  osdk env > .env\n  osdk env --format json\n  \
+             eval \"$(osdk env --format bash)\"",
+        ),
+    );
+    m.insert(
+        "help.env.flag.format",
+        (
+            "Output format: dotenv|json|bash|zsh|fish|powershell",
+            "输出格式：dotenv|json|bash|zsh|fish|powershell",
+        ),
+    );
+    m.insert(
         "help.completions.about",
         ("Generate shell completion code", "生成 Shell 补全脚本"),
     );

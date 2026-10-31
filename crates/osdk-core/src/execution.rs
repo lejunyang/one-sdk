@@ -69,7 +69,10 @@ fn adapter(tool: &str) -> Option<(&'static [&'static str], Option<&'static str>)
 }
 
 /// An osdk activation's locator is output, not an ambient system choice.
-fn original_env(key: &str) -> Option<OsString> {
+///
+/// So a variable the activation manages reads as the value it captured before
+/// setting it -- `None` when there was none -- rather than its own output.
+pub fn original_env(key: &str) -> Option<OsString> {
     if std::env::var("OSDK_MANAGED_ENV")
         .unwrap_or_default()
         .split(',')

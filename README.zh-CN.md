@@ -137,6 +137,16 @@ Shell 激活也支持 zsh、fish 和 PowerShell。Fish 激活和撤销在可选�
 不会静默回退到系统可执行文件。需要完整命令说明时，运行 `osdk --help` 或
 `osdk <command> --help`。
 
+IDE、CI 步骤、容器和计划任务不会运行 shell 钩子。持久 PATH 上的 shim 已经能让它们
+用上正确的版本；如果还需要环境变量（`JAVA_HOME`、`ANDROID_HOME`、缓存目录），可以
+导出激活的 shell 会有的环境，或者直接在这个环境里运行命令：
+
+```bash
+osdk env > .env                    # dotenv，给 IDE 或 `docker --env-file`
+osdk env --format json             # 另有 bash、zsh、fish、powershell
+osdk exec -- ./gradlew build       # 不带 --tool：使用当前目录自己的选择
+```
+
 ## 场景：让项目工具链可复现
 
 在仓库中固定工具。普通项目级 `use` 会安装工具并同时更新 `osdk.toml` 与当前平台的

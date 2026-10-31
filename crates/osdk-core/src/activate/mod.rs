@@ -721,6 +721,95 @@ pub fn render_hook_env(shell: Shell, delta: &EnvDelta) -> String {
     out
 }
 
+/// Render `osdk env` output for a shell: the same environment as
+/// [`render_hook_env`], as plain exports.
+///
+/// The hook's bookkeeping (`OSDK_ORIGINAL_PATH`, `OSDK_ORIG_*`,
+/// `OSDK_MANAGED_ENV`) exists so the next prompt can replace what the last one
+/// set and `deactivate` can restore it. A script or CI step evaluates this
+/// once and never deactivates, and those markers would make a later
+/// activation in the same process believe it had already captured the
+/// originals. PATH is prepended to whatever the evaluating shell has.
+pub fn render_env_exports(shell: Shell, delta: &EnvDelta) -> String {
+    let mut out = String::new();
+    if !delta.path_prepend.is_empty() {
+        match shell {
+            Shell::Fish => out.push_str(&format!(
+                "set -gx PATH {} $PATH\n",
+                delta
+                    .path_prepend
+                    .iter()
+                    .map(|path| shell_quote(shell, &path.display().to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )),
+            Shell::Powershell => {
+                let joined = std::env::join_paths(&delta.path_prepend)
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                out.push_str(&format!(
+                    "$env:PATH = {} + [IO.Path]::PathSeparator + $env:PATH\n",
+                    powershell_quote(&joined)
+                ));
+            }
+            _ => {
+                let joined = delta
+                    .path_prepend
+                    .iter()
+                    .map(|path| posix_path(&path.display().to_string()))
+                    .collect::<Vec<_>>()
+                    .join(":");
+                out.push_str(&format!(
+                    "export PATH={}:\"$PATH\"\n",
+                    shell_quote(shell, &joined)
+                ));
+            }
+        }
+    }
+    for (key, value) in &delta.set_vars {
+        if valid_env_name(key) {
+            match shell {
+                Shell::Fish => {
+                    out.push_str(&format!("set -gx {key} {}\n", shell_quote(shell, value)))
+                }
+                Shell::Powershell => {
+                    out.push_str(&format!("$env:{key} = {}\n", powershell_quote(value)))
+                }
+                _ => out.push_str(&format!("export {key}={}\n", shell_quote(shell, value))),
+            }
+        }
+    }
+    out
+}
+
+/// The complete variables `delta` amounts to on top of `base_path`.
+///
+/// For consumers that read a file rather than evaluate a shell (an IDE's env
+/// file, `docker --env-file`, JSON), which cannot say "prepend to the existing
+/// PATH" and so need it spelled out in full.
+pub fn env_assignments(
+    delta: &EnvDelta,
+    base_path: &std::ffi::OsStr,
+) -> crate::Result<BTreeMap<String, String>> {
+    let mut vars: BTreeMap<String, String> = delta
+        .set_vars
+        .iter()
+        .filter(|(key, _)| valid_env_name(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let path = std::env::join_paths(
+        delta
+            .path_prepend
+            .iter()
+            .cloned()
+            .chain(std::env::split_paths(base_path)),
+    )
+    .map_err(|error| crate::error::Error::other(format!("cannot build PATH: {error}")))?;
+    vars.insert("PATH".into(), path.to_string_lossy().into_owned());
+    Ok(vars)
+}
+
 fn render_path_reset(shell: Shell, paths: &[PathBuf], out: &mut String) {
     match shell {
         Shell::Fish => {
@@ -1933,6 +2022,69 @@ mod tests {
             Some(&ctx.dirs.shims()),
             "closure commands are reached through the shims, which must lead"
         );
+    }
+
+    fn one_shot_delta() -> EnvDelta {
+        EnvDelta {
+            path_prepend: vec![
+                PathBuf::from("/osdk/shims"),
+                PathBuf::from("/osdk/node/bin"),
+            ],
+            set_vars: BTreeMap::from([
+                ("JAVA_HOME".into(), "/jdk's home".into()),
+                ("not a name".into(), "dropped".into()),
+            ]),
+            unset_vars: vec!["STALE".into()],
+        }
+    }
+
+    /// `osdk env` is evaluated once and never deactivated, so it carries the
+    /// hook's variables without the hook's bookkeeping, in every shell.
+    #[test]
+    fn env_exports_carry_the_hook_variables_without_its_bookkeeping() {
+        let delta = one_shot_delta();
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
+            let exports = render_env_exports(shell, &delta);
+            let hook = render_hook_env(shell, &delta);
+            assert!(hook.contains("OSDK_ORIGINAL_PATH"), "control: {hook}");
+            assert!(
+                !exports.contains("OSDK_"),
+                "{shell:?} exports activation bookkeeping: {exports}"
+            );
+            assert!(!exports.contains("dropped"), "{exports}");
+            assert!(!exports.contains("STALE"), "{exports}");
+        }
+        assert!(render_env_exports(Shell::Bash, &delta)
+            .contains(r#"export JAVA_HOME='/jdk'\''s home'"#));
+        assert!(render_env_exports(Shell::Powershell, &delta)
+            .contains("$env:JAVA_HOME = '/jdk''s home'"));
+        assert!(render_env_exports(Shell::Fish, &delta)
+            .contains("set -gx PATH '/osdk/shims' '/osdk/node/bin' $PATH"));
+        assert!(render_env_exports(Shell::Bash, &delta)
+            .ends_with("export JAVA_HOME='/jdk'\\''s home'\n"));
+        let no_path = EnvDelta {
+            path_prepend: Vec::new(),
+            ..one_shot_delta()
+        };
+        assert!(!render_env_exports(Shell::Bash, &no_path).contains("PATH"));
+    }
+
+    #[test]
+    fn env_assignments_spell_out_path_with_managed_entries_first() {
+        let delta = one_shot_delta();
+        let base = std::env::join_paths([PathBuf::from("/usr/bin")]).unwrap();
+        let vars = env_assignments(&delta, &base).unwrap();
+        assert_eq!(
+            std::env::split_paths(&vars["PATH"]).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/osdk/shims"),
+                PathBuf::from("/osdk/node/bin"),
+                PathBuf::from("/usr/bin"),
+            ]
+        );
+        assert_eq!(vars["JAVA_HOME"], "/jdk's home");
+        assert!(!vars.contains_key("not a name"), "{vars:?}");
+        assert!(!vars.contains_key("STALE"), "{vars:?}");
     }
 
     #[test]

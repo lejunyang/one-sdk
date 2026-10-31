@@ -349,6 +349,9 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
 }
 
 pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
+    if tools.is_empty() {
+        return exec_in_project_environment(app, &command);
+    }
     if super::system_exec::try_exec(app, &tools, &command).await? {
         return Ok(());
     }
@@ -417,6 +420,44 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         .envs(env)
         .status()
         .with_context(|| format!("running {}", managed_program.display()))?;
+    if !status.success() {
+        return Err(anyhow!("command exited with {status}"));
+    }
+    Ok(())
+}
+
+/// `osdk exec -- <command>` without `--tool`: run under the directory's own
+/// selection, exactly as an activated shell would.
+///
+/// This is the entry point for callers that have no shell hook -- an IDE task,
+/// a CI step, a scheduled job. Nothing is installed: a selected tool that is
+/// missing fails the way it does in an activated shell, instead of starting a
+/// download the caller never asked for.
+fn exec_in_project_environment(app: &App, command: &[String]) -> Result<()> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| anyhow!("exec requires a command"))?;
+    let cwd = std::env::current_dir()?;
+    let delta = super::maintenance::project_environment(app, &cwd)?;
+    // Built on the PATH from before any outer activation, so a shell that
+    // activated in another directory cannot leak that directory's tools in.
+    let env = osdk_core::activate::env_assignments(&delta, &osdk_core::execution::ambient_path())?;
+    let search: Vec<std::path::PathBuf> = std::env::split_paths(&env["PATH"]).collect();
+    let program = resolve_program_in_dirs(std::path::Path::new(program), &search);
+    let mut child = command_for_program(&program);
+    // What an outer activation set and this directory does not: back to the
+    // value it captured, as its own hook would restore it on `cd`.
+    for key in &delta.unset_vars {
+        match osdk_core::execution::original_env(key) {
+            Some(value) => child.env(key, value),
+            None => child.env_remove(key),
+        };
+    }
+    let status = child
+        .args(args)
+        .envs(&env)
+        .status()
+        .with_context(|| format!("running {}", program.display()))?;
     if !status.success() {
         return Err(anyhow!("command exited with {status}"));
     }

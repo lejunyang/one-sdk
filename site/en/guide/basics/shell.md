@@ -51,6 +51,44 @@ adapters. osdk stores the original value of every managed variable; `deactivate`
 removes the hook and restores that environment. The PowerShell hook prevents
 re-entrant command lookup.
 
+### Without a shell hook
+
+IDEs, CI steps, containers, scheduled jobs and `pwsh -NoProfile` never run the
+hook. Shims are on the persistent PATH, so the commands themselves still pick the
+right version for their directory; what is missing is what the hook exports --
+backend environment (`JAVA_HOME`, `ANDROID_HOME`, ...), downstream cache
+directories and model adapters -- plus any command without a shim. Two entry
+points supply it, both sharing the hook's own computation:
+
+```bash
+osdk env                           # dotenv, the default
+osdk env --format json
+osdk env --format bash             # or zsh, fish, powershell
+osdk exec -- cargo build           # without --tool, run under that environment
+```
+
+- **dotenv / json** spell out the complete PATH, since whoever reads a file
+  cannot say "prepend to the existing PATH". It is built on the PATH from before
+  any activation, so exporting from an activated shell does not write another
+  directory's tools into the file. dotenv values are unquoted: `docker --env-file`
+  keeps quotes as part of the value, while most dotenv parsers strip them. A
+  multi-line value cannot be written as dotenv and is refused with a pointer to
+  json.
+- **Shell formats** are plain `export`s that prepend to the existing PATH, without
+  the hook's `OSDK_ORIG_*` / `OSDK_MANAGED_ENV` bookkeeping. They are meant to be
+  evaluated once in a shell that is not activated or a CI script, e.g.
+  `eval "$(osdk env --format bash)"`. Do not put one in an rc file in place of
+  `activate`: it does not follow directory changes.
+- **`osdk exec -- <command>`** without `--tool` installs nothing; a selected tool
+  that is not installed fails just as it does in an activated shell, so run
+  `osdk install` first. Called from an activated shell, a variable the outer
+  activation set and this directory does not goes back to its pre-activation
+  value. With `--tool` the behavior is unchanged.
+
+The output is the environment of the **current directory**, and project
+selection differs between directories; export again when an IDE opens another
+project.
+
 ### Choosing which shims to generate
 
 Every executable gets a shim by default. `[settings.shims]` narrows that:

@@ -501,6 +501,184 @@ fn attestation_policy_cli_override_is_reported() {
         .contains("attestations = required"));
 }
 
+/// Variables `hook-env --shell bash` exports, minus the hook's own bookkeeping.
+fn hook_env_exports(root: &Path) -> std::collections::BTreeMap<String, String> {
+    let hook = run_isolated(root, &["hook-env", "--shell", "bash"]);
+    assert!(
+        hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+    String::from_utf8(hook.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("export "))
+        .filter_map(|assignment| assignment.split_once('='))
+        .filter(|(key, _)| *key != "PATH" && !key.starts_with("OSDK_"))
+        .map(|(key, value)| (key.to_string(), value.trim_matches('\'').to_string()))
+        .collect()
+}
+
+/// `osdk env` is the activated environment for callers without a hook, so its
+/// variables are checked against what `hook-env` itself exports rather than a
+/// list written down here: a layer dropped from one of them fails this test.
+#[test]
+fn env_prints_the_activated_environment_in_every_format() {
+    let temporary = tempfile::tempdir().unwrap();
+    let enabled = run_isolated(temporary.path(), &["model", "env", "enable", "huggingface"]);
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    let expected = hook_env_exports(temporary.path());
+    assert!(expected.contains_key("HF_ENDPOINT"), "{expected:?}");
+
+    let json = run_isolated(temporary.path(), &["env", "--format", "json"]);
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let json: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&json.stdout).unwrap();
+    for (key, value) in &expected {
+        assert_eq!(json.get(key), Some(value), "json lost `{key}`: {json:?}");
+    }
+    assert!(json.contains_key("PATH"), "{json:?}");
+
+    let dotenv = run_isolated(temporary.path(), &["env"]);
+    assert!(
+        dotenv.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dotenv.stderr)
+    );
+    let dotenv = String::from_utf8(dotenv.stdout).unwrap();
+    for (key, value) in &expected {
+        // Unquoted: `docker --env-file` would keep quotes as part of the value.
+        assert!(
+            dotenv.contains(&format!("\n{key}={value}\n"))
+                || dotenv.starts_with(&format!("{key}={value}\n")),
+            "{dotenv}"
+        );
+    }
+
+    let bash = run_isolated(temporary.path(), &["env", "--format", "bash"]);
+    let bash = String::from_utf8(bash.stdout).unwrap();
+    assert!(
+        bash.contains(&format!("export HF_ENDPOINT='{}'", expected["HF_ENDPOINT"])),
+        "{bash}"
+    );
+
+    for output in [
+        &json.keys().cloned().collect::<Vec<_>>().join("\n"),
+        &dotenv,
+        &bash,
+    ] {
+        assert!(
+            !output.contains("OSDK_ORIG") && !output.contains("OSDK_MANAGED_ENV"),
+            "a one-shot environment must not carry activation bookkeeping: {output}"
+        );
+    }
+}
+
+/// A file format cannot say "prepend to PATH", so it spells PATH out -- and
+/// must build it on the PATH from before an outer activation, or the other
+/// directory's tools would be written into the file for good.
+#[test]
+fn env_file_formats_build_path_on_the_pre_activation_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let original = temporary.path().join("original-bin");
+    let stale = temporary.path().join("stale-activation-bin");
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["env", "--format", "json"],
+        &[
+            ("PATH", &stale.display().to_string()),
+            ("OSDK_ORIGINAL_PATH_SET", "1"),
+            ("OSDK_ORIGINAL_PATH", &original.display().to_string()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let vars: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&output.stdout).unwrap();
+    let path: Vec<PathBuf> = std::env::split_paths(&vars["PATH"]).collect();
+    assert!(path.contains(&original), "{path:?}");
+    assert!(!path.contains(&stale), "{path:?}");
+}
+
+/// A shell the test can ask to print one variable, found on the host.
+fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str, String)>) {
+    #[cfg(windows)]
+    {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        (
+            "cmd".into(),
+            vec!["/D".into(), "/C".into(), format!("echo [%{name}%]")],
+            vec![("PATH", format!(r"{root}\System32")), ("SystemRoot", root)],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            "sh".into(),
+            vec!["-c".into(), format!("echo \"[${name}]\"")],
+            vec![("PATH", "/usr/bin:/bin".into())],
+        )
+    }
+}
+
+#[test]
+fn exec_without_a_tool_runs_in_the_activated_environment() {
+    let temporary = tempfile::tempdir().unwrap();
+    let enabled = run_isolated(temporary.path(), &["model", "env", "enable", "huggingface"]);
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    let endpoint = hook_env_exports(temporary.path())["HF_ENDPOINT"].clone();
+
+    let run = |name: &str, extra: &[(&str, &str)]| {
+        let (program, arguments, host) = print_variable_command(name);
+        let mut args = vec!["exec", "--no-deps", "--", program.as_str()];
+        args.extend(arguments.iter().map(String::as_str));
+        let mut env: Vec<(&str, &str)> = host.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        env.extend_from_slice(extra);
+        let output = run_isolated_in_with_env(temporary.path(), temporary.path(), &args, &env);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    assert!(run("HF_ENDPOINT", &[]).contains(&format!("[{endpoint}]")));
+    // A variable an earlier activation set and this directory does not goes
+    // back to what that activation captured, as its own hook would restore it:
+    // removed when it had captured nothing, the user's value when it had.
+    let managed = [
+        ("STALE_MANAGED", "from-elsewhere"),
+        ("OSDK_MANAGED_ENV", "STALE_MANAGED"),
+    ];
+    let removed = run("STALE_MANAGED", &managed);
+    assert!(!removed.contains("from-elsewhere"), "{removed}");
+    let mut restoring = managed.to_vec();
+    restoring.extend([
+        ("OSDK_ORIG_STALE_MANAGED", "users-own"),
+        ("OSDK_ORIG_STALE_MANAGED_PRESENT", "1"),
+        ("OSDK_ORIG_STALE_MANAGED_SET", "1"),
+    ]);
+    let restored = run("STALE_MANAGED", &restoring);
+    assert!(restored.contains("[users-own]"), "{restored}");
+}
+
 #[test]
 fn global_model_env_enable_force_and_disable_round_trip() {
     let temporary = tempfile::tempdir().unwrap();

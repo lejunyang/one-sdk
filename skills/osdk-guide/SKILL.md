@@ -100,6 +100,7 @@ GitHub Actions 中安装 osdk、恢复缓存并初始化项目环境时，读取
 | --- | --- |
 | `activate` | [reference/activate/guide.md](reference/activate/guide.md) |
 | `deactivate` | [reference/deactivate/guide.md](reference/deactivate/guide.md) |
+| `env` | [reference/env/guide.md](reference/env/guide.md) |
 | `completions` | [reference/completions/guide.md](reference/completions/guide.md) |
 | `hook-env`（隐藏内部命令） | [reference/hook-env/guide.md](reference/hook-env/guide.md) |
 | `help`（Clap 自动入口） | [reference/help/guide.md](reference/help/guide.md) |

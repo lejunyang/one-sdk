@@ -96,12 +96,18 @@ selector when a script needs a deterministic path.
 ## Temporary execution
 
 ```text
-osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
+osdk exec [(-t|--tool TOOL[@VERSION])...] -- COMMAND [ARG ...]
 ```
 
-At least one `-t/--tool` is required, and the option is repeatable. osdk installs
-the requested versions, then exposes their bins and environment to one child
-process. It neither changes project pins nor reads the lock.
+`-t/--tool` is repeatable. osdk installs the requested versions, then exposes
+their bins and environment to one child process. It neither changes project pins
+nor reads the lock.
+
+Without any `--tool`, the command runs with the environment an activated shell
+would have in this directory, and nothing is installed. This is the entry point
+for IDE tasks, CI steps and scheduled jobs that have no shell hook; see
+[Without a shell hook](./shell#without-a-shell-hook), which also covers
+`osdk env` for exporting that environment.
 
 **Without `@`, the operand inherits the pin in effect.** `-t java` means "the Java
 this project selected": osdk walks up for `osdk.toml`, `.tool-versions` and the

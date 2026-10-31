@@ -150,6 +150,17 @@ not installed, activation fails explicitly instead of silently falling back to a
 system executable. Run `osdk --help` or `osdk <command> --help` whenever you need
 the full command reference.
 
+IDEs, CI steps, containers and scheduled jobs run without the shell hook. Shims
+on the persistent PATH already pick the right version there; for the
+environment variables as well (`JAVA_HOME`, `ANDROID_HOME`, cache directories),
+export what an activated shell would have, or run a command under it:
+
+```bash
+osdk env > .env                    # dotenv for an IDE or `docker --env-file`
+osdk env --format json             # also bash, zsh, fish, powershell
+osdk exec -- ./gradlew build       # without --tool: this directory's own selection
+```
+
 ## Scenario: make a project toolchain reproducible
 
 Pin tools in the repository. A normal project `use` installs the tool and updates

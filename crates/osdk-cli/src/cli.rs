@@ -149,9 +149,12 @@ pub enum Command {
     },
 
     /// Install tools if needed and run a command with their exact environment.
+    ///
+    /// Without `--tool`, run it with the environment an activated shell would
+    /// have in this directory, for callers that have no shell hook.
     Exec {
-        /// Tool request to expose, repeatable (e.g. --tool node@20).
-        #[arg(short = 't', long = "tool", required = true)]
+        /// Tool request to expose, repeatable (e.g. --tool node@20). Omit to use the directory's own selection.
+        #[arg(short = 't', long = "tool")]
         tools: Vec<String>,
         /// Skip materializing declared `[deps]` for this command.
         #[arg(long = "no-deps")]
@@ -278,6 +281,15 @@ pub enum Command {
     Deactivate {
         /// Target shell.
         shell: String,
+    },
+
+    /// Print the environment an activated shell would have in this directory.
+    ///
+    /// For IDEs, CI, containers and scripts that run without a shell hook.
+    Env {
+        /// Output format.
+        #[arg(short, long, value_enum, default_value_t = EnvFormat::Dotenv)]
+        format: EnvFormat,
     },
 
     /// Internal: emit env changes for the current directory (used by activate).
@@ -1444,6 +1456,20 @@ pub enum PkgMirrorsCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// How `osdk env` writes the environment.
+///
+/// `dotenv` and `json` carry the complete `PATH`, since their consumers cannot
+/// reference the existing one; the shell formats prepend to it instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum EnvFormat {
+    Dotenv,
+    Json,
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

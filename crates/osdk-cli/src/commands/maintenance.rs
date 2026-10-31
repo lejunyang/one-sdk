@@ -292,7 +292,22 @@ pub fn deactivate(shell: String) -> Result<()> {
 pub fn hook_env(app: &App, shell: String) -> Result<()> {
     let sh: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
     let cwd = std::env::current_dir()?;
-    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, &cwd)?;
+    let delta = project_environment(app, &cwd)?;
+    print!("{}", osdk_core::activate::render_hook_env(sh, &delta));
+    Ok(())
+}
+
+/// The environment an activated shell has in `cwd`.
+///
+/// One function for every consumer -- the prompt hook, tasks, `osdk env` and a
+/// tool-less `osdk exec` -- so a process started without a shell hook sees
+/// exactly what an activated shell would, and none of them can quietly drop a
+/// layer the others keep.
+pub(crate) fn project_environment(
+    app: &App,
+    cwd: &std::path::Path,
+) -> Result<osdk_core::activate::EnvDelta> {
+    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, cwd)?;
     // Layer 2: downstream package caches (only vars the user hasn't set).
     let cache_vars = osdk_core::cache::cache_env(
         &app.ctx.dirs.cache,
@@ -306,8 +321,55 @@ pub fn hook_env(app: &App, shell: String) -> Result<()> {
     delta
         .unset_vars
         .retain(|key| !delta.set_vars.contains_key(key));
-    print!("{}", osdk_core::activate::render_hook_env(sh, &delta));
+    Ok(delta)
+}
+
+/// `osdk env`: print the directory's environment for a caller without a hook.
+pub fn env(app: &App, format: crate::cli::EnvFormat) -> Result<()> {
+    use crate::cli::EnvFormat;
+    use osdk_core::activate::Shell;
+    let cwd = std::env::current_dir()?;
+    let delta = project_environment(app, &cwd)?;
+    let shell = match format {
+        EnvFormat::Bash => Some(Shell::Bash),
+        EnvFormat::Zsh => Some(Shell::Zsh),
+        EnvFormat::Fish => Some(Shell::Fish),
+        EnvFormat::Powershell => Some(Shell::Powershell),
+        EnvFormat::Dotenv | EnvFormat::Json => None,
+    };
+    if let Some(shell) = shell {
+        print!("{}", osdk_core::activate::render_env_exports(shell, &delta));
+        return Ok(());
+    }
+    // A file format cannot refer to the PATH it is loaded into, so it gets the
+    // ambient one: an outer activation's entries are not baked in for good.
+    let vars = osdk_core::activate::env_assignments(&delta, &osdk_core::execution::ambient_path())?;
+    if format == EnvFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&vars)?);
+    } else {
+        print!("{}", render_dotenv(&vars)?);
+    }
     Ok(())
+}
+
+/// Render `KEY=VALUE` lines, unquoted.
+///
+/// Unquoted because readers disagree about quotes: `docker --env-file` keeps
+/// them as part of the value while most dotenv parsers strip them, so a quoted
+/// `PATH` would reach a container with literal quote characters in it. The
+/// one value that cannot be written unquoted is a multi-line one, and that is
+/// refused rather than truncated at the first newline.
+fn render_dotenv(vars: &std::collections::BTreeMap<String, String>) -> Result<String> {
+    let mut out = String::new();
+    for (key, value) in vars {
+        if value.contains(['\n', '\r']) {
+            return Err(anyhow!(
+                "`{key}` spans several lines, which a dotenv file cannot hold; use `osdk env --format json`"
+            ));
+        }
+        out.push_str(&format!("{key}={value}\n"));
+    }
+    Ok(out)
 }
 
 /// Compute the environment a task runs with.
@@ -324,15 +386,7 @@ pub(crate) fn task_environment(
     app: &App,
     cwd: &std::path::Path,
 ) -> Result<osdk_core::tasks::runner::TaskEnv> {
-    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, cwd)?;
-    let cache_vars = osdk_core::cache::cache_env(
-        &app.ctx.dirs.cache,
-        &|tool| app.ctx.config.settings.effective_override_env(tool),
-        |k| std::env::var(k).ok(),
-    );
-    delta.set_vars.extend(cache_vars);
-    let model_vars = osdk_core::model::env::configured_env(&app.ctx, |key| std::env::var(key).ok());
-    delta.set_vars.extend(model_vars);
+    let delta = project_environment(app, cwd)?;
     Ok(osdk_core::tasks::runner::TaskEnv {
         path_prepend: delta.path_prepend,
         set_vars: delta.set_vars,

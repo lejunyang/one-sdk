@@ -256,13 +256,14 @@ fn command_scopes(command: &Command) -> &'static [osdk_core::trust::Scope] {
             }
         }
         Command::Use { .. } | Command::Upgrade { .. } | Command::Lock { .. } => INSTALL,
-        Command::Exec { no_deps, .. } => {
-            if *no_deps {
-                INSTALL
-            } else {
-                INSTALL_DEPS
-            }
-        }
+        // Without `--tool` nothing is installed: it reads the same selection
+        // an activated shell's hook does, which needs no trust of its own.
+        Command::Exec { tools, no_deps, .. } => match (tools.is_empty(), *no_deps) {
+            (true, true) => NONE,
+            (true, false) => DEPS,
+            (false, true) => INSTALL,
+            (false, false) => INSTALL_DEPS,
+        },
         Command::Run {
             dry_run, no_deps, ..
         } => {
@@ -355,6 +356,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Activate { shell } => commands::activate(app, shell),
         Command::Deactivate { shell } => commands::deactivate(shell),
         Command::HookEnv { shell } => commands::hook_env(app, shell),
+        Command::Env { format } => commands::env(app, format),
         Command::Source { command } => commands::source(app, command).await,
         Command::Registry { command } => commands::registry(app, command).await,
         Command::Config { command } => commands::config(app, command),
@@ -473,6 +475,11 @@ mod tests {
                 &["exec", "--no-deps", "--tool", "node", "--", "node", "-v"],
                 &[Scope::Install],
             ),
+            // Without `--tool` exec installs nothing: it reads what hook-env reads.
+            (&["exec", "--", "node", "-v"], &[Scope::Deps]),
+            (&["exec", "--no-deps", "--", "node", "-v"], &[]),
+            (&["env"], &[]),
+            (&["env", "--format", "json"], &[]),
             // Run checks its own runner settings and, by default, deps. If the
             // selected task later needs a missing tool, that install scope is
             // checked immediately before acquisition.
