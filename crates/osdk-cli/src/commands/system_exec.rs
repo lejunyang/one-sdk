@@ -7,9 +7,9 @@ pub(super) async fn try_exec(
     app: &mut App,
     operands: &[String],
     command: &[String],
-) -> Result<bool> {
+) -> Result<Option<std::process::ExitStatus>> {
     if !execution::enabled(&app.ctx) {
-        return Ok(false);
+        return Ok(None);
     }
     let (program, args) = command
         .split_first()
@@ -69,7 +69,7 @@ pub(super) async fn try_exec(
         }
     }
     if systems.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if managed.iter().any(|r| r.backend.contains(':')) {
         anyhow::bail!("mixed system execution with dynamic package tools is unsupported; use explicit managed runtime versions for their recorded installation contracts");
@@ -233,8 +233,5 @@ pub(super) async fn try_exec(
         .envs(child_env)
         .status()
         .with_context(|| format!("running {}", executable.display()))?;
-    if !status.success() {
-        anyhow::bail!("command exited with {status}");
-    }
-    Ok(true)
+    Ok(Some(status))
 }

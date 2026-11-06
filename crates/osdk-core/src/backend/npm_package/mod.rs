@@ -245,7 +245,7 @@ impl NpmPackageBackend {
             .options
             .get(LOCKED_NPM_NODE_VERSION_OPTION)
             .cloned()
-            .or_else(|| selected_node_version(ctx))
+            .or_else(|| selected_node_version_for(ctx, scope))
             .ok_or_else(|| Error::other(crate::t!("err.npm_dynamic_managed_node_required")))?;
         let dependencies = vec![InstallDependency {
             kind: InstallDependencyKind::Runtime,
@@ -646,7 +646,9 @@ impl NpmPackageBackend {
                 versions.insert(candidate.version);
             }
         }
-        Ok(versions.into_iter().collect())
+        let mut versions: Vec<String> = versions.into_iter().collect();
+        crate::version::sort_installed_versions(&mut versions);
+        Ok(versions)
     }
 
     pub fn package(&self) -> &str {
@@ -1297,7 +1299,10 @@ impl Backend for NpmPackageBackend {
         let mut version =
             crate::npm::resolve_package_version(ctx, &sources, &self.package, self.id(), req)
                 .await?;
-        if let Some(node_version) = selected_node_version(ctx) {
+        let scope = self
+            .selected_scope(ctx, &version)?
+            .unwrap_or(ToolScope::Project);
+        if let Some(node_version) = selected_node_version_for(ctx, scope) {
             version
                 .options
                 .entry(LOCKED_NPM_NODE_VERSION_OPTION.into())
@@ -3130,6 +3135,38 @@ scope = "project"
             std::fs::read(temporary.path().join(NPM_LOCKFILE_NAME)).unwrap(),
             lockfile.as_bytes()
         );
+    }
+
+    #[test]
+    fn a_global_npm_tool_keeps_the_global_node_inside_a_project() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = offline_test_ctx(temporary.path());
+        for version in ["20.20.2", "22.23.4"] {
+            let root = ctx.dirs.install_path("node", version);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        }
+        // Merged view: the project's pin wins; the global layer keeps 22.
+        ctx.config.tools.insert("node".into(), "20".into());
+        ctx.config.global_tools.insert("node".into(), "22".into());
+
+        assert_eq!(
+            selected_node_version_for(&ctx, ToolScope::Project).as_deref(),
+            Some("20.20.2")
+        );
+        assert_eq!(
+            selected_node_version_for(&ctx, ToolScope::Global).as_deref(),
+            Some("22.23.4")
+        );
+        let backend = NpmPackageBackend::from_id("npm:cowsay").unwrap();
+        let identity = backend
+            .install_identity(
+                &ctx,
+                &ToolVersion::new("npm:cowsay", "1.6.0"),
+                ToolScope::Global,
+            )
+            .unwrap();
+        assert_eq!(exact_node_dependency(&identity), Some("22.23.4"));
     }
 
     fn offline_test_ctx(root: &Path) -> Ctx {

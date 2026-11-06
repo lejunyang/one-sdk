@@ -2,20 +2,31 @@
 
 use super::*;
 
-pub fn completions(shell: clap_complete::Shell) -> Result<()> {
+pub fn completions(shell: crate::cli::CompletionShell) -> Result<()> {
+    let shell = clap_complete::Shell::from(shell);
     const COMPLETION_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-    std::thread::Builder::new()
+    // Rendered into memory first: clap_complete panics on a failed write, so
+    // `osdk completions bash | head` used to end in "generator panicked".
+    let script = std::thread::Builder::new()
         .name("osdk-completions".into())
         .stack_size(COMPLETION_STACK_SIZE)
         .spawn(move || {
             use clap::CommandFactory;
             let mut command = crate::cli::Cli::command();
-            clap_complete::generate(shell, &mut command, "osdk", &mut std::io::stdout());
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut command, "osdk", &mut script);
+            script
         })
         .context("spawning shell completion generator")?
         .join()
-        .map_err(|_| anyhow!("shell completion generator panicked"))
+        .map_err(|_| anyhow!("shell completion generator panicked"))?;
+    use std::io::Write;
+    match std::io::stdout().lock().write_all(&script) {
+        // The reader stopped early; nothing is wrong with the script.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result.context("writing shell completions"),
+    }
 }
 
 pub fn list(app: &App, tool: Option<String>) -> Result<()> {
@@ -164,7 +175,26 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
                 osdk_core::execution::ExecutionTarget::Managed(active) => Some(active),
                 osdk_core::execution::ExecutionTarget::System(_) => None,
             })
-            .map(|active| (active.spec, Some(active.source)))
+            .map(|active| {
+                // An asdf / pyenv fallback runs when the first entry is not
+                // installed; show the one that runs.
+                let spec = if active.fallbacks.is_empty() {
+                    active.spec.clone()
+                } else {
+                    let installed = backend.list_installed(&app.ctx).unwrap_or_default();
+                    active.choose_installed(|spec| {
+                        osdk_core::version::installed_match(
+                            &app.ctx,
+                            backend.id(),
+                            spec,
+                            active.is_range,
+                            &installed,
+                        )
+                        .is_some()
+                    })
+                };
+                (spec, Some(active.source))
+            })
             .or_else(|| {
                 osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
                     .map(|request| (request.spec.to_string(), None))
@@ -308,6 +338,15 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
             requested_spec_literal(&tool).expect("explicit_spec is derived from the same operand");
         let selected = if backend.id() == "python" {
             osdk_core::backend::python::select_installed(&literal, &installed)
+        } else if backend.id() == "java" {
+            // `java@zulu-21`: within that distribution's installs.
+            osdk_core::version::installed_match(
+                &app.ctx,
+                "java",
+                &req.spec.to_string(),
+                false,
+                &installed,
+            )
         } else {
             let infos: Vec<_> = installed
                 .iter()
@@ -326,36 +365,33 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
             &app.ctx.config,
             backend.idiomatic_files(),
         )?
-        .map(|active| (active.spec, active.is_range))
+        .map(|active| {
+            let matches = |spec: &str| {
+                osdk_core::version::installed_match(
+                    &app.ctx,
+                    backend.id(),
+                    spec,
+                    active.is_range,
+                    &installed,
+                )
+            };
+            (
+                active.choose_installed(|spec| matches(spec).is_some()),
+                active.is_range,
+            )
+        })
         .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
         match resolved {
-            Some((spec, _is_range)) if backend.id() == "python" => {
-                osdk_core::backend::python::select_installed(&spec, &installed)
-                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
-            }
-            Some((spec, is_range)) => {
-                let parsed = if is_range {
-                    VersionSpec::parse_range(&spec).unwrap_or_else(|_| VersionSpec::parse(&spec))
-                } else {
-                    VersionSpec::parse(&spec)
-                };
-                match &parsed {
-                    VersionSpec::Exact(version)
-                        if installed.iter().any(|installed| installed == version) =>
-                    {
-                        version.clone()
-                    }
-                    _ => {
-                        let infos: Vec<_> = installed
-                            .iter()
-                            .map(osdk_core::version::VersionInfo::stable)
-                            .collect();
-                        osdk_core::version::select_version(&parsed, &infos)
-                            .map(|version| version.version.clone())
-                            .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
-                    }
-                }
-            }
+            // A configured `java = "temurin-21"` names its install `21.x`; the
+            // shared matcher strips the distribution, as the shim does.
+            Some((spec, is_range)) => osdk_core::version::installed_match(
+                &app.ctx,
+                backend.id(),
+                &spec,
+                is_range,
+                &installed,
+            )
+            .ok_or_else(|| anyhow!("{} is not installed", req.backend))?,
             None => installed
                 .into_iter()
                 .last()

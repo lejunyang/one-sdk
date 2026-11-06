@@ -25,5 +25,9 @@ osdk lock cargo:ripgrep@14 -o features=pcre2
 `install TOOL...` 仍是一次性安装。手动编辑 `[tools]` 后，或只想解析而不安装时，再显式
 运行 `osdk lock`。
 
+shim、激活、`exec`、`where`、`current` 运行的是 lock 记录的精确版本：项目声明（非全局）与
+lock 条目的请求文本一致时，收窄到该版本；请求已改（lock 过时）则按新声明选择。锁定版本未
+安装时报未安装，运行 `osdk install` 补齐。
+
 相关配置：`[tools]` 见 `reference/configuration/tools.md`。`model` 与 `skills` 有自己的
 锁定/同步命令，不由此命令处理。

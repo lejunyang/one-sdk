@@ -172,7 +172,12 @@ With no native source policy or explicit default, built-in npmjs and npmmirror c
 anonymously in parallel and the lowest-latency healthy endpoint wins. An
 explicit user/project list preserves order and selects the first healthy entry;
 project `[registries]` replaces the complete user section. Every eligible
-invocation probes afresh. If all candidates fail, the manager starts zero times.
+invocation probes afresh. When none is healthy but some candidate only failed to
+answer within the probe budget (`probe_timeout_ms`, 1500 ms by default), the first
+such candidate in order is used: the budget only ranks registries, is far shorter
+than the manager's own timeouts, and on a slow link every probe can expire while
+the registries work. If every candidate fails definitely (an HTTP error, a refused
+connection, a response that is not a registry), the manager starts zero times.
 Once it starts, failure is returned without switching and replaying scripts,
 lockfile writes, or `node_modules` changes.
 
@@ -342,7 +347,7 @@ proxy = "https://proxy.golang.org,direct"
 - `packages = "native"` preserves native registries, scopes, credentials, proxies and TLS configuration. `"osdk"` overrides only declared default/index settings; scopes and authentication stay native. Missing overrides preserve native behavior. Automatic mirrors never replace explicit native configuration. Complex uv native tables are conservatively preserved as a group, without rewriting named indexes or package bindings.
 - npm, pnpm, Yarn Classic, Yarn Berry and Bun use their own variables: `npm_config_registry`, `npm_config_registry` + `pnpm_config_registry` (pnpm 10/11), `YARN_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`, `BUN_CONFIG_REGISTRY`. Yarn's major must be known; a Node version is never interpreted as Yarn's major. pnpm resolves workspace configuration itself.
 - Both Python deps providers use uv. `default` is the lowest-priority default index; `indexes` supplies explicitly ordered additional indexes with `first-index` safety. These are not failure fallback mirrors. Keep named indexes, package bindings and credential interpolation in native configuration.
-- `urls` remains an anonymous mirror candidate list for the default source only. All-source failure stops before the manager starts. Installation failures never trigger automatic lifecycle-script retries. Offline mode skips probes; native offline flags constrain installation.
+- `urls` remains an anonymous mirror candidate list for the default source only. All-source failure stops before the manager starts (a candidate whose probe only timed out is still used, in order). Installation failures never trigger automatic lifecycle-script retries. Offline mode skips probes; native offline flags constrain installation.
 - `default = ""` clears an inherited osdk default override and disables automatic mirrors for that item; `indexes = []` clears osdk additional indexes. Neither deletes native settings. `urls = []` retains its built-in-candidate meaning.
 - Project `registries` replaces the user section. Explicit `extends` merges fields and replaces arrays. `[deps.<provider>.registries]` uses the same schema as a whole-section local replacement. Cargo, Deno and custom deps reject this local field; use native configuration or `env`. Go preserves GOPROXY comma/pipe behavior rather than inventing URL retries.
 - `osdk current` displays tool candidates and policy; `osdk deps --dry-run --explain` reports package decisions, discovered native candidate files and tool selection. The native manager resolves its effective configuration; unknown attribution is stated rather than invented. Native files, source environment and configuration participate in opaque freshness hashes. Credentials are excluded from displayed commands and osdk.lock; custom command arguments/environment are hidden entirely. Native subprocesses remain responsible for redacting their own output.

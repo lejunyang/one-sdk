@@ -40,7 +40,9 @@ A structured `[tools]` entry with `lazy = true` stays out of a no-argument
 install by default. `--include-lazy` includes all such entries. The flag is not
 needed for explicit operands: naming a tool is already an explicit request to
 install it. Runtime dependencies of an included tool are installed even when
-their own declaration is lazy.
+their own declaration is lazy. Until a lazy tool is installed, shell activation,
+`osdk env` and tool-less `osdk exec` leave it out instead of failing, since being
+absent is its normal state.
 
 See [Reproducible Lockfiles](../project/lockfiles) for the exact read/write matrix.
 Floating Rust channels such as `stable`, `beta`, and `nightly` are not frozen to
@@ -58,15 +60,23 @@ the nearest project configuration, creating `osdk.toml` in the current directory
 if none exists. `--global` updates user `config.toml`. An explicit prefix or
 channel is preserved; a bare tool stores the exact resolved version.
 
-`uninstall` normally expects an exact version. A prefix selects the last
-string-sorted installed match; other non-exact requests are rejected. Bare
+`uninstall` normally expects an exact version, which must be installed (`17.0.10`
+also names the install `17.0.10+7`; anything else is an error rather than a
+reported success). A prefix selects an installed
+version named exactly that, otherwise the newest installed version whose leading
+segments match (`go@1.2` never matches 1.22.x); other non-exact requests are
+rejected. Bare
 `rust` is the exception and removes `stable`. It asks for confirmation, so pass
 `--yes` in automation. When a regular dynamic tool is removed, osdk also removes
 any user-global pin and user lock entry that still select that version; project
 configuration and project locks are unchanged. Newly unreferenced CAS objects
-are collected afterward. Shell activation fails explicitly when a configured
-runtime is not installed instead of silently using a same-named command from the
-system PATH.
+are collected afterward. When a configured tool is not installed, shell
+activation does not silently use a same-named command from the system PATH: the
+prompt hook activates the other installed tools and prints, once above the prompt,
+`osdk: <dir>: not installed: node@20; the other tools are active. Run `osdk install`
+to install them` (once per directory and set of missing tools). `osdk env`, `osdk
+exec` without `--tool`, and tasks still fail, since they run unattended and must not
+get an environment with a tool missing.
 
 ## Inspect local and remote versions
 
@@ -126,8 +136,9 @@ osdk exec -t java -- ./gradlew build   # uses the project's pinned JDK
 
 `pnpx` routes to managed `pnpm dlx` and `bunx` to managed `bun x`; omitting the
 corresponding backend is an error. A package-manager invocation may run registry
-preflight before startup. Child failure makes osdk return an error, but exact
-numeric exit-code pass-through is not currently guaranteed.
+preflight before startup. osdk exits with the child's own exit code and adds no
+error line of its own, so `osdk exec -- cargo test; echo $?` sees the test runner's
+code.
 
 ## Version aliases
 
@@ -149,7 +160,10 @@ The CLI always edits user-global aliases. A project may define
 `[alias.tools.<tool>]` manually and override a global name. Alias chains are allowed;
 cycles are rejected. Names cannot be empty, contain whitespace or `@`, or use
 `latest`, `current`, `stable`, `system`, `lts`, `lts/*`, `lts-latest`, or any
-`lts/` or `lts-` prefix. Tool aliases are canonicalized before storage.
+`lts/` or `lts-` prefix. `alias set` also rejects names spelled like a version
+(`20`, `v20`, `20.1`), which would otherwise redirect that version everywhere, and
+`alias unset` fails for a name that is not defined. Tool aliases are canonicalized
+before storage.
 
 This kind of alias replaces a **version request** only. It is expanded by
 install/use/uninstall, activation, shim selection, and global npm-tool version

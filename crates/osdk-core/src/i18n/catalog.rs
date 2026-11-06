@@ -314,6 +314,34 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.hook_env_failed",
+        (
+            "osdk cannot activate {dir}: {error}. Run `osdk install` there to install its pinned tools",
+            "osdk 无法激活 {dir}：{error}。在该目录运行 `osdk install` 安装其固定的工具",
+        ),
+    );
+    m.insert(
+        "msg.registry_selected_unverified",
+        (
+            "no registry answered within the probe budget; using the first that timed out, with the package manager's own timeouts",
+            "没有 registry 在探测预算内响应；改用第一个超时的候选，由包管理器按自己的超时访问",
+        ),
+    );
+    m.insert(
+        "warn.activation_missing_tools",
+        (
+            "osdk: {dir}: not installed: {tools}; the other tools are active. Run `osdk install` to install them",
+            "osdk：{dir}：未安装 {tools}；其余工具已激活。运行 `osdk install` 安装",
+        ),
+    );
+    m.insert(
+        "warn.lock_requests_changed",
+        (
+            "warning: osdk.toml changed {changes} since osdk.lock was written; this install still uses the locked versions. Run `osdk lock` (or `osdk upgrade`) to re-resolve",
+            "警告：osdk.lock 写入后 osdk.toml 改动了 {changes}；本次安装仍使用 lock 中的版本。运行 `osdk lock`（或 `osdk upgrade`）重新解析",
+        ),
+    );
+    m.insert(
         "warn.lock_tools_missing",
         (
             "warning: the project declares {tools}, which osdk.lock does not pin, so this install skips them. Run `osdk lock` to add them",

@@ -161,7 +161,10 @@ probe_timeout_ms = 1500
 
 没有原生源策略、显式 default 或候选列表时，内置 npmmirror 与 npmjs 会并发匿名探测并选择延迟最低的健康项。
 显式项目/用户列表保留顺序，选择第一个健康项；项目 `[registries]` 整段覆盖用户层。
-所有候选失败时 manager 启动零次；启动后失败不会切源重跑，以免脚本、lockfile 或
+没有健康项、但有候选只是在探测预算（`probe_timeout_ms`，默认 1500 ms）内没有响应时，
+按候选顺序使用第一个超时的候选：探测预算只用来排序，远短于 manager 自己的超时，网络慢时
+所有探测都可能超时而源本身可用。所有候选都明确失败（HTTP 错误、连接被拒、响应不是 registry）
+时 manager 启动零次；启动后失败不会切源重跑，以免脚本、lockfile 或
 `node_modules` 被执行两次。
 
 osdk 会读取 `.npmrc`、`.yarnrc`、`.yarnrc.yml`、`bunfig.toml`/`.bunfig.toml`
@@ -312,7 +315,7 @@ proxy = "https://proxy.golang.org,direct"
 - `packages = "native"` 保留原生源、scope、认证、代理和 TLS 配置链；`"osdk"` 仅覆盖声明的默认源/附加索引，scope 与认证保持原生。缺少覆盖时委托原生配置；自动镜像不得覆盖显式原生配置。uv 的复杂原生表采用保守整组保留，不尝试重写命名索引或包绑定。
 - npm、pnpm、Yarn Classic、Yarn Berry、Bun 使用各自变量：`npm_config_registry`、`npm_config_registry` + `pnpm_config_registry`（pnpm 10/11）、`YARN_REGISTRY`、`YARN_NPM_REGISTRY_SERVER`、`BUN_CONFIG_REGISTRY`。Yarn major 必须已知；不会把 Node 版本当作 Yarn major。pnpm 工作区配置委托 pnpm 解析。
 - Python 两种 deps provider 都运行 uv。`default` 是最低优先级默认索引；`indexes` 是按声明顺序排列的显式附加索引，保留 `first-index`，不是请求失败后的镜像 fallback。命名索引、包绑定和认证插值继续放在原生配置。
-- `urls` 仍是只用于默认源的匿名镜像候选；全部不可用时在启动包管理器前失败，不在安装失败后重跑生命周期脚本。离线不探测，原生安装由其离线参数约束。
+- `urls` 仍是只用于默认源的匿名镜像候选；全部明确不可用时在启动包管理器前失败（只是探测超时的候选仍会按顺序使用），不在安装失败后重跑生命周期脚本。离线不探测，原生安装由其离线参数约束。
 - `default = ""` 清除继承的 osdk 默认覆盖并关闭该项自动镜像；`indexes = []` 清除 osdk 附加索引。两者不删除原生配置。`urls = []` 保留原来的内置候选含义。
 - 用户层到项目层的 `registries` 整段替换；显式 `extends` 按字段合并、数组替换。`[deps.<provider>.registries]` 使用相同 schema，作为该 provider 的整段局部替换。Cargo、Deno 和自定义 deps 不接受此局部字段；使用原生配置和 `env`。Go 保留 GOPROXY 的逗号/竖线语义，不统一成 URL 重试列表。
 - `osdk current` 显示工具选择来源及策略；`osdk deps --dry-run --explain` 显示包源决策、发现的原生候选文件和工具选择。原生链最终赢家由包管理器解析，不能确定的来源不会被声称已解析。原生文件、源相关环境及配置参与不透明 freshness 哈希；凭据不写入显示命令或 osdk.lock。自定义命令的参数和环境在显示中整体隐藏；原生子进程自己的输出由原生工具负责脱敏。

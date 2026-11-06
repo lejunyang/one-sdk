@@ -6,6 +6,37 @@ pub(crate) const GLOBAL_NPM_UNINSTALL_JOURNAL_DIR: &str = "transactions/global-n
 
 pub(crate) static NEXT_GLOBAL_NPM_UNINSTALL_FILE: AtomicU64 = AtomicU64::new(0);
 
+/// The installed version an `uninstall TOOL@PREFIX` names.
+///
+/// This was a plain string prefix over the listing's last match, so
+/// `uninstall go@1.2` could remove 1.22.5 and `pypi:httpie@3` removed 3.2.4
+/// rather than the install named exactly `3`. It now uses the shared selector
+/// the shims use: an exact identifier first, then whole-segment prefixes,
+/// newest first.
+pub(crate) fn installed_prefix_match(installed: &[String], prefix: &str) -> Option<String> {
+    let infos: Vec<_> = installed
+        .iter()
+        .map(osdk_core::version::VersionInfo::stable)
+        .collect();
+    osdk_core::version::select_version(&VersionSpec::Prefix(prefix.to_string()), &infos)
+        .map(|version| version.version.clone())
+}
+
+/// The installed version an exact `uninstall TOOL@VERSION` names: that exact
+/// name, or the one install of the same core with a build number
+/// (`17.0.10` -> `17.0.10+7`).
+pub(crate) fn installed_exact_match(installed: &[String], version: &str) -> Option<String> {
+    if installed.iter().any(|candidate| candidate == version) {
+        return Some(version.to_string());
+    }
+    let infos: Vec<_> = installed
+        .iter()
+        .map(osdk_core::version::VersionInfo::stable)
+        .collect();
+    osdk_core::version::select_version(&VersionSpec::Exact(version.to_string()), &infos)
+        .map(|found| found.version.clone())
+}
+
 pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
     let req = if global {
         resolve_explicit_request(
@@ -57,18 +88,46 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
         selected.version.clone()
     } else {
         match &req.spec {
-            VersionSpec::Exact(v) => v.clone(),
-            VersionSpec::Latest if backend.id() == "rust" => "stable".to_string(),
-            VersionSpec::Prefix(p) => {
-                // pick the installed version matching the prefix
-                let installed = backend.list_installed(&app.ctx)?;
-                installed
-                    .into_iter()
-                    .rfind(|v| v.starts_with(p.as_str()))
-                    .ok_or_else(|| {
-                        anyhow!(t!("err.no_installed_match", tool = req.backend, spec = p))
-                    })?
+            // `java@zulu-21` names a distribution's install, never another
+            // distribution's of the same number.
+            spec @ (VersionSpec::Exact(_) | VersionSpec::Prefix(_)) if backend.id() == "java" => {
+                let text = spec.to_string();
+                osdk_core::version::installed_match(
+                    &app.ctx,
+                    "java",
+                    &text,
+                    false,
+                    &backend.list_installed(&app.ctx)?,
+                )
+                .ok_or_else(|| {
+                    anyhow!(t!(
+                        "err.no_installed_match",
+                        tool = req.backend,
+                        spec = text
+                    ))
+                })?
             }
+            // Checked against what is installed: `uninstall node@99.0.0`
+            // printed "uninstalled" and exited 0, and `java@17.0.10` did the
+            // same while leaving the `17.0.10+7` install in place.
+            VersionSpec::Exact(v) => installed_exact_match(&backend.list_installed(&app.ctx)?, v)
+                // An interrupted install has no completion marker and so is
+                // not listed, but removing it is exactly what one wants.
+                .or_else(|| {
+                    app.ctx
+                        .dirs
+                        .install_path(backend.id(), v)
+                        .exists()
+                        .then(|| v.clone())
+                })
+                .ok_or_else(|| {
+                    anyhow!(t!("err.no_installed_match", tool = req.backend, spec = v))
+                })?,
+            VersionSpec::Latest if backend.id() == "rust" => "stable".to_string(),
+            VersionSpec::Prefix(p) => installed_prefix_match(&backend.list_installed(&app.ctx)?, p)
+                .ok_or_else(|| {
+                    anyhow!(t!("err.no_installed_match", tool = req.backend, spec = p))
+                })?,
             other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
         }
     };
@@ -1265,5 +1324,48 @@ pub(crate) fn with_uninstall_rollback(
             "global npm uninstall rollback failed: {rollback:#}"
         )),
         None => error,
+    }
+}
+
+#[cfg(test)]
+mod prefix_match_tests {
+    use super::installed_prefix_match;
+
+    #[test]
+    fn uninstall_exact_requires_an_install() {
+        use super::installed_exact_match;
+        let installed = ["17.0.10+7", "1.80.0", "stable"].map(String::from);
+        assert_eq!(
+            installed_exact_match(&installed, "17.0.10").as_deref(),
+            Some("17.0.10+7")
+        );
+        assert_eq!(
+            installed_exact_match(&installed, "1.80.0").as_deref(),
+            Some("1.80.0")
+        );
+        assert_eq!(installed_exact_match(&installed, "99.0.0"), None);
+        assert_eq!(installed_exact_match(&installed, "17.0.11"), None);
+    }
+
+    #[test]
+    fn uninstall_prefix_matches_whole_segments_and_prefers_an_exact_name() {
+        let installed = ["1.2.0", "1.22.5", "20.9.0", "20.20.2", "3", "3.2.4"].map(String::from);
+        // String-prefix matching took 1.22.5 for `1.2` and 20.x for `2`.
+        assert_eq!(
+            installed_prefix_match(&installed, "1.2").as_deref(),
+            Some("1.2.0")
+        );
+        assert_eq!(installed_prefix_match(&installed, "2"), None);
+        // An install named exactly `3` is what `@3` names.
+        assert_eq!(
+            installed_prefix_match(&installed, "3").as_deref(),
+            Some("3")
+        );
+        let mut sorted = installed.to_vec();
+        osdk_core::version::sort_installed_versions(&mut sorted);
+        assert_eq!(
+            installed_prefix_match(&sorted, "20").as_deref(),
+            Some("20.20.2")
+        );
     }
 }

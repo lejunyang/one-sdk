@@ -118,7 +118,13 @@ pub trait Backend: Send + Sync {
         let chosen = select_version(&req.spec, &versions).ok_or_else(|| Error::VersionResolve {
             tool: self.id().to_string(),
             spec: req.spec.to_string(),
-            hint: Some("no matching version found".into()),
+            // `select_version` applies no pre-release filter, so a miss here
+            // is a miss under any policy.
+            hint: Some(crate::version::no_match_hint(
+                &req.spec,
+                &versions,
+                crate::config::PrereleasePolicy::Allow,
+            )),
         })?;
         let mut tv = ToolVersion::new(self.id(), chosen.version.clone());
         tv.options = req.options.clone();
@@ -215,7 +221,7 @@ pub trait Backend: Send + Sync {
                 }
             }
         }
-        out.sort();
+        crate::version::sort_installed_versions(&mut out);
         Ok(out)
     }
 
@@ -455,5 +461,16 @@ mod tests {
             MockBackend.list_installed(&ctx).unwrap(),
             vec!["1.2.3", "Release-2026", "release%2F2026", "release/2026"]
         );
+
+        // Ascending by version, not lexically: selection takes the last match,
+        // and lexically 20.9.0 sorted after 20.20.2.
+        for version in ["20.9.0", "20.20.2", "20.10.0"] {
+            let install = dirs.install_path("mock", version);
+            std::fs::create_dir_all(&install).unwrap();
+            std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+        }
+        let installed = MockBackend.list_installed(&ctx).unwrap();
+        let numeric: Vec<_> = installed.iter().filter(|v| v.starts_with("20.")).collect();
+        assert_eq!(numeric, ["20.9.0", "20.10.0", "20.20.2"]);
     }
 }

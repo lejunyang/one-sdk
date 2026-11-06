@@ -109,7 +109,11 @@ fn system_target_pnpm_shim_selects_external_node_and_keeps_native_home() {
 }
 
 fn isolated_command(root: &Path, cwd: &Path) -> Command {
-    let mut command = Command::new(shim());
+    isolated_command_with(&shim(), root, cwd)
+}
+
+fn isolated_command_with(program: &Path, root: &Path, cwd: &Path) -> Command {
+    let mut command = Command::new(program);
     command
         .current_dir(cwd)
         .env_clear()
@@ -679,15 +683,154 @@ fn forwards_stdio_arguments_environment_and_exit_code() {
 }
 
 #[test]
-fn recursive_invocation_fails_before_resolution() {
+fn inherited_same_tool_marker_does_not_block_resolution() {
+    for name in ["node", "go"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = isolated_command(temporary.path(), temporary.path())
+            .arg(name)
+            .env("OSDK_SHIM_ACTIVE", name)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(output.status.code(), Some(126), "{name}: {stderr}");
+        assert!(!stderr.contains("recursive shim invocation"), "{stderr}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn same_tool_child_can_reenter_shim_in_another_project() {
     let temporary = tempfile::tempdir().unwrap();
-    let output = isolated_command(temporary.path(), temporary.path())
-        .args(["node"])
-        .env("OSDK_SHIM_ACTIVE", "node")
+    let root = temporary.path();
+    let parent = root.join("parent");
+    let child = root.join("child");
+    let shims = root.join("data/shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    std::os::unix::fs::symlink(shim(), shims.join("node")).unwrap();
+    for (project, version) in [(&parent, "1.0.0"), (&child, "2.0.0")] {
+        std::fs::create_dir_all(project).unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            format!(r#"{{"engines":{{"node":"{version}"}}}}"#),
+        )
+        .unwrap();
+        let script = if version == "1.0.0" {
+            format!("#!/bin/sh\nprintf 'parent:1\\n'\ncd '{}' || exit 1\nPATH='{}' exec /usr/bin/env node leaf\n", child.display(), shims.display())
+        } else {
+            "#!/bin/sh\nprintf 'child:2:%s\\n' \"$1\"\n/usr/bin/env\n".into()
+        };
+        write_executable(
+            &root.join(format!("installs/node/{version}/bin/node")),
+            &script,
+        );
+        std::fs::write(
+            root.join(format!("installs/node/{version}/.osdk-complete")),
+            b"",
+        )
+        .unwrap();
+    }
+    let output = isolated_command(root, &parent)
+        .arg("node")
+        .env("OSDK_SHIM_ACTIVE", "outer")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(126));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("recursive shim invocation"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("parent:1\nchild:2:leaf\n"), "{stdout}");
+    assert!(!stdout.contains("OSDK_SHIM_ACTIVE="), "{stdout}");
+}
+
+#[test]
+fn resolved_dispatcher_targets_are_refused_without_inherited_marker() {
+    for copy in [false, true] {
+        // The dispatcher runs from a copy inside the fixture. A hard link
+        // cannot cross volumes, and the system temp directory is often not on
+        // the build directory's (Windows CI keeps the workspace on D: and
+        // TEMP on C:). The fixture itself must stay out of the repository,
+        // whose own osdk.toml would otherwise apply as an ancestor config.
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let dispatcher = root
+            .join("osdk-bin")
+            .join(format!("osdk-shim{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir_all(dispatcher.parent().unwrap()).unwrap();
+        std::fs::copy(shim(), &dispatcher).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"engines":{"node":"1.0.0"}}"#).unwrap();
+        let install = root.join("installs/node/1.0.0");
+        let bin = if cfg!(windows) {
+            install.clone()
+        } else {
+            install.join("bin")
+        };
+        std::fs::create_dir_all(&bin).unwrap();
+        let target = bin.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+        if copy {
+            std::fs::copy(&dispatcher, &target).unwrap();
+        } else {
+            std::fs::hard_link(&dispatcher, &target).unwrap();
+        }
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+        let mut child = isolated_command_with(&dispatcher, root, root)
+            .arg("node")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // A recursion never ends; the bound only has to outlast a slow first
+        // run (macOS scans a freshly copied, unsigned binary before it starts).
+        let start = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none()
+            && start.elapsed() < std::time::Duration::from_secs(30)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if child.try_wait().unwrap().is_none() {
+            #[cfg(windows)]
+            let _ = Command::new("taskkill")
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                .status();
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("dispatcher target was executed recursively (copy={copy})");
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(126),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("recursive shim target"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_wrapper_target_is_refused_before_execution() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let project = root.join("project");
+    install_npm_fixture(
+        root,
+        &project,
+        "#!/bin/sh\nexit 0\n",
+        "#!/bin/sh\n# osdk-shim generated wrapper\nexit 42\n",
+    );
+    let output = isolated_command(root, &project)
+        .arg("node")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(126),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("recursive shim target"));
 }
 
 /// The shim directory must survive into the launched tool's PATH.
@@ -2567,4 +2710,45 @@ fn native_global_broken_selected_host_never_escapes_to_ambient_path() {
         assert!(output.stdout.is_empty());
         assert!(String::from_utf8_lossy(&output.stderr).contains("missing or not executable"));
     }
+}
+
+/// The shim runs the version `osdk.lock` recorded for the declaration, the
+/// one `osdk install` put there -- not the newest install that also matches.
+#[cfg(unix)]
+#[test]
+fn shim_runs_the_locked_version_of_a_project_declaration() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\nnode = \"1.0\"\n").unwrap();
+    let key = osdk_core::version::lock_pin::platform_key(osdk_core::platform::Platform::current());
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            "schema = 4\n[platforms.{key}.tools.node]\nrequest = \"1.0\"\nversion = \"1.0.0\"\n"
+        ),
+    )
+    .unwrap();
+    for version in ["1.0.0", "1.0.5"] {
+        write_executable(
+            &root.join(format!("installs/node/{version}/bin/node")),
+            &format!("#!/bin/sh\nprintf '{version}\n'\n"),
+        );
+        std::fs::write(
+            root.join(format!("installs/node/{version}/.osdk-complete")),
+            b"",
+        )
+        .unwrap();
+    }
+    let output = isolated_command(root, &project)
+        .arg("node")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1.0.0\n");
 }

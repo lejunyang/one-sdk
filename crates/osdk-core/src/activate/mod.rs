@@ -53,9 +53,27 @@ _osdk_hook() {{
   # Inside `osdk run`, the task already got its environment directly from the
   # runner. Re-running the hook here would re-derive PATH from the *config*,
   # discarding the per-task `env` and any tool the task just installed.
-  [[ -n "${{OSDK_TASK:-}}" ]] && return 0
+  if [[ -n "${{OSDK_TASK:-}}" ]]; then
+    # The marker is inherited by whatever the task starts, including shells
+    # and editors that outlive it, so it only holds inside the task's own
+    # project. Once this shell leaves it, it is an ordinary shell again.
+    local _osdk_root="${{OSDK_TASK_ROOT:-}}"
+    [[ -z "$_osdk_root" ]] && return 0
+    local _osdk_here="$PWD"
+    # Git Bash: compare both sides in one spelling. `cygpath -u` alone is not
+    # enough, since mounts such as /tmp give one directory two names.
+    if command -v cygpath >/dev/null 2>&1; then
+      _osdk_root="$(cygpath -m "$_osdk_root")"
+      _osdk_here="$(cygpath -m "$PWD")"
+    fi
+    case "$_osdk_here/" in "${{_osdk_root%/}}/"*) return 0 ;; esac
+    unset OSDK_TASK OSDK_TASK_NAME OSDK_TASK_ROOT
+  fi
   local out
-  out="$({bin} hook-env --shell bash 2>/dev/null)" && eval "$out"
+  # stderr is left on the terminal: when this directory cannot be activated
+  # (a pinned tool is not installed), the reason is shown instead of the
+  # environment silently staying as it was.
+  out="$({bin} hook-env --shell bash)" && eval "$out"
 }}
 if [[ ";${{PROMPT_COMMAND:-}};" != *";_osdk_hook;"* ]]; then
   PROMPT_COMMAND="_osdk_hook${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
@@ -69,9 +87,25 @@ _osdk_hook
 _osdk_hook() {{
   # See the bash branch: a task's environment comes from the runner, not from
   # re-deriving it here.
-  [[ -n "${{OSDK_TASK:-}}" ]] && return 0
+  if [[ -n "${{OSDK_TASK:-}}" ]]; then
+    # The marker is inherited by whatever the task starts, including shells
+    # and editors that outlive it, so it only holds inside the task's own
+    # project. Once this shell leaves it, it is an ordinary shell again.
+    local _osdk_root="${{OSDK_TASK_ROOT:-}}"
+    [[ -z "$_osdk_root" ]] && return 0
+    local _osdk_here="$PWD"
+    # Git Bash: compare both sides in one spelling. `cygpath -u` alone is not
+    # enough, since mounts such as /tmp give one directory two names.
+    if command -v cygpath >/dev/null 2>&1; then
+      _osdk_root="$(cygpath -m "$_osdk_root")"
+      _osdk_here="$(cygpath -m "$PWD")"
+    fi
+    case "$_osdk_here/" in "${{_osdk_root%/}}/"*) return 0 ;; esac
+    unset OSDK_TASK OSDK_TASK_NAME OSDK_TASK_ROOT
+  fi
   local out
-  out="$({bin} hook-env --shell zsh 2>/dev/null)" && eval "$out"
+  # stderr stays visible; see the bash branch.
+  out="$({bin} hook-env --shell zsh)" && eval "$out"
 }}
 typeset -ag precmd_functions
 if [[ -z ${{precmd_functions[(r)_osdk_hook]}} ]]; then
@@ -84,11 +118,19 @@ _osdk_hook
         Shell::Fish => format!(
             r#"# osdk shell integration (fish)
 function _osdk_hook --on-variable PWD --on-event fish_prompt
-  # See the bash branch.
+  # See the bash branch, including why the marker is bounded by its root.
   if set -q OSDK_TASK
-    return 0
+    if not set -q OSDK_TASK_ROOT
+      return 0
+    end
+    set -l _osdk_root (string trim -r -c / -- $OSDK_TASK_ROOT)
+    if test "$PWD" = "$_osdk_root"; or test (string sub -l (string length -- "$_osdk_root/") -- "$PWD/") = "$_osdk_root/"
+      return 0
+    end
+    set -e OSDK_TASK OSDK_TASK_NAME OSDK_TASK_ROOT
   end
-  {bin} hook-env --shell fish 2>/dev/null | source
+  # stderr stays visible; see the bash branch.
+  {bin} hook-env --shell fish | source
 end
 _osdk_hook
 "#,
@@ -102,8 +144,17 @@ function global:Invoke-OsdkHook {{
   # runner. Re-deriving it here would discard the per-task `env` and any tool
   # the task just installed -- and on a project whose config is untrusted it
   # would print a trust error into the task's own output.
-  if ($env:OSDK_TASK) {{ return }}
-  $out = & {bin} hook-env --shell powershell 2>$null
+  # The marker is inherited by whatever the task starts, including shells and
+  # editors that outlive it, so it only holds inside the task's own project.
+  if ($env:OSDK_TASK) {{
+    if (-not $env:OSDK_TASK_ROOT) {{ return }}
+    $osdkTaskRoot = $env:OSDK_TASK_ROOT.TrimEnd([char]92, [char]47)
+    $osdkHere = (Get-Location).ProviderPath
+    if ($osdkHere -ieq $osdkTaskRoot -or $osdkHere.StartsWith($osdkTaskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {{ return }}
+    Remove-Item Env:OSDK_TASK,Env:OSDK_TASK_NAME,Env:OSDK_TASK_ROOT -ErrorAction SilentlyContinue
+  }}
+  # stderr stays visible (see the bash branch); only stdout is evaluated.
+  $out = & {bin} hook-env --shell powershell
   if ($out) {{ Invoke-Expression ($out -join "`n") }}
 }}
 Invoke-OsdkHook
@@ -146,7 +197,9 @@ if (-not (Test-Path Variable:script:OsdkOriginalPrompt)) {{
 /// Render shell code that removes osdk's hook and restores the environment
 /// captured by [`render_hook_env`].
 pub fn deactivation_script(shell: Shell) -> String {
-    match shell {
+    let mut path = String::new();
+    render_path_update(shell, &[], &mut path);
+    let script = match shell {
         Shell::Bash => r#"# osdk shell deactivation (bash)
 if [ -n "${OSDK_MANAGED_ENV:-}" ]; then
   _osdk_saved_ifs=$IFS
@@ -166,13 +219,13 @@ if [ -n "${OSDK_MANAGED_ENV:-}" ]; then
   IFS=$_osdk_saved_ifs
   unset _osdk_saved_ifs _osdk_key _osdk_present
 fi
-if [ -n "${OSDK_ORIGINAL_PATH_SET+x}" ]; then export PATH="$OSDK_ORIGINAL_PATH"; fi
+@@OSDK_PATH@@
 PROMPT_COMMAND=";${PROMPT_COMMAND:-};"
 PROMPT_COMMAND="${PROMPT_COMMAND//;_osdk_hook;/;}"
 PROMPT_COMMAND="${PROMPT_COMMAND#;}"
 PROMPT_COMMAND="${PROMPT_COMMAND%;}"
 unset -f _osdk_hook 2>/dev/null || true
-unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET
+unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH OSDK_MISSING_WARNED
 "#
         .to_string(),
         Shell::Zsh => r#"# osdk shell deactivation (zsh)
@@ -190,10 +243,10 @@ if [[ -n ${OSDK_MANAGED_ENV:-} ]]; then
     unset "OSDK_ORIG_${_osdk_key}" "OSDK_ORIG_${_osdk_key}_PRESENT" "OSDK_ORIG_${_osdk_key}_SET"
   done
 fi
-if [[ -n ${OSDK_ORIGINAL_PATH_SET+x} ]]; then export PATH="$OSDK_ORIGINAL_PATH"; fi
+@@OSDK_PATH@@
 precmd_functions=(${precmd_functions:#_osdk_hook})
 unfunction _osdk_hook 2>/dev/null || true
-unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET
+unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH OSDK_MISSING_WARNED
 "#
         .to_string(),
         Shell::Fish => r#"# osdk shell deactivation (fish)
@@ -211,11 +264,9 @@ if set -q OSDK_MANAGED_ENV
   end
   set -e _osdk_key _osdk_original _osdk_present; or true
 end
-if set -q OSDK_ORIGINAL_PATH_SET
-  set -gx PATH $OSDK_ORIGINAL_PATH
-end
+@@OSDK_PATH@@
 functions -e _osdk_hook
-set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET; or true
+set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH OSDK_MISSING_WARNED; or true
 "#
         .to_string(),
         Shell::Powershell => r#"# osdk shell deactivation (powershell)
@@ -232,7 +283,7 @@ if (Test-Path Env:OSDK_MANAGED_ENV) {
     Remove-Item "Env:$original","Env:$present","Env:${original}_SET" -ErrorAction SilentlyContinue
   }
 }
-if (Test-Path Env:OSDK_ORIGINAL_PATH_SET) { $env:PATH = $env:OSDK_ORIGINAL_PATH }
+@@OSDK_PATH@@
 # Put the user's own prompt back. Deleting our wrapper without restoring what it
 # wrapped would leave the session with no prompt function at all, silently
 # discarding an Oh My Posh / Starship / dotfile prompt that we only borrowed.
@@ -247,10 +298,15 @@ if ((Test-Path Variable:script:OsdkOriginalPrompt) -and $script:OsdkOriginalProm
 $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = $null
 Remove-Item Function:\Invoke-OsdkHook -ErrorAction SilentlyContinue
 Remove-Variable OsdkHookRunning -Scope Script -ErrorAction SilentlyContinue
-Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET -ErrorAction SilentlyContinue
+Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET,Env:OSDK_ADDED_PATH,Env:OSDK_MISSING_WARNED -ErrorAction SilentlyContinue
 "#
         .to_string(),
-    }
+    };
+    script.replace(
+        "@@OSDK_PATH@@
+",
+        &path,
+    )
 }
 
 /// The env changes to apply for the active toolset in `cwd`.
@@ -264,15 +320,66 @@ pub struct EnvDelta {
     pub unset_vars: Vec<String>,
 }
 
+/// Whether `backend_id` is declared with `lazy = true` in the effective config.
+fn is_lazy_declaration(ctx: &Ctx, backend_id: &str) -> bool {
+    ctx.config.tool_configs.iter().any(|(key, entry)| {
+        entry.is_lazy()
+            && (key == backend_id
+                || crate::inventory::canonical_dynamic_id(key).ok().as_deref() == Some(backend_id))
+    })
+}
+
 /// Compute the env delta for the directory `cwd`: for each backend with an
 /// active + installed version, collect its bin dirs and exec env. Invalid
 /// dynamic-tool inventory aborts activation instead of producing a partial
 /// environment that could route around the configured tool.
+///
+/// A pinned tool that is not installed is an error here: `osdk env`, `exec`
+/// and tasks run unattended, and must not quietly fall back to whatever else
+/// is on PATH. The prompt hook uses [`compute_env_delta_allowing_missing`].
 pub fn compute_env_delta(
     ctx: &Ctx,
     registry: &Registry,
     cwd: &std::path::Path,
 ) -> crate::Result<EnvDelta> {
+    let (delta, missing) = compute_env_delta_allowing_missing(ctx, registry, cwd)?;
+    match missing.into_iter().next() {
+        Some(missing) => Err(crate::error::Error::other(crate::t!(
+            "err.no_installed_match",
+            tool = missing.tool,
+            spec = missing.spec
+        ))),
+        None => Ok(delta),
+    }
+}
+
+/// A pinned tool with no matching install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingTool {
+    pub tool: String,
+    pub spec: String,
+}
+
+impl std::fmt::Display for MissingTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.tool, self.spec)
+    }
+}
+
+/// [`compute_env_delta`] that activates what is installed and reports the
+/// pinned tools that are not.
+///
+/// For the prompt hook. A fresh clone before `osdk install`, or a `git pull`
+/// that moved `.nvmrc` to a version not yet installed, used to leave the whole
+/// directory unactivated: one missing tool took every other one off PATH with
+/// it. The caller warns about the missing ones instead.
+pub fn compute_env_delta_allowing_missing(
+    ctx: &Ctx,
+    registry: &Registry,
+    cwd: &std::path::Path,
+) -> crate::Result<(EnvDelta, Vec<MissingTool>)> {
+    let mut missing = Vec::new();
+    use crate::version::strip_distribution_prefix;
     let mut path_prepend = Vec::new();
     let mut system_paths = Vec::new();
     let mut set_vars = BTreeMap::new();
@@ -325,7 +432,28 @@ pub fn compute_env_delta(
         let active =
             match resolve_active_config(backend.id(), cwd, &ctx.config, backend.idiomatic_files())?
             {
-                Some(a) => Some((a.spec, a.is_range)),
+                Some(a) => {
+                    let installed = if a.fallbacks.is_empty() {
+                        Vec::new()
+                    } else {
+                        backend.list_installed(ctx).unwrap_or_default()
+                    };
+                    let spec = a.choose_installed(|candidate| {
+                        let candidate = ctx
+                            .config
+                            .expand_alias(backend.id(), candidate)
+                            .unwrap_or_else(|_| candidate.to_string());
+                        crate::version::installed_match(
+                            ctx,
+                            backend.id(),
+                            &candidate,
+                            a.is_range,
+                            &installed,
+                        )
+                        .is_some()
+                    });
+                    Some((spec, a.is_range))
+                }
                 None => dynamic_request
                     .as_ref()
                     .map(|request| (request.spec.to_string(), false)),
@@ -357,6 +485,14 @@ pub fn compute_env_delta(
                 };
                 if backend.id() == "python" {
                     crate::backend::python::select_installed(spec, &installed)
+                } else if backend.id() == "java" {
+                    // Within the requested distribution, not by version alone.
+                    crate::backend::java::select_installed(
+                        ctx,
+                        &expanded,
+                        active_is_range,
+                        &installed,
+                    )
                 } else {
                     match &parsed {
                         VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => {
@@ -373,14 +509,30 @@ pub fn compute_env_delta(
         };
         let version = match version {
             Some(v) => v,
+            // `lazy = true` means "install when a task or an explicit operand
+            // needs it", so being absent is its normal state. Treating that
+            // like a missing pin failed activation for the whole directory --
+            // this repository's own `bun = { lazy = true }` did -- and the
+            // prompt hook hid the error, so nothing else got activated either.
+            None if is_lazy_declaration(ctx, backend.id()) => continue,
             None => {
-                return Err(crate::error::Error::other(crate::t!(
-                    "err.no_installed_match",
-                    tool = backend.id(),
-                    spec = spec
-                )))
+                missing.push(MissingTool {
+                    tool: backend.id().to_string(),
+                    spec: spec.to_string(),
+                });
+                continue;
             }
         };
+        // An exact dynamic version skipped the installed listing above; a lazy
+        // one that was never installed is likewise absent, not invalid.
+        if dynamic_request.is_some()
+            && is_lazy_declaration(ctx, backend.id())
+            && !backend
+                .list_installed(ctx)
+                .is_ok_and(|installed| installed.contains(&version))
+        {
+            continue;
+        }
         let mut tv = ToolVersion::new(backend.id(), &version);
         let dynamic_install = if let Some(request) = dynamic_request.as_ref() {
             tv.options = request.options.clone();
@@ -445,11 +597,14 @@ pub fn compute_env_delta(
         .map(str::to_string)
         .collect();
 
-    Ok(EnvDelta {
-        path_prepend,
-        set_vars,
-        unset_vars,
-    })
+    Ok((
+        EnvDelta {
+            path_prepend,
+            set_vars,
+            unset_vars,
+        },
+        missing,
+    ))
 }
 
 fn trusted_project_npm_bin(ctx: &Ctx, cwd: &std::path::Path) -> crate::Result<Option<PathBuf>> {
@@ -669,10 +824,54 @@ fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
     }
 }
 
+/// The variable recording which missing-tool warning this shell has shown.
+pub const MISSING_WARNED_VAR: &str = "OSDK_MISSING_WARNED";
+
+/// Shell code that records (or, with `None`, clears) the missing-tool warning
+/// already shown, so the prompt hook names a missing tool once per directory
+/// instead of above every prompt.
+pub fn render_missing_warned(shell: Shell, value: Option<&str>) -> String {
+    match (shell, value) {
+        (Shell::Fish, Some(value)) => {
+            format!(
+                "set -gx {MISSING_WARNED_VAR} {}
+",
+                shell_quote(shell, value)
+            )
+        }
+        (Shell::Fish, None) => format!(
+            "set -e {MISSING_WARNED_VAR}; or true
+"
+        ),
+        (Shell::Powershell, Some(value)) => {
+            format!(
+                "$env:{MISSING_WARNED_VAR} = {}
+",
+                powershell_quote(value)
+            )
+        }
+        (Shell::Powershell, None) => {
+            format!(
+                "Remove-Item Env:{MISSING_WARNED_VAR} -ErrorAction SilentlyContinue
+"
+            )
+        }
+        (_, Some(value)) => format!(
+            "export {MISSING_WARNED_VAR}={}
+",
+            shell_quote(shell, value)
+        ),
+        (_, None) => format!(
+            "unset {MISSING_WARNED_VAR}
+"
+        ),
+    }
+}
+
 /// Render `hook-env` output: shell commands that prepend PATH and set vars.
 pub fn render_hook_env(shell: Shell, delta: &EnvDelta) -> String {
     let mut out = String::new();
-    render_path_reset(shell, &delta.path_prepend, &mut out);
+    render_path_update(shell, &delta.path_prepend, &mut out);
 
     for key in &delta.unset_vars {
         if valid_env_name(key) {
@@ -810,59 +1009,102 @@ pub fn env_assignments(
     Ok(vars)
 }
 
-fn render_path_reset(shell: Shell, paths: &[PathBuf], out: &mut String) {
+/// Replace the PATH entries the previous hook added, and nothing else.
+///
+/// The hook used to rebuild PATH from a copy captured at first activation
+/// (`OSDK_ORIGINAL_PATH`). Every later prompt then threw away whatever had
+/// changed since: a Python venv activated in the shell, a directory the user
+/// prepended, an entry an IDE added for the terminal it spawned. Only the
+/// entries osdk itself wrote are osdk's to replace, so they are recorded in
+/// `OSDK_ADDED_PATH` and the new set goes where the old one was -- a venv
+/// activated after osdk stays in front of osdk's Python. With nothing recorded
+/// (first activation) the new set is prepended.
+///
+/// An empty `paths` removes osdk's entries, which is also what deactivation
+/// does. A session activated by an older osdk is migrated by restoring its
+/// captured PATH once.
+fn render_path_update(shell: Shell, paths: &[PathBuf], out: &mut String) {
     match shell {
         Shell::Fish => {
             out.push_str(
-                "if not set -q OSDK_ORIGINAL_PATH_SET\n  set -gx OSDK_ORIGINAL_PATH $PATH\n  set -gx OSDK_ORIGINAL_PATH_SET 1\nend\n",
+                "if set -q OSDK_ORIGINAL_PATH_SET\n  set -gx PATH $OSDK_ORIGINAL_PATH\n  set -e OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET; or true\nend\n",
             );
-            if paths.is_empty() {
-                out.push_str("set -gx PATH $OSDK_ORIGINAL_PATH\n");
-            } else {
-                out.push_str(&format!(
-                    "set -gx PATH {} $OSDK_ORIGINAL_PATH\n",
-                    paths
-                        .iter()
-                        .map(|path| shell_quote(shell, &path.display().to_string()))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ));
+            out.push_str("set -l __osdk_new");
+            for path in paths {
+                out.push(' ');
+                out.push_str(&shell_quote(shell, &path.display().to_string()));
             }
+            out.push_str(
+                "\nset -l __osdk_out\nset -l __osdk_put 0\nfor __osdk_p in $PATH\n  if test -n \"$__osdk_p\"; and set -q OSDK_ADDED_PATH; and contains -- $__osdk_p $OSDK_ADDED_PATH\n    if test $__osdk_put = 0\n      set __osdk_put 1\n      set -a __osdk_out $__osdk_new\n    end\n    continue\n  end\n  set -a __osdk_out $__osdk_p\nend\nif test $__osdk_put = 0\n  set __osdk_out $__osdk_new $__osdk_out\nend\nset -gx PATH $__osdk_out\nif set -q __osdk_new[1]\n  set -gx OSDK_ADDED_PATH $__osdk_new\nelse\n  set -e OSDK_ADDED_PATH; or true\nend\nset -e __osdk_new __osdk_out __osdk_put __osdk_p; or true\n",
+            );
         }
         Shell::Powershell => {
             out.push_str(
-                "if (-not (Test-Path Env:OSDK_ORIGINAL_PATH_SET)) { $env:OSDK_ORIGINAL_PATH = $env:PATH; $env:OSDK_ORIGINAL_PATH_SET = '1' }\n",
+                "if (Test-Path Env:OSDK_ORIGINAL_PATH_SET) { $env:PATH = $env:OSDK_ORIGINAL_PATH; Remove-Item Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET -ErrorAction SilentlyContinue }\n",
             );
-            if paths.is_empty() {
-                out.push_str("$env:PATH = $env:OSDK_ORIGINAL_PATH\n");
-            } else {
-                let joined = std::env::join_paths(paths)
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                out.push_str(&format!(
-                    "$env:PATH = {} + [IO.Path]::PathSeparator + $env:OSDK_ORIGINAL_PATH\n",
-                    powershell_quote(&joined)
-                ));
-            }
+            let quoted = paths
+                .iter()
+                .map(|path| powershell_quote(&path.display().to_string()))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!("$osdkNewPath = [string[]]@({quoted})\n"));
+            out.push_str(concat!(
+                "$osdkSeparator = [IO.Path]::PathSeparator\n",
+                "$osdkOldPath = [string[]]@()\n",
+                "if (Test-Path Env:OSDK_ADDED_PATH) { $osdkOldPath = [string[]]@($env:OSDK_ADDED_PATH.Split($osdkSeparator) | Where-Object { $_ }) }\n",
+                "$osdkPathOut = [System.Collections.Generic.List[string]]::new()\n",
+                "$osdkPathPut = $false\n",
+                // Every entry of the user's PATH is kept exactly, empty ones
+                // included; only an empty PATH contributes none.
+                "foreach ($osdkPathEntry in $(if ($env:PATH) { $env:PATH.Split($osdkSeparator) } else { @() })) {\n",
+                "  if ($osdkPathEntry -and ($osdkOldPath -contains $osdkPathEntry)) {\n",
+                "    if (-not $osdkPathPut) { $osdkPathPut = $true; $osdkPathOut.AddRange($osdkNewPath) }\n",
+                "    continue\n",
+                "  }\n",
+                "  $osdkPathOut.Add($osdkPathEntry)\n",
+                "}\n",
+                "if (-not $osdkPathPut) { $osdkPathOut.InsertRange(0, $osdkNewPath) }\n",
+                "$env:PATH = $osdkPathOut -join $osdkSeparator\n",
+                "if ($osdkNewPath.Count) { $env:OSDK_ADDED_PATH = $osdkNewPath -join $osdkSeparator } else { Remove-Item Env:OSDK_ADDED_PATH -ErrorAction SilentlyContinue }\n",
+                "Remove-Variable osdkNewPath,osdkSeparator,osdkOldPath,osdkPathOut,osdkPathPut,osdkPathEntry -ErrorAction SilentlyContinue\n",
+            ));
         }
         _ => {
             out.push_str(
-                "if [ -z \"${OSDK_ORIGINAL_PATH_SET+x}\" ]; then export OSDK_ORIGINAL_PATH=\"$PATH\"; export OSDK_ORIGINAL_PATH_SET=1; fi\n",
+                "if [ -n \"${OSDK_ORIGINAL_PATH_SET+x}\" ]; then export PATH=\"$OSDK_ORIGINAL_PATH\"; unset OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET; fi\n",
             );
-            if paths.is_empty() {
-                out.push_str("export PATH=\"$OSDK_ORIGINAL_PATH\"\n");
+            let joined = paths
+                .iter()
+                .map(|path| posix_path(&path.display().to_string()))
+                .collect::<Vec<_>>()
+                .join(":");
+            out.push_str(&format!("_osdk_new={}\n", shell_quote(shell, &joined)));
+            // The only per-shell difference: splitting PATH on ':' without
+            // pathname expansion.
+            if shell == Shell::Zsh {
+                out.push_str("_osdk_parts=(\"${(@s.:.)PATH}\")\n");
             } else {
-                let joined = paths
-                    .iter()
-                    .map(|path| posix_path(&path.display().to_string()))
-                    .collect::<Vec<_>>()
-                    .join(":");
-                out.push_str(&format!(
-                    "export PATH={}:\"$OSDK_ORIGINAL_PATH\"\n",
-                    shell_quote(shell, &joined)
-                ));
+                out.push_str("IFS=: read -r -a _osdk_parts <<< \"$PATH\"\n");
             }
+            out.push_str(concat!(
+                "_osdk_old=\":${OSDK_ADDED_PATH-}:\"\n",
+                "_osdk_out=\n",
+                "_osdk_put=\n",
+                "for _osdk_p in \"${_osdk_parts[@]}\"; do\n",
+                "  if [ -n \"$_osdk_p\" ] && [ -n \"${OSDK_ADDED_PATH-}\" ]; then\n",
+                "    case \"$_osdk_old\" in\n",
+                "      *\":$_osdk_p:\"*)\n",
+                "        if [ -z \"$_osdk_put\" ]; then _osdk_put=1; [ -n \"$_osdk_new\" ] && _osdk_out=\"$_osdk_out:$_osdk_new\"; fi\n",
+                "        continue ;;\n",
+                "    esac\n",
+                "  fi\n",
+                "  _osdk_out=\"$_osdk_out:$_osdk_p\"\n",
+                "done\n",
+                "if [ -z \"$_osdk_put\" ] && [ -n \"$_osdk_new\" ]; then _osdk_out=\":$_osdk_new$_osdk_out\"; fi\n",
+                "export PATH=\"${_osdk_out#:}\"\n",
+                "if [ -n \"$_osdk_new\" ]; then export OSDK_ADDED_PATH=\"$_osdk_new\"; else unset OSDK_ADDED_PATH; fi\n",
+                "unset _osdk_new _osdk_parts _osdk_old _osdk_out _osdk_put _osdk_p\n",
+            ));
         }
     }
 }
@@ -967,18 +1209,47 @@ fn shell_quote(shell: Shell, s: &str) -> String {
     }
 }
 
+/// A PowerShell expression for `value`, written in ASCII only.
+///
+/// PowerShell decodes a native command's stdout with `[Console]::OutputEncoding`
+/// -- GBK by default on Chinese Windows -- while osdk writes UTF-8. So a
+/// non-ASCII path in `osdk activate pwsh` or `hook-env` output (an install
+/// under `C:\Users\张三`) reached `Invoke-Expression` as mojibake: the hook's
+/// `& '<osdk.exe>'` was "not recognized", PATH entries pointed nowhere, and
+/// activation silently did nothing. Non-ASCII characters are spelled as
+/// `[char]0x....` instead, which survives any console encoding and works in
+/// Windows PowerShell 5.1 and PowerShell 7 alike.
 fn powershell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-/// Strip a leading `<word>-` distribution prefix (java's temurin-17).
-fn strip_distribution_prefix(spec: &str) -> &str {
-    if let Some((left, right)) = spec.split_once('-') {
-        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphabetic()) && !right.is_empty() {
-            return right;
-        }
+    if value.is_ascii() {
+        return format!("'{}'", value.replace('\'', "''"));
     }
-    spec
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    for character in value.chars() {
+        if character.is_ascii() {
+            if character == '\'' {
+                literal.push('\'');
+            }
+            literal.push(character);
+            continue;
+        }
+        if !literal.is_empty() {
+            parts.push(format!("'{literal}'"));
+            literal.clear();
+        }
+        let code = u32::from(character);
+        parts.push(if code <= 0xFFFF {
+            format!("[char]0x{code:04X}")
+        } else {
+            format!("[char]::ConvertFromUtf32(0x{code:X})")
+        });
+    }
+    if !literal.is_empty() {
+        parts.push(format!("'{literal}'"));
+    }
+    // A leading `[char]` would make `+` add code points as numbers; starting
+    // from an empty string keeps every `+` a concatenation.
+    format!("(''+{})", parts.join("+"))
 }
 
 #[cfg(test)]
@@ -1027,6 +1298,80 @@ mod tests {
             client: reqwest::Client::new(),
             show_progress: false,
         }
+    }
+
+    #[test]
+    fn powershell_literals_are_ascii_whatever_the_value() {
+        assert_eq!(powershell_quote(r"C:\it's"), r"'C:\it''s'");
+        let quoted = powershell_quote(r"C:\Users\张三's 😀");
+        assert!(quoted.is_ascii(), "{quoted}");
+        assert_eq!(
+            quoted,
+            r"(''+'C:\Users\'+[char]0x5F20+[char]0x4E09+'''s '+[char]::ConvertFromUtf32(0x1F600))"
+        );
+    }
+
+    /// The form above only helps if PowerShell reads it back as the value.
+    /// Skipped without pwsh (Wine), like `powershell_snippets_survive_strict_mode`.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_literals_round_trip_through_pwsh() {
+        let Some(pwsh) = locate_pwsh() else {
+            eprintln!("skipping: no pwsh on PATH");
+            return;
+        };
+        let value = r"C:\Users\张三's dir\😀";
+        let script = format!(
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write({})",
+            powershell_quote(value)
+        );
+        let output = std::process::Command::new(pwsh)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("spawn pwsh");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), value);
+    }
+
+    #[test]
+    fn the_prompt_hook_does_not_discard_hook_env_errors() {
+        // Activation fails closed when a pinned tool is missing; with stderr
+        // thrown away that failure was invisible and the environment simply
+        // stayed as it was.
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
+            let script = activation_script(shell, "osdk");
+            let line = script
+                .lines()
+                .find(|line| line.contains("hook-env --shell"))
+                .unwrap_or_else(|| panic!("{shell:?} has no hook-env call"));
+            assert!(!line.contains("2>"), "{shell:?}: {line}");
+        }
+    }
+
+    #[test]
+    fn an_uninstalled_lazy_tool_does_not_fail_activation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut ctx = test_ctx(temporary.path(), &[("bun", "1.4.3")]);
+        let lazy: crate::config::ToolConfigEntry =
+            toml::from_str::<toml::Value>("bun = { version = \"1.4.3\", lazy = true }").unwrap()
+                ["bun"]
+                .clone()
+                .try_into()
+                .unwrap();
+        ctx.config.tool_configs.insert("bun".into(), lazy);
+
+        compute_env_delta(&ctx, &Registry::new(), &project)
+            .expect("a lazy tool is absent until something needs it");
+
+        // The same pin without `lazy` is still a hard error.
+        let eager = test_ctx(temporary.path(), &[("bun", "1.4.3")]);
+        assert!(compute_env_delta(&eager, &Registry::new(), &project).is_err());
     }
 
     #[test]
@@ -1099,7 +1444,11 @@ mod tests {
 
         let powershell =
             activation_script(Shell::Powershell, r"C:\Program Files\中文 osdk\osdk.exe");
-        assert!(powershell.contains(r"& 'C:\Program Files\中文 osdk\osdk.exe' hook-env"));
+        // ASCII-only, so it survives a non-UTF-8 console decoding it.
+        assert!(powershell.contains(
+            r"& (''+'C:\Program Files\'+[char]0x4E2D+[char]0x6587+' osdk\osdk.exe') hook-env"
+        ));
+        assert!(powershell.is_ascii());
         assert!(powershell.contains("$script:OsdkHookRunning"));
         assert!(powershell.contains("finally"));
         assert!(
@@ -1198,7 +1547,9 @@ mod tests {
     fn deactivation_snippets_remove_hooks_and_restore_path() {
         let bash = deactivation_script(Shell::Bash);
         assert!(bash.contains("unset -f _osdk_hook"));
-        assert!(bash.contains("PATH=\"$OSDK_ORIGINAL_PATH\""));
+        assert!(bash.contains(
+            "unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH"
+        ));
 
         let zsh = deactivation_script(Shell::Zsh);
         assert!(zsh.contains("precmd_functions"));
@@ -1305,6 +1656,297 @@ mod tests {
             .find(|candidate| candidate.is_file())
     }
 
+    /// The PATH sequence a user actually produces, run in each real shell that
+    /// is available: activate, prepend a venv by hand, change project, then
+    /// deactivate. The hook used to rebuild PATH from a copy captured at the
+    /// first prompt, so the venv vanished at the next one; and a session left
+    /// by that older hook must still migrate cleanly.
+    #[test]
+    fn hook_replaces_only_its_own_path_entries_in_real_shells() {
+        let (base, a1, a2, b1, user, legacy) = if cfg!(windows) {
+            (
+                [r"X:\base\one", r"X:\base\two"],
+                r"X:\osdk\a1",
+                r"X:\osdk\a2",
+                r"X:\osdk\b1",
+                r"X:\venv\Scripts",
+                r"X:\old\entry",
+            )
+        } else {
+            (
+                ["/base/one", "/base/two"],
+                "/osdk/a1",
+                "/osdk/a2",
+                "/osdk/b1",
+                "/venv/bin",
+                "/old/entry",
+            )
+        };
+        let delta = |paths: &[&str]| EnvDelta {
+            path_prepend: paths.iter().map(PathBuf::from).collect(),
+            set_vars: BTreeMap::new(),
+            unset_vars: Vec::new(),
+        };
+        let mut ran = Vec::new();
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
+            let Some(mut command) = test_shell(shell) else {
+                eprintln!("skipping {shell:?}: not available");
+                continue;
+            };
+            // POSIX shells on Windows (Git Bash) speak msys paths.
+            let spell = |value: &str| {
+                if matches!(shell, Shell::Bash | Shell::Zsh) {
+                    posix_path(value)
+                } else {
+                    value.to_string()
+                }
+            };
+            let sep = if cfg!(windows) && shell == Shell::Powershell {
+                ";"
+            } else {
+                ":"
+            };
+            let join = |items: &[&str]| {
+                items
+                    .iter()
+                    .map(|item| spell(item))
+                    .collect::<Vec<_>>()
+                    .join(sep)
+            };
+            let first = render_hook_env(shell, &delta(&[a1, a2]));
+            let second = render_hook_env(shell, &delta(&[b1]));
+            let undo = deactivation_script(shell);
+            let script = match shell {
+                Shell::Fish => format!(
+                    "function h1\n{first}\nend\nfunction h2\n{second}\nend\nfunction d\n{undo}\nend\n\
+                     set -gx PATH {b0} {b1x}\nh1\nset -gx PATH {user} $PATH\nh2\n\
+                     echo AFTER=(string join : $PATH)\nd\necho DEACT=(string join : $PATH)\n\
+                     set -gx OSDK_ORIGINAL_PATH {b0} {b1x}\nset -gx OSDK_ORIGINAL_PATH_SET 1\n\
+                     set -gx PATH {legacy} {b0} {b1x}\nh2\necho LEGACY=(string join : $PATH)\n",
+                    b0 = shell_quote(shell, base[0]),
+                    b1x = shell_quote(shell, base[1]),
+                    user = shell_quote(shell, user),
+                    legacy = shell_quote(shell, legacy),
+                ),
+                Shell::Powershell => format!(
+                    "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n\
+                     function h1 {{\n{first}\n}}\nfunction h2 {{\n{second}\n}}\nfunction d {{\n{undo}\n}}\n\
+                     $env:PATH = {base_q}\nh1\n$env:PATH = {user_q} + [IO.Path]::PathSeparator + $env:PATH\nh2\n\
+                     Write-Output \"AFTER=$env:PATH\"\nd\nWrite-Output \"DEACT=$env:PATH\"\n\
+                     $env:OSDK_ORIGINAL_PATH = {base_q}\n$env:OSDK_ORIGINAL_PATH_SET = '1'\n\
+                     $env:PATH = {legacy_q} + [IO.Path]::PathSeparator + {base_q}\nh2\nWrite-Output \"LEGACY=$env:PATH\"\n",
+                    base_q = powershell_quote(&join(&base)),
+                    user_q = powershell_quote(user),
+                    legacy_q = powershell_quote(legacy),
+                ),
+                _ => format!(
+                    "h1() {{\n{first}\n}}\nh2() {{\n{second}\n}}\nd() {{\n{undo}\n}}\n\
+                     export PATH={base_q}\nh1\nPATH={user_q}:\"$PATH\"\nh2\n\
+                     printf 'AFTER=%s\\n' \"$PATH\"\nd\nprintf 'DEACT=%s\\n' \"$PATH\"\n\
+                     export OSDK_ORIGINAL_PATH={base_q}\nexport OSDK_ORIGINAL_PATH_SET=1\n\
+                     PATH={legacy_q}:{base_q}\nh2\nprintf 'LEGACY=%s\\n' \"$PATH\"\n",
+                    base_q = shell_quote(shell, &join(&base)),
+                    user_q = shell_quote(shell, &spell(user)),
+                    legacy_q = shell_quote(shell, &spell(legacy)),
+                ),
+            };
+            match shell {
+                Shell::Powershell => {
+                    command.args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                }
+                Shell::Fish => command.args(["--no-config", "-c", &script]),
+                Shell::Zsh => command.args(["-f", "-c", &script]),
+                Shell::Bash => command.args(["--noprofile", "--norc", "-c", &script]),
+            };
+            let output = command.output().expect("spawn shell");
+            let stdout = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+            let line = |key: &str| {
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{shell:?} printed no {key}\nstdout:\n{stdout}\nstderr:\n{}",
+                            String::from_utf8_lossy(&output.stderr)
+                        )
+                    })
+                    .to_string()
+            };
+            // fish joins its list with ':' above whatever the platform.
+            let expect = |items: &[&str]| {
+                if shell == Shell::Fish {
+                    items.join(":")
+                } else {
+                    join(items)
+                }
+            };
+            assert_eq!(
+                line("AFTER="),
+                expect(&[user, b1, base[0], base[1]]),
+                "{shell:?}"
+            );
+            assert_eq!(
+                line("DEACT="),
+                expect(&[user, base[0], base[1]]),
+                "{shell:?}"
+            );
+            assert_eq!(
+                line("LEGACY="),
+                expect(&[b1, base[0], base[1]]),
+                "{shell:?}"
+            );
+            ran.push(shell);
+        }
+        eprintln!("ran in {ran:?}");
+    }
+
+    /// `OSDK_TASK` is inherited by everything a task starts, including an
+    /// editor or an interactive shell that outlives it. The hook used to stand
+    /// down on the bare marker, so such a shell never activated again in any
+    /// directory. Run in each real shell available: inside the task's root the
+    /// hook still stands down; outside it the hook runs and drops the markers.
+    #[test]
+    fn task_marker_only_holds_inside_the_task_root_in_real_shells() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temporary.path()).unwrap();
+        let project = root.join("project");
+        let inside = project.join("sub");
+        let outside = root.join("elsewhere");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let fake_sh = root.join("fake-osdk.sh");
+        std::fs::write(
+            &fake_sh,
+            "#!/bin/sh\ncase \"$3\" in fish) echo 'set -gx OSDK_HOOK_RAN 1' ;; *) echo 'export OSDK_HOOK_RAN=1' ;; esac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let fake_ps1 = root.join("fake-osdk.ps1");
+        std::fs::write(&fake_ps1, "Write-Output '$env:OSDK_HOOK_RAN = ''1'''\n").unwrap();
+
+        let mut ran = Vec::new();
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
+            let Some(mut command) = test_shell(shell) else {
+                eprintln!("skipping {shell:?}: not available");
+                continue;
+            };
+            let spell = |path: &std::path::Path| {
+                let text = path.display().to_string();
+                if matches!(shell, Shell::Bash | Shell::Zsh) {
+                    posix_path(&text)
+                } else {
+                    text
+                }
+            };
+            let script = match shell {
+                Shell::Powershell => format!(
+                    "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n\
+                     Set-Location -LiteralPath {inside}\n{activation}\n\
+                     Write-Output \"IN=$(if ($env:OSDK_HOOK_RAN) {{ 'ran' }} else {{ 'no' }}) TASK=$(if ($env:OSDK_TASK) {{ 'kept' }} else {{ 'gone' }})\"\n\
+                     Set-Location -LiteralPath {outside}\nInvoke-OsdkHook\n\
+                     Write-Output \"OUT=$(if ($env:OSDK_HOOK_RAN) {{ 'ran' }} else {{ 'no' }}) TASK=$(if ($env:OSDK_TASK) {{ 'kept' }} else {{ 'gone' }})\"\n",
+                    inside = powershell_quote(&inside.display().to_string()),
+                    outside = powershell_quote(&outside.display().to_string()),
+                    activation = activation_script(shell, &fake_ps1.display().to_string()),
+                ),
+                Shell::Fish => format!(
+                    "cd {inside}\n{activation}\n\
+                     if set -q OSDK_HOOK_RAN; set r ran; else; set r no; end\n\
+                     if set -q OSDK_TASK; set t kept; else; set t gone; end\necho IN=$r TASK=$t\n\
+                     cd {outside}\n_osdk_hook\n\
+                     if set -q OSDK_HOOK_RAN; set r ran; else; set r no; end\n\
+                     if set -q OSDK_TASK; set t kept; else; set t gone; end\necho OUT=$r TASK=$t\n",
+                    inside = shell_quote(shell, &inside.display().to_string()),
+                    outside = shell_quote(shell, &outside.display().to_string()),
+                    activation = activation_script(shell, &fake_sh.display().to_string()),
+                ),
+                _ => format!(
+                    "cd {inside}\n{activation}\n\
+                     echo \"IN=${{OSDK_HOOK_RAN:+ran}}${{OSDK_HOOK_RAN:-no}} TASK=${{OSDK_TASK:+kept}}${{OSDK_TASK:-gone}}\"\n\
+                     cd {outside}\n_osdk_hook\n\
+                     echo \"OUT=${{OSDK_HOOK_RAN:+ran}}${{OSDK_HOOK_RAN:-no}} TASK=${{OSDK_TASK:+kept}}${{OSDK_TASK:-gone}}\"\n",
+                    inside = shell_quote(shell, &spell(&inside)),
+                    outside = shell_quote(shell, &spell(&outside)),
+                    activation = activation_script(shell, &spell(&fake_sh)),
+                ),
+            };
+            match shell {
+                Shell::Powershell => {
+                    command.args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                }
+                Shell::Fish => command.args(["--no-config", "-c", &script]),
+                Shell::Zsh => command.args(["-f", "-c", &script]),
+                Shell::Bash => command.args(["--noprofile", "--norc", "-c", &script]),
+            };
+            command
+                .env("OSDK_TASK", "1")
+                .env("OSDK_TASK_NAME", "dev")
+                .env("OSDK_TASK_ROOT", &project)
+                .env_remove("OSDK_HOOK_RAN");
+            let output = command.output().expect("spawn shell");
+            let stdout = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+            let context = format!(
+                "{shell:?}\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // `${X:+ran}${X:-no}` prints `ran1` when set; only the prefix matters.
+            let field = |key: &str| {
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap_or_else(|| panic!("no {key}: {context}"))
+                    .to_string()
+            };
+            let inside_line = field("IN=");
+            let outside_line = field("OUT=");
+            assert!(
+                inside_line.starts_with("no") && inside_line.ends_with("TASK=kept1")
+                    || inside_line == "no TASK=kept",
+                "inside the task root the hook must stand down: {context}"
+            );
+            assert!(
+                outside_line.starts_with("ran") && outside_line.ends_with("TASK=gone"),
+                "outside the task root the hook must run and drop the marker: {context}"
+            );
+            ran.push(shell);
+        }
+        eprintln!("ran in {ran:?}");
+    }
+
+    /// A shell for [`hook_replaces_only_its_own_path_entries_in_real_shells`]:
+    /// `OSDK_TEST_<SHELL>` when set, else the usual name on PATH.
+    fn test_shell(shell: Shell) -> Option<std::process::Command> {
+        let (variable, name) = match shell {
+            Shell::Bash => ("OSDK_TEST_BASH", "bash"),
+            Shell::Zsh => ("OSDK_TEST_ZSH", "zsh"),
+            Shell::Fish => ("OSDK_TEST_FISH", "fish"),
+            Shell::Powershell => ("OSDK_TEST_PWSH", "pwsh"),
+        };
+        let program = std::env::var_os(variable).map(PathBuf::from).or_else(|| {
+            let path = std::env::var_os("PATH")?;
+            let file = if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_string()
+            };
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(&file))
+                .find(|candidate| candidate.is_file())
+                // `bash.exe` in System32 is the WSL launcher, not a shell here.
+                .filter(|candidate| {
+                    !candidate
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("system32")
+                })
+        })?;
+        Some(std::process::Command::new(program))
+    }
+
     #[test]
     fn hook_env_renders_path_and_vars() {
         let mut set_vars = BTreeMap::new();
@@ -1315,7 +1957,7 @@ mod tests {
             unset_vars: vec!["JAVA_HOME".into()],
         };
         let out = render_hook_env(Shell::Bash, &delta);
-        assert!(out.contains("export PATH='/x/go/bin':\"$OSDK_ORIGINAL_PATH\""));
+        assert!(out.contains("_osdk_new='/x/go/bin'"));
         assert!(out.contains("export GOROOT='/x/go'"));
         assert!(out.contains("unset JAVA_HOME"));
         assert!(out.contains("export OSDK_MANAGED_ENV='GOROOT'"));
@@ -1350,7 +1992,7 @@ mod tests {
             let out = render_hook_env(shell, &delta);
             let path_line = out
                 .lines()
-                .find(|line| line.starts_with("export PATH="))
+                .find(|line| line.starts_with("_osdk_new="))
                 .expect("a PATH line must be rendered");
             assert!(
                 path_line.contains("/e/osdk-data/data/shims"),
@@ -2046,7 +2688,7 @@ mod tests {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
             let exports = render_env_exports(shell, &delta);
             let hook = render_hook_env(shell, &delta);
-            assert!(hook.contains("OSDK_ORIGINAL_PATH"), "control: {hook}");
+            assert!(hook.contains("OSDK_ADDED_PATH"), "control: {hook}");
             assert!(
                 !exports.contains("OSDK_"),
                 "{shell:?} exports activation bookkeeping: {exports}"
@@ -2114,7 +2756,7 @@ mod tests {
             unset_vars: vec!["GOROOT".into()],
         };
         let out = render_hook_env(Shell::Bash, &delta);
-        assert!(out.contains("export PATH=\"$OSDK_ORIGINAL_PATH\""));
+        assert!(out.contains("_osdk_new=''"));
         assert!(out.contains("unset GOROOT"));
         assert!(out.contains("unset OSDK_MANAGED_ENV"));
     }

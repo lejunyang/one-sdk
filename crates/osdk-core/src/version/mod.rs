@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::error::{Error, Result};
 
+pub mod lock_pin;
 pub mod resolver;
 
 /// What the user asked for, before resolution against remote versions.
@@ -195,6 +196,40 @@ impl fmt::Display for ToolVersion {
     }
 }
 
+/// The installed version `spec` selects, the way the shim and activation pick
+/// one: python by its own rules, an exact name first, then the selector.
+pub fn installed_match(
+    ctx: &crate::backend::Ctx,
+    backend_id: &str,
+    spec: &str,
+    is_range: bool,
+    installed: &[String],
+) -> Option<String> {
+    if installed.is_empty() {
+        return None;
+    }
+    if backend_id == "python" {
+        return crate::backend::python::select_installed(spec, installed);
+    }
+    // A JDK is selected within its distribution, not by version alone.
+    if backend_id == "java" {
+        return crate::backend::java::select_installed(ctx, spec, is_range, installed);
+    }
+    let spec = strip_distribution_prefix(spec);
+    let parsed = if is_range {
+        VersionSpec::parse_range(spec).ok()?
+    } else {
+        VersionSpec::parse(spec)
+    };
+    if let VersionSpec::Exact(version) = &parsed {
+        if let Some(found) = installed.iter().find(|i| *i == version) {
+            return Some(found.clone());
+        }
+    }
+    let infos: Vec<_> = installed.iter().map(VersionInfo::stable).collect();
+    select_version(&parsed, &infos).map(|info| info.version.clone())
+}
+
 /// Select the best matching version string from a candidate list for a spec.
 ///
 /// `candidates` should be sorted ascending (oldest first). `is_stable` and
@@ -251,6 +286,117 @@ pub fn select_version<'a>(
                 .rev()
                 .find(|v| version_has_prefix(&v.version, want))
         }
+    }
+}
+
+/// Strip a leading `<word>-` distribution prefix: `temurin-17` -> `17`.
+///
+/// Installs are named by version alone, so every lookup of an installed
+/// version -- activation, the shim, `osdk where` -- has to drop it first. Only
+/// a left side of letters and `_` counts (Foojay ids such as
+/// `graalvm_community`, which SDKMAN's `-graalce` maps to), so `1.22` or
+/// `1.0-rc1` stay intact.
+pub fn strip_distribution_prefix(spec: &str) -> &str {
+    if let Some((left, right)) = spec.split_once('-') {
+        if left.starts_with(|c: char| c.is_ascii_alphabetic())
+            && left.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+            && !right.is_empty()
+        {
+            return right;
+        }
+    }
+    spec
+}
+
+/// Order two version strings oldest-first, the way a person reads them.
+///
+/// Installed-version listings came back sorted lexically, so `20.9.0` sorted
+/// after `20.20.2` and every "newest installed match" pick -- `node = "20"` in a
+/// shim, `osdk where node@20`, `osdk list` -- chose 20.9.0. Selection over a
+/// listing assumes ascending order, so listings sort with this.
+///
+/// Semver pairs use semver order. Anything else is compared in runs of digits
+/// (numerically) and non-digits (lexically); when one string is a prefix of the
+/// other, a tail starting with a letter or `-` is a pre-release and sorts first
+/// (`3.12.0rc1`, `1.0-rc1`), any other tail (`+11` build metadata, `.1`) last.
+pub fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if let (Ok(left), Ok(right)) = (semver::Version::parse(a), semver::Version::parse(b)) {
+        return left.cmp(&right).then_with(|| a.cmp(b));
+    }
+    fn runs(text: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let bytes = text.as_bytes();
+        for index in 1..=bytes.len() {
+            if index == bytes.len()
+                || bytes[index].is_ascii_digit() != bytes[index - 1].is_ascii_digit()
+            {
+                out.push(&text[start..index]);
+                start = index;
+            }
+        }
+        out
+    }
+    let (left, right) = (runs(a), runs(b));
+    for (x, y) in left.iter().zip(&right) {
+        let order = match (x.parse::<u128>(), y.parse::<u128>()) {
+            (Ok(x), Ok(y)) => x.cmp(&y),
+            _ => x.cmp(y),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    let tail_is_prerelease = |tail: Option<&&str>| {
+        tail.is_some_and(|tail| tail.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-'))
+    };
+    match left.len().cmp(&right.len()) {
+        Ordering::Equal => a.cmp(b),
+        Ordering::Less if tail_is_prerelease(right.get(left.len())) => Ordering::Greater,
+        Ordering::Less => Ordering::Less,
+        Ordering::Greater if tail_is_prerelease(left.get(right.len())) => Ordering::Less,
+        Ordering::Greater => Ordering::Greater,
+    }
+}
+
+/// Sort installed versions ascending and drop duplicates, as
+/// `Backend::list_installed` promises its callers.
+pub fn sort_installed_versions(versions: &mut Vec<String>) {
+    versions.sort_by(|a, b| compare_version_strings(a, b));
+    versions.dedup();
+}
+
+/// Why [`select_version_with_prerelease`] found nothing, for an error hint.
+///
+/// The hints this replaces each guessed a single cause -- "no version matched
+/// prerelease policy" for `deno@99`, "no matching version ships a x64 asset"
+/// for `node@abc` -- and sent the reader after the wrong one. This tells the
+/// two real cases apart: only pre-releases match (the policy is the cause), or
+/// nothing published matches at all (then the newest release is the useful
+/// fact). `candidates` is ascending, as the selector expects.
+pub fn no_match_hint(
+    spec: &VersionSpec,
+    candidates: &[VersionInfo],
+    policy: crate::config::PrereleasePolicy,
+) -> String {
+    use crate::config::PrereleasePolicy;
+    if policy != PrereleasePolicy::Allow
+        && select_version_with_prerelease(spec, candidates, PrereleasePolicy::Allow).is_some()
+    {
+        return "only pre-releases match; name one exactly or pass `--prerelease allow`".into();
+    }
+    match candidates
+        .iter()
+        .rev()
+        .find(|candidate| candidate.stable)
+        .or(candidates.last())
+    {
+        Some(newest) => format!(
+            "no published version matches; the newest is {}",
+            newest.version
+        ),
+        None => "the version index lists no versions".into(),
     }
 }
 
@@ -542,6 +688,95 @@ mod tests {
         assert_eq!(
             crate::dirs::sanitize_tool_id(&request.backend),
             std::path::PathBuf::from("npm/@antfu/ni")
+        );
+    }
+
+    #[test]
+    fn distribution_prefixes_strip_but_versions_stay_whole() {
+        assert_eq!(strip_distribution_prefix("temurin-17.0.10"), "17.0.10");
+        assert_eq!(strip_distribution_prefix("zulu-21"), "21");
+        assert_eq!(strip_distribution_prefix("1.0-rc1"), "1.0-rc1");
+        assert_eq!(strip_distribution_prefix("graalvm_community-21"), "21");
+        assert_eq!(strip_distribution_prefix("sap_machine-17.0.10"), "17.0.10");
+        assert_eq!(strip_distribution_prefix("_x-1"), "_x-1");
+        assert_eq!(strip_distribution_prefix("lts"), "lts");
+    }
+
+    #[test]
+    fn version_strings_order_numerically_with_prereleases_first() {
+        let mut versions: Vec<String> = [
+            "20.20.2",
+            "20.9.0",
+            "3",
+            "3.2.4",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "3.12.0",
+            "3.12.0rc1",
+            "21.0.5+11",
+            "21.0.5",
+            "1.0",
+            "1.0-rc1",
+            "stable",
+            "1.80.0",
+        ]
+        .map(String::from)
+        .to_vec();
+        sort_installed_versions(&mut versions);
+        assert_eq!(
+            versions,
+            [
+                "1.0-rc1",
+                "1.0",
+                "1.0.0-rc.1",
+                "1.0.0",
+                "1.80.0",
+                "3",
+                "3.2.4",
+                "3.12.0rc1",
+                "3.12.0",
+                "20.9.0",
+                "20.20.2",
+                "21.0.5",
+                "21.0.5+11",
+                "stable",
+            ]
+        );
+        // The pick that motivated it: newest installed 20.x.
+        let infos: Vec<_> = versions.iter().map(VersionInfo::stable).collect();
+        let picked = select_version(&VersionSpec::parse("20"), &infos).unwrap();
+        assert_eq!(picked.version, "20.20.2");
+    }
+
+    #[test]
+    fn no_match_hint_names_the_actual_cause() {
+        use crate::config::PrereleasePolicy;
+        let versions = vec![
+            vi("1.0.0", true, None),
+            vi("2.0.0", true, None),
+            vi("3.0.0-rc.1", false, None),
+        ];
+        let missing = no_match_hint(
+            &VersionSpec::parse("99"),
+            &versions,
+            PrereleasePolicy::IfExplicit,
+        );
+        assert_eq!(missing, "no published version matches; the newest is 2.0.0");
+        let only_pre = no_match_hint(
+            &VersionSpec::parse("3"),
+            &versions,
+            PrereleasePolicy::IfExplicit,
+        );
+        assert!(only_pre.contains("only pre-releases match"), "{only_pre}");
+        // Under `allow` a miss is a miss: blaming the policy would be wrong.
+        let allowed = no_match_hint(&VersionSpec::parse("4"), &versions, PrereleasePolicy::Allow);
+        assert!(
+            allowed.starts_with("no published version matches"),
+            "{allowed}"
+        );
+        assert!(
+            no_match_hint(&VersionSpec::Latest, &[], PrereleasePolicy::Allow)
+                .contains("no versions")
         );
     }
 

@@ -1722,7 +1722,9 @@ pub fn list_installed(
             versions.insert(identity.version.clone());
         }
     }
-    Ok(versions.into_iter().collect())
+    let mut versions: Vec<String> = versions.into_iter().collect();
+    crate::version::sort_installed_versions(&mut versions);
+    Ok(versions)
 }
 
 pub fn remove_exact_install(locator: &InstallLocator) -> Result<bool> {

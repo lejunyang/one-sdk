@@ -47,6 +47,7 @@ fn main() {
 }
 
 fn main_inner() {
+    exit_quietly_when_stdout_closes();
     // Phase 1: pick the language before building help, so `--help`/errors are
     // already localized. `--lang` is scanned from raw args; otherwise fall back
     // to OSDK_LANG / locale.
@@ -94,6 +95,37 @@ fn main_inner() {
             std::process::exit(1);
         }
     }
+}
+
+/// `osdk list-remote node | head -1` panicked with exit code 101 once `head`
+/// had closed the pipe: `println!` panics when stdout is gone. A reader that
+/// stopped reading is not an error, so this exits 0 without the panic report,
+/// as ripgrep does. Every other panic keeps the default report.
+fn exit_quietly_when_stdout_closes() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if is_closed_stdout_panic(message) {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
+}
+
+/// Whether a panic message is std's report of writing to a closed stdout.
+///
+/// Matched on the OS error code, not its text, which Windows localizes
+/// (`管道已结束。`): EPIPE on Unix, ERROR_BROKEN_PIPE / ERROR_NO_DATA on Windows.
+fn is_closed_stdout_panic(message: &str) -> bool {
+    message.starts_with("failed printing to stdout")
+        && ["(os error 32)", "(os error 109)", "(os error 232)"]
+            .iter()
+            .any(|code| message.contains(code))
 }
 
 fn native_exit_code(status: ExitStatus) -> i32 {
@@ -324,7 +356,9 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
         Command::Outdated { tools } => commands::outdated(app, tools).await,
         Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
-        Command::Exec { tools, command, .. } => commands::exec_cmd(app, tools, command).await,
+        Command::Exec { tools, command, .. } => {
+            return commands::exec_cmd(app, tools, command).await;
+        }
         Command::Run {
             task,
             dry_run,
@@ -560,6 +594,24 @@ mod tests {
                 args.join(" ")
             );
         }
+    }
+
+    #[test]
+    fn only_a_closed_stdout_is_a_quiet_exit() {
+        use super::is_closed_stdout_panic;
+        assert!(is_closed_stdout_panic(
+            "failed printing to stdout: 管道已结束。 (os error 232)"
+        ));
+        assert!(is_closed_stdout_panic(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        // Other stdout failures and ordinary panics keep their report.
+        assert!(!is_closed_stdout_panic(
+            "failed printing to stdout: Access is denied. (os error 5)"
+        ));
+        assert!(!is_closed_stdout_panic(
+            "index out of bounds (os error 232)"
+        ));
     }
 
     #[cfg(unix)]

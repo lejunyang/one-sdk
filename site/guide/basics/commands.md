@@ -35,7 +35,9 @@ osdk upgrade
 
 结构化 `[tools]` 条目可设置 `lazy = true`，使裸安装默认跳过它；
 `--include-lazy` 会把所有这类条目纳入安装。显式点名工具已经表达安装意图，因此不需要该
-开关。被纳入工具所需的 runtime 依赖即使自身标为 lazy，也仍会安装。
+开关。被纳入工具所需的 runtime 依赖即使自身标为 lazy，也仍会安装。lazy 工具在安装前，
+shell 激活、`osdk env` 与不带 `--tool` 的 `osdk exec` 会跳过它而不是报错，因为未安装正是
+它的常态。
 
 更精确的读写矩阵、跨平台区段和陈旧 lock 行为见[可复现锁文件](../project/lockfiles)。
 Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 不会被锁成具体发行版本；需要
@@ -52,12 +54,16 @@ osdk uninstall|rm TOOL@VERSION
 目录创建 `osdk.toml`。`--global` 改写用户 `config.toml`。显式输入的版本前缀或通道
 会原样保存；裸工具名则保存刚解析出的精确版本。
 
-`uninstall` 通常要求精确版本；前缀会从已安装版本中选择最后一个字符串排序匹配项，
-其他非精确请求会拒绝。裸 `rust` 是例外，会卸载 `stable`。该命令需要交互确认，
+`uninstall` 通常要求精确版本，且该版本必须已安装（`17.0.10` 也指代 `17.0.10+7` 这个安装；
+否则报错，而不是报告成功）；前缀优先选择名称恰好相同的已安装版本，否则选择前几段
+完全匹配的最新已安装版本（`go@1.2` 不会匹配 1.22.x），其他非精确请求会拒绝。裸 `rust` 是例外，会卸载 `stable`。该命令需要交互确认，
 自动化中应传 `--yes`。卸载普通动态工具时，若用户全局配置仍选择被删除的版本，
 osdk 会同步移除该全局 pin 与对应用户 lock 条目；项目配置和项目 lock 不变。卸载完成后
-会回收刚变为无引用的 CAS 对象。Shell 激活遇到已配置但未安装的运行时会明确失败，
-不会静默使用系统 PATH 上的同名命令。
+会回收刚变为无引用的 CAS 对象。Shell 激活遇到已配置但未安装的工具时，不会静默使用系统 PATH 上的同名命令：
+prompt hook 照常激活其余已安装的工具，并在提示符上方打印一次
+`osdk：<目录>：未安装 node@20；其余工具已激活。运行 `osdk install` 安装`（同一目录、
+同一组缺失工具只提示一次）。`osdk env`、不带 `--tool` 的 `osdk exec` 和任务仍会报错，
+因为它们在无人值守时运行，不应拿到缺了工具的环境。
 
 ## 查看本地与远程版本
 
@@ -111,8 +117,8 @@ osdk exec -t java -- ./gradlew build   # 用项目 pin 的 JDK，无需重复写
 ```
 
 `pnpx` 路由到受管 `pnpm dlx`，`bunx` 路由到受管 `bun x`；未声明对应 backend
-会报错。包管理器调用可能在启动前执行 Registry 预检。子命令失败会使 osdk 返回
-错误，但当前不保证原样透传其数值退出码。
+会报错。包管理器调用可能在启动前执行 Registry 预检。osdk 以子命令自己的退出码
+退出，不额外打印错误，因此 `osdk exec -- cargo test; echo $?` 看到的就是测试进程的退出码。
 
 ## 版本别名
 
@@ -133,7 +139,9 @@ osdk alias unset node maintenance
 CLI 始终在用户全局配置中编辑别名；项目也可手写 `[alias.tools.<tool>]` 并覆盖同名
 全局别名。别名可以链式引用，但循环会被拒绝。名称不能留空、包含空白或 `@`，
 也不能使用 `latest`、`current`、`stable`、`system`、`lts`、`lts/*`、
-`lts-latest` 以及任何 `lts/`、`lts-` 前缀。工具别名会规范化后保存，例如
+`lts-latest` 以及任何 `lts/`、`lts-` 前缀。`alias set` 还会拒绝形如版本号的名称
+（`20`、`v20`、`20.1`），否则它会在所有地方把该版本重定向；`alias unset` 删除不存在的
+名称时报错。工具别名会规范化后保存，例如
 `nodejs` 保存为 `node`。
 
 这类别名只替换**版本请求**：`install`、`use`、`uninstall`、激活、shim 选择与全局

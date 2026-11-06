@@ -3,7 +3,7 @@
 向 stdout 生成 shell 补全脚本。
 
 ```bash
-osdk completions <bash|elvish|fish|powershell|zsh>
+osdk completions <bash|elvish|fish|powershell|pwsh|zsh>
 ```
 
 命令不直接修改 shell 配置；把输出保存到对应 shell 的补全目录，或按 shell 规则 source。

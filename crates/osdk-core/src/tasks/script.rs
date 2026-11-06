@@ -622,10 +622,8 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
 
 /// A command that runs `command` through the platform shell.
 fn shell_command(command: &str) -> std::process::Command {
-    let shell = crate::tasks::runner::default_shell();
-    let mut child = std::process::Command::new(&shell[0]);
-    child.args(&shell[1..]).arg(command);
-    child
+    crate::tasks::runner::shell_command(&crate::tasks::runner::default_shell(), command)
+        .expect("the default shell names an interpreter")
 }
 
 fn parse_exec_request(

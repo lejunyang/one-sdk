@@ -8,7 +8,7 @@
 
 PowerShell 的包装会保留你已有的 `prompt`：激活时捕获当前 `prompt`（没有则用内置默认），在自己的 hook 之后调用它；`osdk deactivate powershell` 再把它装回去。因此 Oh My Posh、Starship 或自定义 `prompt` 都不会被顶掉。早期版本改用 `PostCommandLookupAction`，它在**每次命令查找**时触发，一个十次迭代的循环会重跑整套激活 22 次，已改为现在的提示符级 hook。
 
-每次 hook 调用都会执行 `osdk hook-env`。[`compute_env_delta`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L217) 遍历 backend，按当前目录重新解析版本，只选已安装版本，并收集真实 bin 目录与 backend 环境变量。随后 CLI 叠加共享包管理器缓存变量和已启用的模型 provider 环境。输出脚本先从保存的原始 `PATH` 重建 PATH，再恢复已不再受管的变量，最后设置本次变量，因此反复刷新不会持续堆叠路径。原始值通过 `OSDK_ORIGINAL_PATH*`、`OSDK_ORIG_<KEY>*` 和 `OSDK_MANAGED_ENV` 保存；[`deactivation_script`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L107) 据此恢复。
+每次 hook 调用都会执行 `osdk hook-env`。[`compute_env_delta`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L217) 遍历 backend，按当前目录重新解析版本，只选已安装版本，并收集真实 bin 目录与 backend 环境变量。随后 CLI 叠加共享包管理器缓存变量和已启用的模型 provider 环境。输出脚本把 `OSDK_ADDED_PATH` 记录的 PATH 条目原位替换为本次的条目（没有记录时前置），再恢复已不再受管的变量，最后设置本次变量，因此反复刷新不会持续堆叠路径。PATH 刻意不从首次激活时保存的副本重建：那份副本会丢掉之后的所有改动，例如在 shell 里激活的 venv。替换由 shell 自己完成，按 shell 自己的写法比较条目，因此 Git Bash 的 `/c/dir` 形式不需要转换回去；只有原生一侧的 `ambient_path` 需要同时解析两种写法。其他变量的原值通过 `OSDK_ORIG_<KEY>*` 和 `OSDK_MANAGED_ENV` 保存；仍带 `OSDK_ORIGINAL_PATH*` 的旧版本会话会先按它恢复一次再迁移；[`deactivation_script`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L107) 据此恢复。
 
 ## 解析顺序与 shim 优先级
 

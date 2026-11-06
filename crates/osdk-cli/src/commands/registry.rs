@@ -206,12 +206,15 @@ pub(crate) fn print_registry_plan(manager: PackageManager, plan: &RegistryPlan) 
         }
     }
     match plan {
-        RegistryPlan::Selected { url, .. } => {
+        RegistryPlan::Selected { url, probes } => {
             println!(
                 "  {:<12} {url} ({})",
                 t!("label.registry_selected"),
                 package_registry::registry_envs(manager).join(", ")
             );
+            if probes.iter().any(|probe| &probe.url == url && !probe.ok) {
+                println!("  {}", t!("msg.registry_selected_unverified"));
+            }
         }
         RegistryPlan::Unavailable { .. } => println!(
             "  {:<12} {}",

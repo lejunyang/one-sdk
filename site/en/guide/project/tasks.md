@@ -230,6 +230,16 @@ all four shells **stands down** when it sees `OSDK_TASK`. Otherwise the profile
 hook would re-derive the environment from the config inside the task, discarding
 the task's own `env` and any tool it had just installed.
 
+Standing down only applies inside the task's project (`OSDK_TASK_ROOT`).
+Everything the task starts inherits these variables, and some of it outlives the
+task: an editor it opened, tmux, an interactive shell. When such a shell `cd`s
+out of the project, the hook drops the `OSDK_TASK*` variables and activates as
+usual, instead of never activating again in any directory.
+
+A task's PATH is built on the inherited PATH minus the entries an outer
+activation added (`OSDK_ADDED_PATH`), as for `osdk exec` and `osdk env`;
+directories you added after activation, such as a venv, are kept.
+
 ## The fourth tier: embedded Lua
 
 The first three tiers cover the vast majority of tasks. When you genuinely need
@@ -503,6 +513,11 @@ $ osdk run test -- --nocapture
 # runs: cargo test --nocapture
 ```
 
+Each appended argument is quoted for the task's shell, as npm does, so
+`osdk run test -- "my file.txt"` arrives as one argument: single quotes for `sh`
+and `pwsh`, double quotes for `cmd` (which still expands `%VAR%` inside them and
+cannot carry an inner `"`; use an `argv` step for arbitrary values).
+
 The rule keys on "one command step", not on "`run` was written as a string", so
 `run = "cargo test"` and `run = ["cargo test"]` behave identically. Rewriting one
 into the other never silently stops arguments from being accepted.
@@ -678,6 +693,10 @@ Note that a developer machine may well *happen* to have `sh` on PATH — it can
 even be one of osdk's own shims — so a config that relies on it works locally
 and fails on a clean machine.
 
+cmd receives the step text exactly as written (as `cmd /s /c "<step>"`,
+the quoting Node uses for `shell: true`), so quotes in `run = 'echo "a b"'` are
+cmd's to interpret and are not backslash-escaped on the way in.
+
 To choose a different interpreter:
 
 ```toml
@@ -706,12 +725,13 @@ Tools already installed are selected without a network request. Missing tools
 are installed only when the task explicitly lists their `[tools]` keys; osdk
 does not parse commands or scripts to guess dependencies.
 
-osdk also sets two variables:
+osdk also sets three variables:
 
 | Variable | Meaning |
 | --- | --- |
 | `OSDK_TASK` | always `1`; marks the process as an osdk task |
 | `OSDK_TASK_NAME` | the current task's name |
+| `OSDK_TASK_ROOT` | the root of the task's project; the hook stands down only inside it |
 
 The first exists so an osdk activation hook in a shell profile can tell that the
 environment is already prepared and skip layering a second activation on top.

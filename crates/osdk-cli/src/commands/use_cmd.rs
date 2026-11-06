@@ -878,7 +878,7 @@ pub(crate) fn project_node_request(
     project_root: &std::path::Path,
 ) -> Result<ToolRequest> {
     let backend = app.registry.get("node")?;
-    let spec = osdk_core::version::resolver::resolve_active_config(
+    let spec = osdk_core::version::resolver::resolve_active_config_declared(
         "node",
         project_root,
         &app.ctx.config,
@@ -965,7 +965,7 @@ pub(crate) fn project_manager_request(
     project_root: &std::path::Path,
 ) -> Result<ToolRequest> {
     let backend = app.registry.get(manager)?;
-    let spec = osdk_core::version::resolver::resolve_active_config(
+    let spec = osdk_core::version::resolver::resolve_active_config_declared(
         manager,
         project_root,
         &app.ctx.config,

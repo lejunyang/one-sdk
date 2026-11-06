@@ -146,7 +146,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         };
         for id in &ids {
             if let Ok(backend) = app.registry.get(id) {
-                let selection = osdk_core::version::resolver::resolve_selection(
+                let selection = osdk_core::version::resolver::resolve_selection_declared(
                     id,
                     &entry.project.root,
                     &effective,
@@ -772,8 +772,12 @@ async fn ensure_tools_in_context(
         // replay authority. A host executable is never a portable lock entry.
         if !item.plan.frozen && pinned.is_none() && osdk_core::execution::enabled(&app.ctx) {
             if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
-                osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &item.project.root)?
-                    .target
+                osdk_core::execution::resolve_declared(
+                    &app.ctx,
+                    backend.as_ref(),
+                    &item.project.root,
+                )?
+                .target
             {
                 ready.push(ReadyTool {
                     id: required.id.into(),
@@ -787,7 +791,7 @@ async fn ensure_tools_in_context(
             }
         }
         if required.role == ToolRole::Runtime {
-            if let Some(active) = osdk_core::version::resolver::resolve_active_config(
+            if let Some(active) = osdk_core::version::resolver::resolve_active_config_declared(
                 required.id,
                 &item.project.root,
                 &app.ctx.config,

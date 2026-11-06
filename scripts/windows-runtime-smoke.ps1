@@ -103,7 +103,7 @@ try {
     Get-ChildItem Env: |
         Where-Object {
             $_.Name -like 'OSDK_ORIG_*' -or
-            $_.Name -in @('OSDK_ORIGINAL_PATH', 'OSDK_ORIGINAL_PATH_SET', 'OSDK_MANAGED_ENV')
+            $_.Name -in @('OSDK_ORIGINAL_PATH', 'OSDK_ORIGINAL_PATH_SET', 'OSDK_ADDED_PATH', 'OSDK_MANAGED_ENV')
         } |
         ForEach-Object { Remove-Item ("Env:" + $_.Name) }
 

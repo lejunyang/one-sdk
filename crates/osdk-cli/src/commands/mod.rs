@@ -1589,6 +1589,122 @@ tools = ["node"]
     }
 
     #[test]
+    fn an_npm_install_on_another_node_does_not_satisfy_the_request() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[tools]
+node = \"20\"
+",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let app = app_with_config(&temporary, config);
+        for node in ["20.20.2", "22.1.0"] {
+            let root = app.ctx.dirs.install_path("node", node);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        }
+        let backend = app.registry.get("npm:cowsay").unwrap();
+        let mut request = ToolRequest::parse("npm:cowsay@1").unwrap();
+        mark_isolated_npm_scope(std::slice::from_mut(&mut request));
+        request.options.insert(
+            osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+            "20.20.2".into(),
+        );
+        // Same public options as the request, so only scope and Node differ.
+        let options = osdk_core::tool::dynamic_identity_options(
+            &osdk_core::tool::ToolId::parse("npm:cowsay").unwrap(),
+            &request.options,
+        )
+        .unwrap()
+        .into_map();
+        // Another project installed the same package on node 22. This one
+        // selects node 20, so that install is not the one it would run.
+        let identity = osdk_core::tool::InstallIdentity::new(
+            "npm:cowsay",
+            "1.6.0",
+            app.ctx.platform.to_string(),
+            osdk_core::tool::InstallScope::Isolated,
+            &options,
+            vec![osdk_core::tool::InstallDependency {
+                kind: osdk_core::tool::InstallDependencyKind::Runtime,
+                id: "node".into(),
+                version: "22.1.0".into(),
+                identity: None,
+            }],
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let root = osdk_core::dirs::InstallLocator::new(&app.ctx.dirs, identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
+        std::fs::create_dir_all(&root).unwrap();
+        osdk_core::inventory::DynamicToolManifest::from_identity(identity)
+            .unwrap()
+            .write_atomic(&root)
+            .unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+
+        assert!(installed_dynamic_match(&app, backend.as_ref(), &request).is_none());
+        // ...while the matching project install on node 20 does satisfy it.
+        let expected = backend
+            .dynamic_install_identity(&app.ctx, &{
+                let mut version = ToolVersion::new("npm:cowsay", "1.6.0");
+                version.options = request.options.clone();
+                version
+            })
+            .unwrap()
+            .unwrap();
+        let project_root = osdk_core::dirs::InstallLocator::new(&app.ctx.dirs, expected.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
+        std::fs::create_dir_all(&project_root).unwrap();
+        osdk_core::inventory::DynamicToolManifest::from_identity(expected)
+            .unwrap()
+            .write_atomic(&project_root)
+            .unwrap();
+        std::fs::write(project_root.join(".osdk-complete"), b"").unwrap();
+        assert!(installed_dynamic_match(&app, backend.as_ref(), &request).is_some());
+    }
+
+    #[test]
+    fn a_selected_but_uninstalled_version_keeps_the_installed_shim_owners() {
+        // Global config pins node 22, which was just uninstalled; node 20 is
+        // still installed and selected by other projects. Reconciliation used
+        // to count only this directory's selection, found no owner for `node`,
+        // and deleted the shim for every project.
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[tools]
+node = \"22\"
+",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let app = app_with_config(&temporary, config);
+        let root = app.ctx.dirs.install_path("node", "20.11.1");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("node.exe"), b"fixture").unwrap();
+        std::fs::write(root.join("bin").join("node"), b"fixture").unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+
+        let owners = installed_shim_owners(&app).unwrap();
+
+        assert!(
+            owners.get("node").is_some_and(|ids| ids.contains("node")),
+            "{owners:?}"
+        );
+    }
+
+    #[test]
     fn unconfigured_dynamic_inventory_is_not_a_runtime_shim_owner() {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");

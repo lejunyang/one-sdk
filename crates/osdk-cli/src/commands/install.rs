@@ -108,6 +108,7 @@ fn warn_about_lock_drift(app: &App, locked: &[ToolRequest]) {
     let Ok(declared) = gather_install_requests(app, Vec::new()) else {
         return;
     };
+    let declared_requests = declared.clone();
     let eager: Vec<String> = declared
         .iter()
         .filter(|request| !configured_request_is_lazy(app, request))
@@ -125,6 +126,13 @@ fn warn_about_lock_drift(app: &App, locked: &[ToolRequest]) {
         .map(|request| request.backend.clone())
         .collect();
     let (stale, missing) = lock_drift(&locked, &expected, &eager);
+    let changed = changed_lock_requests(app, &declared_requests);
+    if !changed.is_empty() {
+        eprintln!(
+            "{}",
+            t!("warn.lock_requests_changed", changes = changed.join(", "))
+        );
+    }
     if !stale.is_empty() {
         eprintln!(
             "{}",
@@ -137,6 +145,56 @@ fn warn_about_lock_drift(app: &App, locked: &[ToolRequest]) {
             t!("warn.lock_tools_missing", tools = missing.join(", "))
         );
     }
+}
+
+/// Declared tools whose version request differs from the one their lock entry
+/// was resolved from, as `node: 20 -> 22`.
+///
+/// The tool-set drift above missed the commonest edit: changing `node = "20"`
+/// to `"22"` keeps the same tools, so the replay silently installed 20 while
+/// shims (which read osdk.toml) ran 22. Both sides are `VersionSpec::to_string`
+/// of the declaration -- the lock writer stores exactly that -- so a string
+/// comparison has no normalization gap to produce false alarms.
+fn changed_lock_requests(app: &App, declared: &[ToolRequest]) -> Vec<String> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    let Some(lock) =
+        existing_lock_path(app, &cwd).and_then(|path| crate::lockfile::load(&path).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(platform) = lock
+        .platforms
+        .get(&crate::lockfile::platform_key(app.ctx.platform))
+    else {
+        return Vec::new();
+    };
+    let locked: Vec<(String, String)> = platform
+        .tools
+        .iter()
+        .map(|(backend, tool)| (backend.clone(), tool.request.clone()))
+        .collect();
+    let declared: Vec<(String, String)> = declared
+        .iter()
+        .map(|request| (request.backend.clone(), request.spec.to_string()))
+        .collect();
+    changed_requests(&locked, &declared)
+}
+
+/// `backend: locked -> declared` for every backend present on both sides whose
+/// request text differs.
+pub(crate) fn changed_requests(
+    locked: &[(String, String)],
+    declared: &[(String, String)],
+) -> Vec<String> {
+    declared
+        .iter()
+        .filter_map(|(backend, wanted)| {
+            let (_, was) = locked.iter().find(|(locked, _)| locked == backend)?;
+            (was != wanted).then(|| format!("{backend}: {was} -> {wanted}"))
+        })
+        .collect()
 }
 
 /// Locked tools nothing expects, and eagerly declared tools the lock lacks.
@@ -308,13 +366,7 @@ pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
     for (request, latest) in resolved {
         let backend = app.registry.get(&request.backend)?;
         let installed = backend.list_installed(&app.ctx)?;
-        let current = installed
-            .iter()
-            .max_by(|left, right| {
-                osdk_core::backend::python::cmp_versions(left, right).then_with(|| left.cmp(right))
-            })
-            .map(String::as_str)
-            .unwrap_or("-");
+        let current = outdated_current(&request.spec, &installed);
         if !installed.iter().any(|version| version == &latest.version) {
             any = true;
             println!("{} {} -> {}", request.backend, current, latest.version);
@@ -324,6 +376,31 @@ pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
         println!("all requested tools are up to date");
     }
     Ok(())
+}
+
+/// The "current" side of an `outdated` line: the newest installed version the
+/// request accepts, or `-`.
+///
+/// It was the newest installed version of the backend, so `node = "20"` with
+/// node 22 also installed printed `node 22.23.4 -> 20.20.2`, which reads as a
+/// downgrade. `mise outdated` compares against the matching install too.
+pub(crate) fn outdated_current(spec: &VersionSpec, installed: &[String]) -> String {
+    let infos: Vec<_> = installed
+        .iter()
+        .map(osdk_core::version::VersionInfo::stable)
+        .collect();
+    let matched = match spec {
+        // Version-shaped requests can be matched against installed versions.
+        VersionSpec::Exact(_) | VersionSpec::Prefix(_) | VersionSpec::Range(_) => {
+            osdk_core::version::select_version(spec, &infos)
+        }
+        // `lts`, channels and the like carry no meaning an installed version
+        // string can be tested against; the newest install is the best answer.
+        _ => infos.last(),
+    };
+    matched
+        .map(|version| version.version.clone())
+        .unwrap_or_else(|| "-".into())
 }
 
 pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
@@ -348,12 +425,19 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
     Ok(())
 }
 
-pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
+/// Returns the child's exit status so `main` exits with the child's own code,
+/// the way `mise exec` and `npx` do: a script that checks `$?` after
+/// `osdk exec -- cargo test` must see the test runner's code, not osdk's.
+pub async fn exec_cmd(
+    app: &mut App,
+    tools: Vec<String>,
+    command: Vec<String>,
+) -> Result<Option<std::process::ExitStatus>> {
     if tools.is_empty() {
-        return exec_in_project_environment(app, &command);
+        return exec_in_project_environment(app, &command).map(Some);
     }
-    if super::system_exec::try_exec(app, &tools, &command).await? {
-        return Ok(());
+    if let Some(status) = super::system_exec::try_exec(app, &tools, &command).await? {
+        return Ok(Some(status));
     }
     let requests = gather_requests(app, tools)?;
     let resolved = install_requests(app, requests, Vec::new(), false, false).await?;
@@ -420,10 +504,7 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         .envs(env)
         .status()
         .with_context(|| format!("running {}", managed_program.display()))?;
-    if !status.success() {
-        return Err(anyhow!("command exited with {status}"));
-    }
-    Ok(())
+    Ok(Some(status))
 }
 
 /// `osdk exec -- <command>` without `--tool`: run under the directory's own
@@ -433,7 +514,7 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
 /// a CI step, a scheduled job. Nothing is installed: a selected tool that is
 /// missing fails the way it does in an activated shell, instead of starting a
 /// download the caller never asked for.
-fn exec_in_project_environment(app: &App, command: &[String]) -> Result<()> {
+fn exec_in_project_environment(app: &App, command: &[String]) -> Result<std::process::ExitStatus> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| anyhow!("exec requires a command"))?;
@@ -458,10 +539,7 @@ fn exec_in_project_environment(app: &App, command: &[String]) -> Result<()> {
         .envs(&env)
         .status()
         .with_context(|| format!("running {}", program.display()))?;
-    if !status.success() {
-        return Err(anyhow!("command exited with {status}"));
-    }
-    Ok(())
+    Ok(status)
 }
 
 pub(crate) fn resolve_managed_launcher_alias(
@@ -740,8 +818,13 @@ pub(crate) fn executable_basename(program: &str) -> String {
 
 pub(crate) fn project_yarn_version(app: &App, cwd: &std::path::Path) -> Result<Option<String>> {
     Ok(
-        osdk_core::version::resolver::resolve_active_config("yarn", cwd, &app.ctx.config, &[])?
-            .map(|request| request.spec),
+        osdk_core::version::resolver::resolve_active_config_declared(
+            "yarn",
+            cwd,
+            &app.ctx.config,
+            &[],
+        )?
+        .map(|request| request.spec),
     )
 }
 
@@ -1459,15 +1542,27 @@ pub(crate) fn installed_dynamic_match(
         }
     }?;
 
-    let install = candidates
-        .iter()
-        .find(|install| install.manifest.identity.version == selected)?;
+    let mut version = ToolVersion::new(backend.id(), selected.clone());
+    bind_dynamic_request_options(request, &mut version);
+    // Same version and options is not yet the same install: an npm tool is
+    // bound to a scope and a Node. A project's `"npm:cowsay" = "1"` under
+    // node 20 matched another project's install on node 22, printed "already
+    // installed", and then failed: selection (rightly) wants the node 20 one.
+    let expected = backend
+        .dynamic_install_identity(&app.ctx, &version)
+        .ok()
+        .flatten();
+    let install = candidates.iter().find(|install| {
+        let identity = &install.manifest.identity;
+        identity.version == selected
+            && expected.as_ref().is_none_or(|expected| {
+                identity.scope == expected.scope && identity.dependencies == expected.dependencies
+            })
+    })?;
     // The scan happened a moment ago; confirm the directory and manifest are
     // still the same objects before letting them decide no install is needed.
     install.revalidate().ok()?;
 
-    let mut version = ToolVersion::new(backend.id(), selected);
-    bind_dynamic_request_options(request, &mut version);
     Some(version)
 }
 
@@ -1599,7 +1694,9 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
         }
         AliasCommand::Unset { tool, name } => {
             let backend = app.registry.get(&tool)?;
-            crate::config_edit::remove_version_alias(&app.ctx, backend.id(), &name)?;
+            if !crate::config_edit::remove_version_alias(&app.ctx, backend.id(), &name)? {
+                return Err(anyhow!("no `{}` alias named `{name}`", backend.id()));
+            }
             println!("removed {} {}", backend.id(), name);
         }
     }
@@ -1767,7 +1864,7 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
             }
             let backend = app.registry.get(&request.backend)?;
             if matches!(
-                osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &cwd)?.target,
+                osdk_core::execution::resolve_declared(&app.ctx, backend.as_ref(), &cwd)?.target,
                 Some(osdk_core::execution::ExecutionTarget::System(_))
             ) {
                 anyhow::bail!("{} selects an external system tool; use exec for that target or specify an explicit managed version for install/lock", request.backend);
@@ -1853,7 +1950,7 @@ pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result
             continue;
         }
         if let Ok(backend) = app.registry.get(tool) {
-            let active = osdk_core::version::resolver::resolve_active_config(
+            let active = osdk_core::version::resolver::resolve_active_config_declared(
                 tool,
                 &cwd,
                 &app.ctx.config,
@@ -1915,7 +2012,7 @@ pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result
         }
     }
     let backend = app.registry.get("node")?;
-    if let Some(active) = osdk_core::version::resolver::resolve_active_config(
+    if let Some(active) = osdk_core::version::resolver::resolve_active_config_declared(
         backend.id(),
         &cwd,
         &app.ctx.config,
@@ -2018,7 +2115,7 @@ pub(crate) fn bind_configured_spec_for_bare_operand_at(
     let Ok(backend) = app.registry.get(&request.backend) else {
         return Ok(());
     };
-    let Some(active) = osdk_core::version::resolver::resolve_active_config(
+    let Some(active) = osdk_core::version::resolver::resolve_active_config_declared(
         backend.id(),
         cwd,
         &app.ctx.config,
@@ -2203,7 +2300,7 @@ pub(crate) fn inject_node_dependency(
     }
     let cwd = std::env::current_dir()?;
     let backend = app.registry.get("node")?;
-    let spec = osdk_core::version::resolver::resolve_active_config(
+    let spec = osdk_core::version::resolver::resolve_active_config_declared(
         "node",
         &cwd,
         &app.ctx.config,
@@ -2360,7 +2457,7 @@ pub(crate) fn inject_go_dependency_at(
     }
 
     let backend = app.registry.get("go")?;
-    let active = osdk_core::version::resolver::resolve_active_config(
+    let active = osdk_core::version::resolver::resolve_active_config_declared(
         "go",
         cwd,
         &app.ctx.config,
@@ -2426,7 +2523,7 @@ pub(crate) fn inject_rust_dependency_at(
     }
 
     let backend = app.registry.get("rust")?;
-    let active = osdk_core::version::resolver::resolve_active_config(
+    let active = osdk_core::version::resolver::resolve_active_config_declared(
         "rust",
         cwd,
         &app.ctx.config,
@@ -2459,7 +2556,42 @@ pub(crate) fn inject_rust_dependency_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{lock_drift, platform_exclusion};
+    use super::{changed_requests, lock_drift, outdated_current, platform_exclusion};
+
+    #[test]
+    fn outdated_compares_against_the_install_the_request_accepts() {
+        use osdk_core::version::VersionSpec;
+        let installed = ["20.9.0", "22.23.4"].map(String::from);
+        assert_eq!(
+            outdated_current(&VersionSpec::parse("20"), &installed),
+            "20.9.0"
+        );
+        assert_eq!(outdated_current(&VersionSpec::parse("18"), &installed), "-");
+        assert_eq!(
+            outdated_current(&VersionSpec::Latest, &installed),
+            "22.23.4"
+        );
+        assert_eq!(
+            outdated_current(&VersionSpec::parse("lts"), &installed),
+            "22.23.4"
+        );
+    }
+
+    #[test]
+    fn changed_requests_name_only_tools_whose_request_moved() {
+        let pairs = |items: &[(&str, &str)]| {
+            items
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let locked = pairs(&[("node", "20"), ("pnpm", "9"), ("bun", "1")]);
+        // pnpm unchanged, bun undeclared (reported by lock_drift instead),
+        // zig new (likewise).
+        let declared = pairs(&[("node", "22"), ("pnpm", "9"), ("zig", "0.14")]);
+        assert_eq!(changed_requests(&locked, &declared), ["node: 20 -> 22"]);
+        assert!(changed_requests(&locked, &locked).is_empty());
+    }
 
     #[test]
     fn lock_drift_names_removed_and_newly_declared_tools() {

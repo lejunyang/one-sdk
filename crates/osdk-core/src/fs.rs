@@ -11,6 +11,21 @@
 
 use std::path::Path;
 
+/// Read a UTF-8 text file that another tool or an editor wrote, dropping a
+/// leading byte-order mark.
+///
+/// Notepad and PowerShell's `Set-Content -Encoding utf8` prepend one, and the
+/// native managers whose files osdk reads (nvm, asdf, Node's `package.json`
+/// loader) all ignore it. Kept, it made `.nvmrc` resolve to `\u{feff}20`, hid
+/// the first `.tool-versions` line, and made `package.json` fail as JSON.
+pub fn read_text_without_bom(path: &Path) -> std::io::Result<String> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    })
+}
+
 /// Atomically replace `destination` with `source` (a rename that overwrites).
 ///
 /// On Unix this is a plain `rename`, which is atomic within a filesystem. On

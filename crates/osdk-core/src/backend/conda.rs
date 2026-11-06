@@ -1351,8 +1351,7 @@ impl Backend for CondaBackend {
             })
             .map(|install| install.manifest.identity.version.clone())
             .collect();
-        versions.sort();
-        versions.dedup();
+        crate::version::sort_installed_versions(&mut versions);
         Ok(versions)
     }
 

@@ -780,7 +780,11 @@ impl Backend for GithubBackend {
         .ok_or_else(|| Error::VersionResolve {
             tool: self.id().to_string(),
             spec: req.spec.to_string(),
-            hint: Some("no matching release under prerelease policy".into()),
+            hint: Some(crate::version::no_match_hint(
+                &req.spec,
+                &versions,
+                ctx.config.settings.prerelease,
+            )),
         })?;
         let mut tv = ToolVersion::new(self.id(), chosen.version.clone());
         tv.options = req.options.clone();
@@ -920,9 +924,11 @@ impl Backend for GithubBackend {
                         .unwrap_or(false)
             })
             .map(|install| install.manifest.identity.version.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect())
+            .collect::<Vec<_>>())
+        .map(|mut versions| {
+            crate::version::sort_installed_versions(&mut versions);
+            versions
+        })
     }
 
     fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {

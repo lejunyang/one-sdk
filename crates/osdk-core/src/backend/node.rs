@@ -330,8 +330,14 @@ impl Backend for NodeBackend {
                 .ok_or_else(|| crate::error::Error::VersionResolve {
                     tool: self.id().to_string(),
                     spec: req.spec.to_string(),
+                    // The list holds only releases with a `target_arch` asset.
                     hint: Some(format!(
-                        "no matching version ships a {} asset",
+                        "{} (among {} releases)",
+                        crate::version::no_match_hint(
+                            &req.spec,
+                            &versions,
+                            ctx.config.settings.prerelease
+                        ),
                         target_arch.node_token()
                     )),
                 })?;

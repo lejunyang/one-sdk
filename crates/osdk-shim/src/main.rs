@@ -16,7 +16,7 @@ use osdk_core::inventory::ScanReport;
 use osdk_core::package_registry::{manager_for_command, PackageManager};
 use osdk_core::platform::Platform;
 use osdk_core::version::resolver::resolve_active_config;
-use osdk_core::version::{select_version, ToolVersion, VersionSpec};
+use osdk_core::version::{ToolVersion, VersionSpec};
 
 // The shim resolves and execs already-installed tools; it never installs. Its
 // whole size advantage comes from `osdk-core` being compiled without the
@@ -71,27 +71,6 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    // Recursion means *this same tool* re-entering its own shim, which is the
-    // runaway `sh -> shims/sh -> sh` structure docs/bugs/005 is about. A
-    // different tool name is not recursion: it is the ordinary case of one
-    // managed tool invoking another, and `make` (itself a shim) running a
-    // recipe that calls `go` is exactly that.
-    //
-    // The guard used to be a bare presence check on the variable, so every
-    // nested shim call inherited it and was refused with exit 126 whichever
-    // tool it was. Under `make` that made `go` / `gofmt` unreachable from
-    // any recipe, surfacing as `command not found` style breakage whose real
-    // cause was this guard rather than PATH.
-    //
-    // Compare against the recorded name instead: a genuine self-re-entry is
-    // still refused, while sibling tools pass through. Nested calls carry the
-    // innermost tool name, which suffices because every level rewrites the
-    // variable before exec, so any true cycle must revisit its own name.
-    if std::env::var("OSDK_SHIM_ACTIVE").is_ok_and(|active| active == tool_name) {
-        eprintln!("osdk-shim: recursive shim invocation for `{tool_name}`");
-        return 126;
-    }
-
     let dirs = match Dirs::resolve() {
         Ok(d) => d,
         Err(e) => {
@@ -232,7 +211,16 @@ fn real_main() -> i32 {
             return 1;
         }
     })
-    .map(|active| (active.spec, active.is_range))
+    .map(|active| {
+        let spec = active.choose_installed(|candidate| {
+            let candidate = ctx
+                .config
+                .expand_alias(backend.id(), candidate)
+                .unwrap_or_else(|_| candidate.to_string());
+            resolve_installed(&ctx, backend.as_ref(), &candidate, active.is_range).is_some()
+        });
+        (spec, active.is_range)
+    })
     .or_else(|| {
         dynamic_request
             .as_ref()
@@ -261,9 +249,11 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    let parsed_dynamic_spec = dynamic_request
-        .as_ref()
-        .map(|_| VersionSpec::parse(strip_distribution_prefix(&expanded_spec)));
+    let parsed_dynamic_spec = dynamic_request.as_ref().map(|_| {
+        VersionSpec::parse(osdk_core::version::strip_distribution_prefix(
+            &expanded_spec,
+        ))
+    });
     let version = match parsed_dynamic_spec {
         Some(VersionSpec::Exact(version)) => Some(version),
         _ => resolve_installed(&ctx, backend.as_ref(), &expanded_spec, is_range),
@@ -321,6 +311,9 @@ fn real_main() -> i32 {
             return 127;
         }
     };
+    if refuse_dispatcher_target(&ctx, &tool_name, &exe) {
+        return 126;
+    }
 
     let mut exec_env = match backend.exec_env(&ctx, &tv) {
         Ok(env) => env,
@@ -331,13 +324,12 @@ fn real_main() -> i32 {
     };
     // The shim directory is deliberately left on PATH.
     //
-    // It used to be stripped here so a lifecycle subprocess could not re-enter
-    // the shim. That is unnecessary -- this tool's real bin directories are
-    // prepended below, so its own name already resolves to the real binary, and
-    // the `OSDK_SHIM_ACTIVE` name check above is the backstop for a backend that
-    // does not publish it. And it was actively harmful: a build orchestrator is
-    // itself a shim, so removing the directory took away every *other* managed
-    // tool with it. Under `make` no recipe could see `go`, `node` or `gofmt`, and
+    // This tool's real bin directories are prepended below. A subprocess may
+    // deliberately re-enter the shim to select its own project's version;
+    // dispatcher identity is checked on the resolved target instead of using
+    // an inherited tool-name marker. Stripping the shim directory was harmful:
+    // a build orchestrator is itself a shim, so removing it hid other managed
+    // tools too. Under `make` no recipe could see `go`, `node` or `gofmt`, and
     // no PATH the user set could bring them back, because the entry was dropped
     // after their PATH had already been assembled.
     // JVM tools that bundle no runtime abort unless a JDK is visible. A
@@ -475,9 +467,7 @@ fn real_main() -> i32 {
         }
     }
 
-    // Decide global-bin ownership before tool_name is moved into the env below.
     let global_owner = global_owner_for_tool(&tool_name);
-    exec_env.insert("OSDK_SHIM_ACTIVE".into(), tool_name);
     let routed_args;
     let exec_args = if let Some(subcommand) = alias_subcommand {
         routed_args = std::iter::once(subcommand.to_string())
@@ -564,7 +554,6 @@ fn exec_system_target(
         eprintln!("osdk-shim: {error}");
         return 1;
     }
-    env.insert("OSDK_SHIM_ACTIVE".into(), name.into());
     let args: Vec<_> = subcommand
         .into_iter()
         .map(str::to_string)
@@ -574,7 +563,8 @@ fn exec_system_target(
     command
         .args(args)
         .env_clear()
-        .envs(target.environment(&env));
+        .envs(target.environment(&env))
+        .env_remove("OSDK_SHIM_ACTIVE");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -679,7 +669,7 @@ fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(
         {
             return Err(osdk_core::t!(
                 "err.untrusted_config",
-                path = project_config.display(),
+                path = dunce::simplified(&project_config).display(),
                 requirements = osdk_core::trust::describe_requirements(&requirements)
             ));
         }
@@ -1005,6 +995,10 @@ fn make_ctx(dirs: Dirs, platform: Platform, config: Config) -> osdk_core::backen
 }
 
 /// Resolve a spec against locally installed versions (no network).
+///
+/// `java = "17.0.10"` is an exact semver whose install is named `17.0.10+7`;
+/// the shared matcher falls back to the selector, which ignores build
+/// metadata, as activation does.
 fn resolve_installed(
     ctx: &osdk_core::backend::Ctx,
     backend: &dyn osdk_core::backend::Backend,
@@ -1012,30 +1006,7 @@ fn resolve_installed(
     is_range: bool,
 ) -> Option<String> {
     let installed = backend.list_installed(ctx).ok()?;
-    if installed.is_empty() {
-        return None;
-    }
-    if backend.id() == "python" {
-        return osdk_core::backend::python::select_installed(spec, &installed);
-    }
-    // Strip a leading distribution prefix like `temurin-` (java) so the version
-    // part matches the installed dir names (e.g. `17.0.20+8`).
-    let spec = strip_distribution_prefix(spec);
-    let parsed = if is_range {
-        VersionSpec::parse_range(spec).ok()?
-    } else {
-        VersionSpec::parse(spec)
-    };
-    match &parsed {
-        VersionSpec::Exact(v) => installed.iter().find(|i| *i == v).cloned(),
-        _ => {
-            let infos: Vec<_> = installed
-                .iter()
-                .map(osdk_core::version::VersionInfo::stable)
-                .collect();
-            select_version(&parsed, &infos).map(|vi| vi.version.clone())
-        }
-    }
+    osdk_core::version::installed_match(ctx, backend.id(), spec, is_range, &installed)
 }
 
 fn managed_bin_paths(
@@ -1056,18 +1027,6 @@ fn managed_executable_path(
     executable_name: &str,
 ) -> Option<PathBuf> {
     find_exe(&managed_bin_paths(ctx, backend, version), executable_name)
-}
-
-/// Strip a leading `<word>-` distribution prefix (e.g. `temurin-17` -> `17`).
-/// Only strips when the left side is purely alphabetic, so real versions like
-/// `1.22` or prereleases are untouched.
-fn strip_distribution_prefix(spec: &str) -> &str {
-    if let Some((left, right)) = spec.split_once('-') {
-        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphabetic()) && !right.is_empty() {
-            return right;
-        }
-    }
-    spec
 }
 
 fn find_exe(bin_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
@@ -1127,6 +1086,9 @@ fn exec_global_command(
     command: &GlobalCommand,
     forward_args: &[String],
 ) -> i32 {
+    if refuse_dispatcher_target(ctx, &command.name, &command.launcher) {
+        return 126;
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let host = osdk_core::shim::native_global_runtime(&command.launcher, command.owner.id());
     let prepare = || -> osdk_core::error::Result<_> {
@@ -1179,7 +1141,6 @@ fn exec_global_command(
         } else {
             prepend_env_path(&mut env, bins);
         }
-        env.insert("OSDK_SHIM_ACTIVE".into(), command.name.clone());
         Ok((env, external))
     };
     match prepare() {
@@ -1220,6 +1181,21 @@ fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String,
     exec_environment(exe, args, &env, false)
 }
 
+fn refuse_dispatcher_target(
+    ctx: &osdk_core::backend::Ctx,
+    name: &str,
+    exe: &std::path::Path,
+) -> bool {
+    if !osdk_core::execution::is_osdk_dispatcher(ctx, exe) {
+        return false;
+    }
+    eprintln!(
+        "osdk-shim: recursive shim target for `{name}`: {}",
+        exe.display()
+    );
+    true
+}
+
 #[cfg(unix)]
 fn exec_environment(
     exe: &PathBuf,
@@ -1233,7 +1209,11 @@ fn exec_environment(
     if clear {
         command.env_clear();
     }
-    let err = command.args(args).envs(env).exec();
+    let err = command
+        .args(args)
+        .envs(env)
+        .env_remove("OSDK_SHIM_ACTIVE")
+        .exec();
     eprintln!("osdk-shim: failed to exec {}: {err}", exe.display());
     126
 }
@@ -1269,7 +1249,12 @@ fn exec_environment(
     if clear {
         command.env_clear();
     }
-    match command.args(args).envs(env).status() {
+    match command
+        .args(args)
+        .envs(env)
+        .env_remove("OSDK_SHIM_ACTIVE")
+        .status()
+    {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("osdk-shim: failed to run {}: {e}", exe.display());
@@ -1349,7 +1334,12 @@ fn run_child_status(
     env: &std::collections::BTreeMap<String, String>,
 ) -> i32 {
     use std::os::unix::process::ExitStatusExt;
-    match Command::new(exe).args(args).envs(env).status() {
+    match Command::new(exe)
+        .args(args)
+        .envs(env)
+        .env_remove("OSDK_SHIM_ACTIVE")
+        .status()
+    {
         Ok(status) => status
             .code()
             .or_else(|| status.signal().map(|signal| 128 + signal))
@@ -1568,5 +1558,41 @@ mod tests {
             &[first, second],
             &std::collections::BTreeMap::new(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod resolve_installed_tests {
+    use super::*;
+
+    #[test]
+    fn an_exact_request_finds_the_same_core_install_with_a_build_number() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        for version in ["17.0.10+7", "21.0.5+11"] {
+            let root = dirs.install_path("java", version);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        }
+        let ctx = make_ctx(dirs, Platform::current(), Config::default());
+        let java = osdk_core::Registry::new().get("java").unwrap();
+        // `java = "17.0.10"` and SDKMAN's `java=17.0.10-tem` (-> `temurin-17.0.10`).
+        for spec in ["17.0.10", "temurin-17.0.10", "17.0.10+7", "17"] {
+            assert_eq!(
+                resolve_installed(&ctx, java.as_ref(), spec, false).as_deref(),
+                Some("17.0.10+7"),
+                "{spec}"
+            );
+        }
+        assert_eq!(
+            resolve_installed(&ctx, java.as_ref(), "17.0.11", false),
+            None
+        );
     }
 }

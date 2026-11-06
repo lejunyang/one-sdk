@@ -35,6 +35,17 @@ pub const TASK_MARKER: &str = "OSDK_TASK";
 /// Names the task's own identity, for scripts that want to know.
 pub const TASK_NAME_VAR: &str = "OSDK_TASK_NAME";
 
+/// The project root the task runs for, which bounds where [`TASK_MARKER`]
+/// applies.
+///
+/// The marker is inherited by everything the task starts, and some of that
+/// outlives it or wanders off: an editor opened by a task, a tmux server, an
+/// interactive shell. A bare marker made the prompt hook stand down in every
+/// directory of such a shell for good, so `cd` into another project never
+/// activated it. The hook stands down only inside this root and drops the
+/// markers once the shell leaves it.
+pub const TASK_ROOT_VAR: &str = "OSDK_TASK_ROOT";
+
 /// What the runner decided to do, without doing it.
 ///
 /// `osdk run --dry-run` renders this, and the tests assert on it: checking the
@@ -116,6 +127,38 @@ pub fn default_shell() -> Vec<String> {
     } else {
         vec!["sh".into(), "-c".into()]
     }
+}
+
+/// A command running `script` through `shell` (program plus its arguments).
+///
+/// cmd.exe does not split its command line by the MSVC rules Rust's argument
+/// quoting targets, so the script `echo "a b"` arrived as `"echo \"a b\""` and
+/// cmd printed the backslashes. For cmd the script is passed raw instead,
+/// inside one pair of quotes that `/S` makes cmd strip unconditionally -- the
+/// `/s /c "<script>"` form Node uses for `shell: true` -- so cmd sees the
+/// text exactly as written in `osdk.toml`.
+pub(crate) fn shell_command(shell: &[String], script: &str) -> Result<Command> {
+    let (program, args) = shell
+        .split_first()
+        .ok_or_else(|| Error::config("`shell` must name an interpreter"))?;
+    let mut child = Command::new(program);
+    #[cfg(windows)]
+    if let Some((switch, leading)) = args.split_last().filter(|(switch, _)| {
+        switch.eq_ignore_ascii_case("/c")
+            && Path::new(program)
+                .file_stem()
+                .is_some_and(|stem| stem.eq_ignore_ascii_case("cmd"))
+    }) {
+        use std::os::windows::process::CommandExt;
+        child
+            .args(leading)
+            .arg("/s")
+            .arg(switch)
+            .raw_arg(format!("\"{script}\""));
+        return Ok(child);
+    }
+    child.args(args).arg(script);
+    Ok(child)
 }
 
 /// Split a `shell` setting like `pwsh -Command` into program plus arguments.
@@ -333,22 +376,31 @@ impl TaskEnv {
     ///
     /// Order matters: the activation delta goes on first, the task's `env` last,
     /// so a task can override an exported variable when it means to.
-    pub fn apply(&self, command: &mut Command, task: &TaskDef, name: &str, current_path: &str) {
+    pub fn apply(
+        &self,
+        command: &mut Command,
+        task: &TaskDef,
+        name: &str,
+        current_path: &str,
+        root: &Path,
+    ) {
         for (key, value) in &self.set_vars {
             command.env(key, value);
         }
-        if !self.path_prepend.is_empty() {
-            let mut entries: Vec<PathBuf> = self.path_prepend.clone();
-            entries.extend(std::env::split_paths(current_path));
-            if let Ok(joined) = std::env::join_paths(entries) {
-                command.env("PATH", joined);
-            }
+        // Set even with nothing to prepend: `current_path` is the inherited
+        // PATH without an outer activation's entries, which the child would
+        // otherwise inherit.
+        let mut entries: Vec<PathBuf> = self.path_prepend.clone();
+        entries.extend(std::env::split_paths(current_path));
+        if let Ok(joined) = std::env::join_paths(entries) {
+            command.env("PATH", joined);
         }
         for (key, value) in &task.env {
             command.env(key, value);
         }
         command.env(TASK_MARKER, "1");
         command.env(TASK_NAME_VAR, name);
+        command.env(TASK_ROOT_VAR, dunce::simplified(root));
     }
 }
 
@@ -447,13 +499,14 @@ impl Spawner for ProcessSpawner {
     }
 
     fn run(&mut self, task: &str, shell: &[String], command: &str, dir: &Path) -> Result<i32> {
-        let (program, args) = shell
-            .split_first()
+        let program = shell
+            .first()
             .ok_or_else(|| Error::config("`shell` must name an interpreter"))?;
-        let mut child = Command::new(program);
-        child.args(args).arg(command).current_dir(dir);
+        let mut child = shell_command(shell, command)?;
+        child.current_dir(dir);
         if let Some(def) = self.defs.get(task) {
-            self.env.apply(&mut child, def, task, &self.base_path);
+            self.env
+                .apply(&mut child, def, task, &self.base_path, &self.project_root);
         }
         for (key, value) in &self.arg_env {
             child.env(key, value);
@@ -477,15 +530,19 @@ impl Spawner for ProcessSpawner {
         for (key, value) in &self.arg_env {
             env.insert(key.clone(), value.clone());
         }
-        if !self.env.path_prepend.is_empty() {
-            let mut entries = self.env.path_prepend.clone();
-            entries.extend(std::env::split_paths(&self.base_path));
-            if let Ok(joined) = std::env::join_paths(entries) {
-                env.insert("PATH".into(), joined.to_string_lossy().to_string());
-            }
+        let mut entries = self.env.path_prepend.clone();
+        entries.extend(std::env::split_paths(&self.base_path));
+        if let Ok(joined) = std::env::join_paths(entries) {
+            env.insert("PATH".into(), joined.to_string_lossy().to_string());
         }
         env.insert(TASK_MARKER.into(), "1".into());
         env.insert(TASK_NAME_VAR.into(), task.to_string());
+        env.insert(
+            TASK_ROOT_VAR.into(),
+            dunce::simplified(&self.project_root)
+                .to_string_lossy()
+                .into_owned(),
+        );
 
         let context = ScriptContext {
             dir: dir.to_path_buf(),
@@ -506,7 +563,8 @@ impl Spawner for ProcessSpawner {
         let mut child = Command::new(program);
         child.args(rest).current_dir(dir);
         if let Some(def) = self.defs.get(task) {
-            self.env.apply(&mut child, def, task, &self.base_path);
+            self.env
+                .apply(&mut child, def, task, &self.base_path, &self.project_root);
         }
         for (key, value) in &self.arg_env {
             child.env(key, value);
@@ -564,6 +622,39 @@ pub enum AppendPolicy {
     Append,
     /// Anything else: leftover arguments are an error that says how to fix it.
     Refuse,
+}
+
+/// Quote one appended argument so `shell` reads it back as one word.
+///
+/// Joining with spaces turned `osdk run test -- "my file.txt"` into two
+/// arguments; npm quotes what it appends for the same reason. `sh` and `pwsh`
+/// quoting is exact. `cmd` has no exact quoting: double quotes protect spaces
+/// and `& | < > ^ ( )`, but `%VAR%` still expands and an inner `"` cannot be
+/// escaped -- the documented reason `argv` steps exist. Arguments made only of
+/// characters no shell treats specially are left bare, so `--nocapture` stays
+/// readable in `--dry-run`.
+fn quote_for_shell(shell: &[String], arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+    if plain {
+        return arg.to_string();
+    }
+    let program = shell
+        .first()
+        .and_then(|program| Path::new(program).file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match program.as_str() {
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "ash" => {
+            format!("'{}'", arg.replace('\'', r"'\''"))
+        }
+        "pwsh" | "powershell" => format!("'{}'", arg.replace('\'', "''")),
+        "cmd" if !arg.contains('"') => format!("\"{arg}\""),
+        _ => arg.to_string(),
+    }
 }
 
 /// Decide the append policy for a planned task.
@@ -727,9 +818,11 @@ fn apply_arguments(
                     // A shell string can only be appended textually. On `sh`
                     // and `pwsh` that is quotable; on `cmd` it is not fully
                     // solvable, which is documented and is why `argv` exists.
-                    PlannedStep::Command { command, .. } => {
-                        command.push(' ');
-                        command.push_str(&values.rest.join(" "));
+                    PlannedStep::Command { command, shell, .. } => {
+                        for arg in &values.rest {
+                            command.push(' ');
+                            command.push_str(&quote_for_shell(shell, arg));
+                        }
                         return Ok(resolved);
                     }
                     PlannedStep::Parallel { .. } => continue,
@@ -1320,6 +1413,58 @@ fn execute_full_inner(
 mod tests {
     use super::*;
     use crate::tasks::TaskEntry;
+
+    #[test]
+    fn appended_arguments_stay_one_word_in_each_shell() {
+        let shell = |spec: &str| spec.split(' ').map(String::from).collect::<Vec<_>>();
+        let sh = shell("sh -c");
+        assert_eq!(quote_for_shell(&sh, "--nocapture"), "--nocapture");
+        assert_eq!(quote_for_shell(&sh, "my file.txt"), "'my file.txt'");
+        assert_eq!(quote_for_shell(&sh, "it's"), r"'it'\''s'");
+        assert_eq!(quote_for_shell(&sh, ""), "''");
+        let pwsh = shell("pwsh -Command");
+        assert_eq!(quote_for_shell(&pwsh, "it's $x"), "'it''s $x'");
+        let cmd = shell("cmd /c");
+        assert_eq!(quote_for_shell(&cmd, "a & b"), "\"a & b\"");
+        // An inner quote has no cmd escape; it is passed through untouched.
+        assert_eq!(quote_for_shell(&cmd, "a\"b"), "a\"b");
+    }
+
+    #[test]
+    fn an_appended_argument_with_a_space_reaches_the_shell_as_one_word() {
+        let shell = default_shell();
+        // Counts its arguments, so a split word shows up as 2.
+        let script = if cfg!(windows) {
+            format!(
+                "for %a in ({}) do @echo [%~a]",
+                quote_for_shell(&shell, "y z")
+            )
+        } else {
+            format!("set -- {}; echo \"[$#]\"", quote_for_shell(&shell, "y z"))
+        };
+        let output = shell_command(&shell, &script).unwrap().output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let expected = if cfg!(windows) { "[y z]" } else { "[1]" };
+        assert_eq!(stdout.trim_end(), expected);
+    }
+
+    #[test]
+    fn shell_steps_reach_the_default_shell_exactly_as_written() {
+        // Quotes inside a step are the shell's to interpret. cmd.exe used to
+        // receive them backslash-escaped and print `\"a b\"`.
+        let output = shell_command(&default_shell(), r#"echo "a b" 'c'"#)
+            .unwrap()
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let expected = if cfg!(windows) {
+            r#""a b" 'c'"#
+        } else {
+            "a b c"
+        };
+        assert_eq!(stdout.trim_end(), expected);
+    }
 
     fn set_from(toml: &str) -> TaskSet {
         let entries: BTreeMap<String, TaskEntry> = toml::from_str(toml).expect("parse");
@@ -2398,7 +2543,13 @@ shell = "pwsh -Command"
 
         let def: TaskDef = toml::from_str("run = \"x\"\n[env]\nSHARED = \"from-task\"\n").unwrap();
         let mut command = Command::new("echo");
-        env.apply(&mut command, &def, "demo", "/usr/bin");
+        env.apply(
+            &mut command,
+            &def,
+            "demo",
+            "/usr/bin",
+            Path::new("/projects/demo"),
+        );
 
         let vars: BTreeMap<String, String> = command
             .get_envs()
@@ -2408,6 +2559,10 @@ shell = "pwsh -Command"
         assert_eq!(vars.get("JAVA_HOME").map(String::as_str), Some("/jdk"));
         assert_eq!(vars.get(TASK_MARKER).map(String::as_str), Some("1"));
         assert_eq!(vars.get(TASK_NAME_VAR).map(String::as_str), Some("demo"));
+        assert_eq!(
+            vars.get(TASK_ROOT_VAR).map(PathBuf::from),
+            Some(PathBuf::from("/projects/demo"))
+        );
         // The task's own env wins over the activation delta.
         assert_eq!(vars.get("SHARED").map(String::as_str), Some("from-task"));
         // PATH keeps the managed dir first and the inherited entries after.

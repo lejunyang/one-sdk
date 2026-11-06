@@ -1,4 +1,4 @@
-﻿//! Layered configuration.
+//! Layered configuration.
 //!
 //! Precedence (highest wins): CLI flags → env (`OSDK_*`) → project config
 //! (`osdk.toml`, discovered by walking up) → user global config
@@ -2423,6 +2423,19 @@ pub fn validate_alias_name(name: &str) -> Result<()> {
     if name.contains(char::is_whitespace) || name.contains('@') {
         return Err(Error::config(format!("invalid version alias `{name}`")));
     }
+    // Aliases are expanded before version matching, so an alias spelled like a
+    // version (`osdk alias set node 20 22`) silently redirected every `node@20`
+    // to 22 -- in every project on the machine.
+    let digits = name.strip_prefix(['v', 'V']).unwrap_or(name);
+    if !digits.is_empty()
+        && digits
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return Err(Error::config(format!(
+            "`{name}` looks like a version and would shadow it; pick a name such as `my-{digits}`"
+        )));
+    }
     Ok(())
 }
 
@@ -2447,9 +2460,106 @@ fn truthy(s: &str) -> bool {
     matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
+/// Top-level tables `ConfigFile` reads, plus `extends` (consumed by
+/// inheritance). Listed regardless of build features so the shim, which omits
+/// `[tasks]` and friends, still recognizes them.
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "settings",
+    "sources",
+    "registries",
+    "container",
+    "containers",
+    "sys",
+    "syspkg",
+    "tools",
+    "alias",
+    "aliases",
+    "tasks",
+    "models",
+    "skills",
+    "deps",
+    "task",
+    "task_config",
+    "extends",
+];
+
+/// Top-level keys of `value` that no part of osdk reads.
+///
+/// Nested tables reject unknown fields, but the top level accepts anything, so
+/// a misspelled `[toolz]` -- or `[env]` carried over from another tool's file
+/// -- was ignored without a word and every tool in it silently unselected.
+fn unknown_top_level_keys(value: &toml::Value) -> Vec<String> {
+    value
+        .as_table()
+        .map(|table| {
+            table
+                .keys()
+                .filter(|key| !KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The known key one or two edits away from `key`, for a "did you mean".
+fn closest_top_level_key(key: &str) -> Option<&'static str> {
+    fn distance(a: &str, b: &str) -> usize {
+        let b: Vec<char> = b.chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut previous = row[0];
+            row[0] = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let current = row[j + 1];
+                row[j + 1] = (previous + usize::from(ca != *cb))
+                    .min(row[j] + 1)
+                    .min(current + 1);
+                previous = current;
+            }
+        }
+        row[b.len()]
+    }
+    KNOWN_TOP_LEVEL_KEYS
+        .iter()
+        .copied()
+        .map(|known| (distance(key, known), known))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, known)| known)
+}
+
+fn warn_unknown_top_level_keys(path: &Path, value: &toml::Value) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    for key in unknown_top_level_keys(value) {
+        let seen = format!("{}|{key}", path.display());
+        let fresh = WARNED
+            .get_or_init(Default::default)
+            .lock()
+            .map(|mut warned| warned.insert(seen))
+            .unwrap_or(false);
+        if !fresh {
+            continue;
+        }
+        match closest_top_level_key(&key) {
+            Some(known) => tracing::warn!(
+                "{}: `{key}` is not an osdk config section and is ignored; did you mean `{known}`?",
+                path.display()
+            ),
+            None => tracing::warn!(
+                "{}: `{key}` is not an osdk config section and is ignored",
+                path.display()
+            ),
+        }
+    }
+}
+
 fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> {
     let value = inheritance::load(path, rel_base)?;
-    let mut file: ConfigFile = value.try_into().map_err(sanitize_config_parse_error)?;
+    warn_unknown_top_level_keys(path, &value);
+    let mut file: ConfigFile = value
+        .try_into()
+        .map_err(|error| with_config_path(path, sanitize_config_parse_error(error)))?;
     file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
         registries.validate()?;
@@ -2469,6 +2579,34 @@ pub fn dependency_tool_versions(
     let mut config = Config::default();
     config.apply_tool_configs(&file.tools)?;
     Ok(config.tools)
+}
+
+/// Name the file a shape error came from, with a hint for the commonest one.
+///
+/// `node = 20` failed as "toml parse error: invalid type: integer `20`,
+/// expected struct StructuredToolConfig in `tools.node`": no file, and nothing
+/// saying versions are strings. (They must be: `python = 3.10` would be the
+/// float 3.1.)
+fn with_config_path(path: &Path, error: Error) -> Error {
+    let Error::TomlDe(error) = error else {
+        return error;
+    };
+    let message = error.message();
+    let hint = if (message.contains("invalid type: integer")
+        || message.contains("invalid type: floating point"))
+        && message.contains("StructuredToolConfig")
+    {
+        "; write versions as quoted strings, e.g. `node = \"20\"`"
+    } else {
+        ""
+    };
+    // `Display` appends the key path on its own paragraph; keep one line.
+    let detail = error.to_string().trim_end().replace(
+        "
+
+in ", " in ",
+    );
+    Error::config(format!("{}: {detail}{hint}", path.display()))
 }
 
 fn sanitize_config_parse_error(error: toml::de::Error) -> Error {
@@ -2818,12 +2956,29 @@ fn find_tool_versions(start_dir: &Path) -> Result<Option<(PathBuf, BTreeMap<Stri
     while let Some(dir) = cur {
         let candidate = dir.join(".tool-versions");
         if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).map_err(|e| Error::io(&candidate, e))?;
+            let text = crate::fs::read_text_without_bom(&candidate)
+                .map_err(|e| Error::io(&candidate, e))?;
             return Ok(Some((candidate, parse_tool_versions(&text))));
         }
         cur = dir.parent();
     }
     Ok(None)
+}
+
+/// asdf plugin names that differ from the osdk backend id.
+///
+/// asdf itself writes these into `.tool-versions` (`asdf set nodejs 20`), so
+/// they are the names real files contain. Each is also a CLI alias of its
+/// backend; `tool_versions_names_are_registered_aliases` keeps the two lists
+/// from drifting apart.
+pub const TOOL_VERSIONS_PLUGIN_NAMES: &[(&str, &str)] = &[("nodejs", "node"), ("golang", "go")];
+
+/// The osdk tool a `.tool-versions` line's first word names.
+pub fn tool_versions_tool(word: &str) -> &str {
+    TOOL_VERSIONS_PLUGIN_NAMES
+        .iter()
+        .find(|(plugin, _)| *plugin == word)
+        .map_or(word, |(_, tool)| tool)
 }
 
 pub fn parse_tool_versions(text: &str) -> BTreeMap<String, String> {
@@ -2835,7 +2990,7 @@ pub fn parse_tool_versions(text: &str) -> BTreeMap<String, String> {
         }
         let mut it = line.split_whitespace();
         if let (Some(tool), Some(ver)) = (it.next(), it.next()) {
-            map.insert(tool.to_string(), ver.to_string());
+            map.insert(tool_versions_tool(tool).to_string(), ver.to_string());
         }
     }
     map
@@ -3843,6 +3998,68 @@ probe_timeout_ms = 125
             .contains("cycle"));
         assert!(validate_alias_name("latest").is_err());
         assert!(validate_alias_name("default").is_ok());
+        for version_like in ["20", "20.1", "v20", "1.2.3"] {
+            assert!(validate_alias_name(version_like).is_err(), "{version_like}");
+        }
+        for name in ["18-legacy", "v20-work", "work20", "lts20x"] {
+            assert!(validate_alias_name(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn unknown_top_level_sections_are_reported_with_a_suggestion() {
+        let value: toml::Value = toml::from_str(
+            "extends = \"base.toml\"
+[toolz]
+node = \"20\"
+[env]
+X = \"1\"
+[tools]
+[tasks]
+[sys.pkg]
+",
+        )
+        .unwrap();
+        assert_eq!(unknown_top_level_keys(&value), ["env", "toolz"]);
+        assert_eq!(closest_top_level_key("toolz"), Some("tools"));
+        assert_eq!(closest_top_level_key("taks"), Some("tasks"));
+        assert_eq!(closest_top_level_key("env"), None);
+        // Every section ConfigFile reads must be on the list, or it would warn.
+        let all = KNOWN_TOP_LEVEL_KEYS
+            .iter()
+            .map(|key| {
+                format!(
+                    "[{key}]
+"
+                )
+            })
+            .collect::<String>()
+            .replace(
+                "[extends]
+",
+                "",
+            );
+        let value: toml::Value = toml::from_str(&all).unwrap();
+        assert!(unknown_top_level_keys(&value).is_empty());
+    }
+
+    #[test]
+    fn config_errors_name_the_file_and_where_in_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.toml");
+        std::fs::write(&path, "[tools]\nnode = \"20\"\n[tasks\n").unwrap();
+        let syntax = read_config_file(&path, None).unwrap_err().to_string();
+        assert!(
+            syntax.contains(&format!("{}:3:7:", path.display())),
+            "{syntax}"
+        );
+
+        std::fs::write(&path, "[tools]\nnode = 20\n").unwrap();
+        let shape = read_config_file(&path, None).unwrap_err().to_string();
+        assert!(shape.contains(&path.display().to_string()), "{shape}");
+        assert!(shape.contains("`tools.node`"), "{shape}");
+        assert!(shape.contains("quoted strings"), "{shape}");
+        assert!(!shape.contains('\n'), "{shape}");
     }
 
     #[test]

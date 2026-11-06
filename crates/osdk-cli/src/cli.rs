@@ -192,7 +192,7 @@ pub enum Command {
     /// Generate shell completion code.
     Completions {
         /// Target shell.
-        shell: clap_complete::Shell,
+        shell: CompletionShell,
     },
 
     /// Manage user-defined version aliases.
@@ -2001,5 +2001,32 @@ mod tests {
             panic!("unexpected command");
         };
         assert!(accept_plan.is_none());
+    }
+}
+
+/// Shells `osdk completions` can generate for.
+///
+/// Mirrors `clap_complete::Shell`, plus the `pwsh` spelling that
+/// `osdk activate pwsh` already accepts: the two commands are set up side by
+/// side in one profile, and `completions pwsh` used to be rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Elvish,
+    Fish,
+    #[value(alias = "pwsh")]
+    Powershell,
+    Zsh,
+}
+
+impl From<CompletionShell> for clap_complete::Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Bash => Self::Bash,
+            CompletionShell::Elvish => Self::Elvish,
+            CompletionShell::Fish => Self::Fish,
+            CompletionShell::Powershell => Self::PowerShell,
+            CompletionShell::Zsh => Self::Zsh,
+        }
     }
 }

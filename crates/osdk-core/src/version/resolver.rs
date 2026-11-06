@@ -19,6 +19,27 @@ pub struct ActiveVersion {
     pub spec: String,
     pub source: VersionOrigin,
     pub is_range: bool,
+    /// Versions to fall back to, in order, when `spec` has no install: the
+    /// rest of an asdf `.tool-versions` line (`nodejs 20.11.1 18.19.0`) or of
+    /// a multi-line pyenv `.python-version`. Both tools use the first entry
+    /// that is installed; see [`ActiveVersion::choose_installed`].
+    pub fallbacks: Vec<String>,
+}
+
+impl ActiveVersion {
+    /// The spec to run: the declared one when `installed` accepts it, else
+    /// the first fallback that it accepts, else the declared one (which is
+    /// then reported as not installed, naming what the file asked for first).
+    pub fn choose_installed(&self, installed: impl Fn(&str) -> bool) -> String {
+        if self.fallbacks.is_empty() || installed(&self.spec) {
+            return self.spec.clone();
+        }
+        self.fallbacks
+            .iter()
+            .find(|fallback| installed(fallback))
+            .unwrap_or(&self.spec)
+            .clone()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +68,7 @@ pub struct PackageManagerRequest {
 pub fn package_manager_from_package_json(
     path: &Path,
 ) -> Result<Option<PackageManagerRequest>, String> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
+    let text = crate::fs::read_text_without_bom(path).map_err(|error| {
         crate::t!(
             "err.package_manager_manifest_read",
             path = path.display(),
@@ -240,6 +261,7 @@ pub fn resolve_active(
                     spec: package_manager.version,
                     source: VersionOrigin::ProjectMetadata(package_manager.source),
                     is_range: false,
+                    fallbacks: Vec::new(),
                 });
             }
         }
@@ -257,6 +279,7 @@ pub fn resolve_active(
                         spec,
                         source: VersionOrigin::ProjectConfig(p),
                         is_range: false,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -267,7 +290,7 @@ pub fn resolve_active(
     for dir in &ancestors {
         let tv = dir.join(".tool-versions");
         if tv.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&tv) {
+            if let Ok(text) = crate::fs::read_text_without_bom(&tv) {
                 let map = parse_tool_versions(&text);
                 if let Some(spec) = map.get(tool) {
                     return Some(ActiveVersion {
@@ -275,6 +298,7 @@ pub fn resolve_active(
                         spec: spec.clone(),
                         source: VersionOrigin::ToolVersions(tv),
                         is_range: false,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -292,6 +316,7 @@ pub fn resolve_active(
                         spec,
                         source: VersionOrigin::IdiomaticFile(p),
                         is_range: false,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -309,6 +334,7 @@ pub fn resolve_active(
                         spec,
                         source: VersionOrigin::ProjectMetadata(package),
                         is_range: true,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -321,11 +347,15 @@ pub fn resolve_active(
         spec: spec.clone(),
         source: VersionOrigin::GlobalConfig,
         is_range: false,
+        fallbacks: Vec::new(),
     })
 }
 
 /// Apply one shared policy to tool selection. Explicit CLI requests and lock
 /// replay bypass this resolver and retain their authority.
+///
+/// The winner is narrowed to the version `osdk.lock` recorded for the same
+/// declaration (see [`super::lock_pin`]): this is what running a tool uses.
 pub fn resolve_active_config(
     tool: &str,
     start_dir: &Path,
@@ -333,6 +363,17 @@ pub fn resolve_active_config(
     idiomatic_files: &[&str],
 ) -> crate::Result<Option<ActiveVersion>> {
     Ok(resolve_selection(tool, start_dir, config, idiomatic_files)?.winner)
+}
+
+/// [`resolve_active_config`] without the lock: the declaration as written,
+/// for callers that install, write the lock, or edit the config.
+pub fn resolve_active_config_declared(
+    tool: &str,
+    start_dir: &Path,
+    config: &crate::config::Config,
+    idiomatic_files: &[&str],
+) -> crate::Result<Option<ActiveVersion>> {
+    Ok(resolve_selection_declared(tool, start_dir, config, idiomatic_files)?.winner)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -354,7 +395,35 @@ impl ToolSelection {
         serde_json::to_string(&self.evidence).expect("selection evidence serializes")
     }
 }
+/// Select the active declaration and narrow it to the locked version.
 pub fn resolve_selection(
+    tool: &str,
+    cwd: &Path,
+    config: &crate::config::Config,
+    files: &[&str],
+) -> crate::Result<ToolSelection> {
+    let mut selection = resolve_selection_declared(tool, cwd, config, files)?;
+    if let Some(winner) = selection.winner.as_mut() {
+        let declared = winner.spec.clone();
+        super::lock_pin::pin_to_lock(config, cwd, winner);
+        if winner.spec != declared {
+            if let Some(evidence) = selection
+                .evidence
+                .iter_mut()
+                .find(|evidence| evidence.status == "winner")
+            {
+                evidence.reason = format!(
+                    "{}; osdk.lock resolved `{declared}` to {}",
+                    evidence.reason, winner.spec
+                );
+            }
+        }
+    }
+    Ok(selection)
+}
+
+/// Select the active declaration as written, without consulting the lock.
+pub fn resolve_selection_declared(
     tool: &str,
     cwd: &Path,
     config: &crate::config::Config,
@@ -490,9 +559,70 @@ fn read_tool_value(value: &toml::Value) -> Option<String> {
 
 /// Read a simple idiomatic version file (`.nvmrc`, `.python-version`, ...).
 /// Takes the first non-empty, non-comment line and trims a leading `v`.
+/// SDKMAN identifier suffix -> Foojay distribution id, for `.sdkmanrc`.
+///
+/// SDKMAN names a JDK `<version>-<vendor>` (`21.0.2-tem`); osdk spells the same
+/// thing `<distribution>-<version>` (`temurin-21.0.2`). Only vendors with an
+/// unambiguous Foojay id are listed; anything else is rejected rather than
+/// silently resolved to Temurin, which would install a different JDK than the
+/// file names.
+const SDKMAN_JAVA_VENDORS: &[(&str, &str)] = &[
+    ("tem", "temurin"),
+    ("zulu", "zulu"),
+    ("amzn", "corretto"),
+    ("librca", "liberica"),
+    ("nik", "liberica_native"),
+    ("ms", "microsoft"),
+    ("graalce", "graalvm_community"),
+    ("oracle", "oracle"),
+    ("open", "oracle_open_jdk"),
+    ("sapmchn", "sap_machine"),
+    ("sem", "semeru"),
+    ("albba", "dragonwell"),
+    ("kona", "kona"),
+    ("mandrel", "mandrel"),
+    ("bisheng", "bisheng"),
+    ("jbr", "jetbrains"),
+    ("trava", "trava"),
+];
+
+/// The `java=` entry of an `.sdkmanrc`, translated to an osdk Java spec.
+///
+/// `Ok(None)` when the file pins no Java (it may pin only `maven=` or
+/// `gradle=`); `Err` with the offending value when the entry cannot be honored
+/// exactly. A bare version (`java=21`) is accepted as-is.
+pub(crate) fn sdkman_java(text: &str) -> Result<Option<String>, String> {
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "java" {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() || value.contains(char::is_whitespace) {
+            return Err(value.to_string());
+        }
+        let Some((version, vendor)) = value.rsplit_once('-') else {
+            return Ok(Some(value.to_string()));
+        };
+        // JavaFX / CRaC builds are separate Foojay packages osdk does not select.
+        if version.contains(".fx") || version.contains(".crac") {
+            return Err(value.to_string());
+        }
+        return SDKMAN_JAVA_VENDORS
+            .iter()
+            .find(|(suffix, _)| *suffix == vendor)
+            .map(|(_, distribution)| Some(format!("{distribution}-{version}")))
+            .ok_or_else(|| value.to_string());
+    }
+    Ok(None)
+}
+
 fn read_idiomatic(path: &Path) -> Option<String> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = crate::fs::read_text_without_bom(path).ok()?;
 
     // Structured files need real parsing, not first-line heuristics.
     match name {
@@ -536,6 +666,7 @@ fn read_idiomatic(path: &Path) -> Option<String> {
             }
             return None;
         }
+        ".sdkmanrc" => return sdkman_java(&text).ok().flatten(),
         _ => {}
     }
 
@@ -916,6 +1047,96 @@ mod precedence_tests {
             .unwrap();
         assert_eq!(pnpm.spec, "10.5.0");
         assert!(!pnpm.is_range);
+    }
+    #[test]
+    fn sdkmanrc_java_entry_maps_vendor_suffix_to_distribution() {
+        let config = Config::default();
+        let files = &[".java-version", ".sdkmanrc"];
+        let select = |text: &str| {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join(".sdkmanrc"), text).unwrap();
+            resolve_active_config("java", temp.path(), &config, files).map(|v| v.map(|v| v.spec))
+        };
+        // SDKMAN's own multi-key format, as `sdk env init` writes it.
+        let sdkman =
+            "# Enable auto-env through the sdkman_auto_env config\njava=21.0.2-tem\nmaven=3.9.6\n";
+        assert_eq!(select(sdkman).unwrap().as_deref(), Some("temurin-21.0.2"));
+        assert_eq!(
+            select("java=17.0.10-amzn\n").unwrap().as_deref(),
+            Some("corretto-17.0.10")
+        );
+        assert_eq!(
+            select("java=21.0.2-graalce\n").unwrap().as_deref(),
+            Some("graalvm_community-21.0.2")
+        );
+        assert_eq!(select("java = 21\n").unwrap().as_deref(), Some("21"));
+        // No Java pinned: not this tool's declaration, not an error.
+        assert_eq!(select("maven=3.9.6\n").unwrap(), None);
+        // An unknown vendor or a JavaFX build must not quietly become Temurin.
+        assert!(select("java=21.0.2-unknownvendor\n").is_err());
+        assert!(select("java=21.0.2.fx-zulu\n").is_err());
+    }
+    #[test]
+    fn tool_versions_accepts_the_asdf_plugin_names() {
+        // `asdf set nodejs 20` writes `nodejs`, not `node`; `osdk install`
+        // already resolved it through the CLI alias, so selection must agree or
+        // the lock pins one version while shims run another.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".tool-versions"),
+            "nodejs 20.1.0\ngolang 1.22.3\n",
+        )
+        .unwrap();
+        let config = Config::default();
+        let spec = |tool| {
+            resolve_active_config(tool, temp.path(), &config, &[])
+                .unwrap()
+                .map(|v| v.spec)
+        };
+        assert_eq!(spec("node").as_deref(), Some("20.1.0"));
+        assert_eq!(spec("go").as_deref(), Some("1.22.3"));
+    }
+
+    #[test]
+    fn tool_versions_names_are_registered_aliases() {
+        let registry = crate::backend::registry::Registry::new();
+        for (plugin, tool) in crate::config::TOOL_VERSIONS_PLUGIN_NAMES {
+            assert_eq!(registry.get(plugin).unwrap().id(), *tool, "{plugin}");
+        }
+    }
+    #[test]
+    fn native_declarations_tolerate_a_leading_utf8_bom() {
+        // Notepad and PowerShell's `-Encoding utf8` write a BOM; nvm, asdf and
+        // Node's own package.json loader ignore it, so osdk must too.
+        let config = Config::default();
+        let cases: [(&str, &str, &str, &[&str]); 4] = [
+            ("node", ".nvmrc", "\u{feff}20\n", &[".nvmrc"]),
+            ("node", ".tool-versions", "\u{feff}node 20\n", &[]),
+            (
+                "node",
+                "package.json",
+                "\u{feff}{\"engines\":{\"node\":\"20\"}}",
+                &[],
+            ),
+            (
+                "python",
+                ".python-version",
+                "\u{feff}3.12\n",
+                &[".python-version"],
+            ),
+        ];
+        for (tool, file, text, files) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join(file), text).unwrap();
+            let active = resolve_active_config(tool, temp.path(), &config, files)
+                .unwrap_or_else(|error| panic!("{file}: {error}"))
+                .unwrap_or_else(|| panic!("{file}: no selection"));
+            assert_eq!(
+                active.spec,
+                if tool == "node" { "20" } else { "3.12" },
+                "{file}"
+            );
+        }
     }
     #[test]
     fn invalid_native_declarations_are_errors_under_both_policies() {

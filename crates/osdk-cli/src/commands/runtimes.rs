@@ -1558,7 +1558,7 @@ pub(crate) fn rust_override(app: &App, command: RustOverrideCommand) -> Result<(
         }
         RustOverrideCommand::Export { path } => {
             let directory = path.unwrap_or(cwd);
-            let active = osdk_core::version::resolver::resolve_active_config(
+            let active = osdk_core::version::resolver::resolve_active_config_declared(
                 "rust",
                 &directory,
                 &app.ctx.config,

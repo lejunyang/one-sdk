@@ -290,10 +290,49 @@ pub fn deactivate(shell: String) -> Result<()> {
 }
 
 pub fn hook_env(app: &App, shell: String) -> Result<()> {
+    use osdk_core::activate::{render_missing_warned, MISSING_WARNED_VAR};
     let sh: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
     let cwd = std::env::current_dir()?;
-    let delta = project_environment(app, &cwd)?;
+    // Printed above a prompt, a bare "no installed python version matches"
+    // names neither osdk nor the way out.
+    let (delta, missing) = project_environment_allowing_missing(app, &cwd).map_err(|error| {
+        let reason = error
+            .downcast_ref::<osdk_core::Error>()
+            .map(|error| error.localized())
+            .unwrap_or_else(|| format!("{error:#}"));
+        anyhow!(t!(
+            "err.hook_env_failed",
+            dir = cwd.display(),
+            error = reason
+        ))
+    })?;
     print!("{}", osdk_core::activate::render_hook_env(sh, &delta));
+    // A missing pinned tool no longer blocks the rest of the directory; say
+    // which one once per directory and set, not above every prompt.
+    let warned = std::env::var(MISSING_WARNED_VAR).ok();
+    if missing.is_empty() {
+        if warned.is_some() {
+            print!("{}", render_missing_warned(sh, None));
+        }
+    } else {
+        let tools = missing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let key = format!("{}|{tools}", cwd.display());
+        if warned.as_deref() != Some(key.as_str()) {
+            eprintln!(
+                "{}",
+                t!(
+                    "warn.activation_missing_tools",
+                    dir = cwd.display(),
+                    tools = tools
+                )
+            );
+            print!("{}", render_missing_warned(sh, Some(&key)));
+        }
+    }
     Ok(())
 }
 
@@ -307,7 +346,28 @@ pub(crate) fn project_environment(
     app: &App,
     cwd: &std::path::Path,
 ) -> Result<osdk_core::activate::EnvDelta> {
-    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, cwd)?;
+    let delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, cwd)?;
+    Ok(with_shared_layers(app, delta))
+}
+
+/// [`project_environment`] for the prompt hook: pinned tools that are not
+/// installed are reported instead of failing the whole directory.
+fn project_environment_allowing_missing(
+    app: &App,
+    cwd: &std::path::Path,
+) -> Result<(
+    osdk_core::activate::EnvDelta,
+    Vec<osdk_core::activate::MissingTool>,
+)> {
+    let (delta, missing) =
+        osdk_core::activate::compute_env_delta_allowing_missing(&app.ctx, &app.registry, cwd)?;
+    Ok((with_shared_layers(app, delta), missing))
+}
+
+fn with_shared_layers(
+    app: &App,
+    mut delta: osdk_core::activate::EnvDelta,
+) -> osdk_core::activate::EnvDelta {
     // Layer 2: downstream package caches (only vars the user hasn't set).
     let cache_vars = osdk_core::cache::cache_env(
         &app.ctx.dirs.cache,
@@ -321,7 +381,7 @@ pub(crate) fn project_environment(
     delta
         .unset_vars
         .retain(|key| !delta.set_vars.contains_key(key));
-    Ok(delta)
+    delta
 }
 
 /// `osdk env`: print the directory's environment for a caller without a hook.
@@ -541,7 +601,12 @@ pub async fn run_task(
 
     let cwd = std::env::current_dir()?;
     let env = task_environment(app, &cwd)?;
-    let base_path = std::env::var("PATH").unwrap_or_default();
+    // The PATH an activated shell would have here: its own entries go on top
+    // of the inherited PATH minus whatever an outer activation added, as for
+    // `osdk exec` and `osdk env`.
+    let base_path = osdk_core::execution::ambient_path()
+        .to_string_lossy()
+        .into_owned();
     let defs = app.ctx.config.tasks.tasks.clone();
 
     let mut spawner = runner::ProcessSpawner {

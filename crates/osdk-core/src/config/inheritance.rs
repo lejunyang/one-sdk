@@ -78,9 +78,23 @@ pub fn raw(path: &Path) -> Result<toml::Value> {
         return Err(Error::config("config source must be a regular file"));
     }
     let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-    toml::from_str(&text)
-        .map_err(|e: toml::de::Error| Error::config(format!("{}: {}", path.display(), e.message())))
+    toml::from_str(&text).map_err(|e: toml::de::Error| {
+        Error::config(format!("{}: {}", located(path, &text, &e), e.message()))
+    })
 }
+
+/// `path:line:column` for a syntax error, so an editor can jump to it; the
+/// message alone ("invalid table header") did not say where.
+fn located(path: &Path, text: &str, error: &toml::de::Error) -> String {
+    let Some(span) = error.span() else {
+        return path.display().to_string();
+    };
+    let before = &text[..span.start.min(text.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+    format!("{}:{line}:{column}", path.display())
+}
+
 pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
     let direct = raw(path)?;
     if direct.get("extends").is_none() {

@@ -16,8 +16,10 @@ For dynamic tools, `reshim` publishes launchers only for the exact configured
 root, and legacy `.osdk-tool.json` state is never executable.
 
 Each shim resolves the version for the current directory at execution time, so
-project pins also work in IDEs, CI, and processes without a prompt hook. Shims
-avoid recursively invoking themselves. On Windows, `.cmd`/`.bat` targets run via
+project pins also work in IDEs, CI, and processes without a prompt hook. A child
+may invoke the same tool through its shim to select its own project's version.
+Recursion checks reject resolved targets that are osdk binaries, links, or
+generated wrappers. On Windows, `.cmd`/`.bat` targets run via
 `%ComSpec% /D /S /C call` to preserve arguments, standard I/O, and status. The
 generated `.cmd` wrapper writes the install path in the system OEM code page so a
 console-less cmd that falls back to the OEM code page can still reach a non-ASCII
@@ -51,6 +53,12 @@ adapters. osdk stores the original value of every managed variable; `deactivate`
 removes the hook and restores that environment. The PowerShell hook prevents
 re-entrant command lookup.
 
+Each refresh replaces only the PATH entries osdk added itself, in the same
+position. A directory you put on PATH after activation stays where you put it:
+a Python venv activated in the shell keeps its place in front of osdk's
+Python, and an entry an IDE added for its terminal is kept. `deactivate`
+removes osdk's entries and leaves the rest of PATH as it is.
+
 ### Without a shell hook
 
 IDEs, CI steps, containers, scheduled jobs and `pwsh -NoProfile` never run the
@@ -68,9 +76,10 @@ osdk exec -- cargo build           # without --tool, run under that environment
 ```
 
 - **dotenv / json** spell out the complete PATH, since whoever reads a file
-  cannot say "prepend to the existing PATH". It is built on the PATH from before
-  any activation, so exporting from an activated shell does not write another
-  directory's tools into the file. dotenv values are unquoted: `docker --env-file`
+  cannot say "prepend to the existing PATH". It is built on the current PATH minus
+  the entries an activation added, so exporting from an activated shell does not
+  write another directory's tools into the file, and directories added since
+  (a venv, say) are kept. dotenv values are unquoted: `docker --env-file`
   keeps quotes as part of the value, while most dotenv parsers strip them. A
   multi-line value cannot be written as dotenv and is refused with a pointer to
   json.
@@ -80,8 +89,8 @@ osdk exec -- cargo build           # without --tool, run under that environment
   `eval "$(osdk env --format bash)"`. Do not put one in an rc file in place of
   `activate`: it does not follow directory changes.
 - **`osdk exec -- <command>`** without `--tool` installs nothing; a selected tool
-  that is not installed fails just as it does in an activated shell, so run
-  `osdk install` first. Called from an activated shell, a variable the outer
+  that is not installed fails (an activated shell only warns and activates the
+  rest), so run `osdk install` first. Called from an activated shell, a variable the outer
   activation set and this directory does not goes back to its pre-activation
   value. With `--tool` the behavior is unchanged.
 
@@ -124,7 +133,7 @@ win a shared command name at run time either.
 ## Completions
 
 ```text
-osdk completions bash|elvish|fish|powershell|zsh
+osdk completions bash|elvish|fish|powershell|pwsh|zsh
 ```
 
 The command writes completion code to stdout; save or source it according to the

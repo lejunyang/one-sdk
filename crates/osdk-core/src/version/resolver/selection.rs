@@ -121,6 +121,7 @@ fn collect(
                             spec: String::new(),
                             source: VersionOrigin::ProjectConfig(path.clone()),
                             is_range: false,
+                            fallbacks: Vec::new(),
                         },
                         kind: Osdk,
                         path: Some(path),
@@ -162,7 +163,7 @@ fn collect(
     for dir in cwd.ancestors() {
         let path = dir.join(".tool-versions");
         if path.is_file() {
-            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            let text = crate::fs::read_text_without_bom(&path).map_err(|e| Error::io(&path, e))?;
             for (line, text) in text.lines().enumerate() {
                 let words: Vec<_> = text
                     .split('#')
@@ -170,7 +171,11 @@ fn collect(
                     .unwrap_or("")
                     .split_whitespace()
                     .collect();
-                if words.first() == Some(&tool) {
+                if words
+                    .first()
+                    .map(|word| crate::config::tool_versions_tool(word))
+                    == Some(tool)
+                {
                     if shadowed(
                         &mut out,
                         tool,
@@ -180,12 +185,14 @@ fn collect(
                     ) {
                         continue;
                     }
-                    if words.len() != 2 {
+                    if words.len() < 2 {
                         return Err(invalid(
                             &path,
-                            &format!("line {}: {tool} (expected one version)", line + 1),
+                            &format!("line {}: {tool} (expected a version)", line + 1),
                         ));
                     }
+                    // asdf allows several versions on one line: the first
+                    // installed one is used, so the rest are fallbacks.
                     push(
                         &mut out,
                         tool,
@@ -196,6 +203,7 @@ fn collect(
                         VersionOrigin::ToolVersions(path.clone()),
                         false,
                     )?;
+                    set_fallbacks(&mut out, &path, line + 1, &words[2..])?;
                 }
             }
         }
@@ -214,7 +222,8 @@ fn collect(
             if shadowed(&mut out, tool, kind, &path, "version declaration") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            let mut python_fallbacks: Vec<String> = Vec::new();
+            let text = crate::fs::read_text_without_bom(&path).map_err(|e| Error::io(&path, e))?;
             let field = if *name == "rust-toolchain.toml"
                 || (*name == "rust-toolchain" && text.trim_start().starts_with('['))
             {
@@ -231,14 +240,34 @@ fn collect(
                 "toolchain.channel".to_string()
             } else if *name == "go.mod" {
                 "go".into()
+            } else if *name == ".sdkmanrc" {
+                match super::sdkman_java(&text) {
+                    Ok(Some(_)) => "java".into(),
+                    // Only other SDKMAN candidates (maven, gradle, ...) pinned.
+                    Ok(None) => continue,
+                    Err(value) => {
+                        return Err(invalid(
+                            &path,
+                            &format!("java={value} (unsupported SDKMAN identifier)"),
+                        ))
+                    }
+                }
             } else {
                 let lines: Vec<_> = text
                     .lines()
                     .enumerate()
                     .filter(|(_, s)| !s.split('#').next().unwrap_or("").trim().is_empty())
                     .collect();
-                if lines.len() != 1 {
+                // pyenv lists several versions, one per line, and `python`
+                // runs the first installed one; other files name exactly one.
+                if lines.is_empty() || (lines.len() > 1 && *name != ".python-version") {
                     return Err(invalid(&path, "expected one version line"));
+                }
+                if lines.len() > 1 {
+                    python_fallbacks = lines[1..]
+                        .iter()
+                        .map(|(_, line)| line.split('#').next().unwrap_or("").trim().to_string())
+                        .collect();
                 }
                 format!("line {}", lines[0].0 + 1)
             };
@@ -253,9 +282,11 @@ fn collect(
                     kind,
                     Some(path.clone()),
                     field,
-                    VersionOrigin::IdiomaticFile(path),
+                    VersionOrigin::IdiomaticFile(path.clone()),
                     false,
                 )?;
+                let fallbacks: Vec<&str> = python_fallbacks.iter().map(String::as_str).collect();
+                set_fallbacks(&mut out, &path, 0, &fallbacks)?;
             } else if *name != "go.mod" {
                 return Err(invalid(&path, &field));
             }
@@ -275,7 +306,7 @@ fn collect(
             if kinds.iter().all(|kind| out.iter().any(|c| c.kind == *kind)) {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            let text = crate::fs::read_text_without_bom(&path).map_err(|e| Error::io(&path, e))?;
             let value: serde_json::Value =
                 serde_json::from_str(&text).map_err(|_| invalid(&path, "JSON"))?;
             if tool == "node" {
@@ -453,6 +484,7 @@ fn shadowed(
             spec: String::new(),
             source: VersionOrigin::IdiomaticFile(path.into()),
             is_range: false,
+            fallbacks: Vec::new(),
         },
         kind,
         path: Some(path.into()),
@@ -470,6 +502,7 @@ fn ignored(out: &mut Vec<Candidate>, tool: &str, kind: ToolSource, path: &Path, 
             spec: String::new(),
             source: VersionOrigin::ProjectMetadata(path.into()),
             is_range: false,
+            fallbacks: Vec::new(),
         },
         kind,
         path: Some(path.into()),
@@ -477,6 +510,34 @@ fn ignored(out: &mut Vec<Candidate>, tool: &str, kind: ToolSource, path: &Path, 
         shadowed_layer: false,
         ignored: true,
     });
+}
+
+/// Attach `fallbacks` to the candidate just pushed, validated like its spec.
+/// `line` names the declaration in errors (0: the file as a whole).
+fn set_fallbacks(
+    out: &mut [Candidate],
+    path: &Path,
+    line: usize,
+    fallbacks: &[&str],
+) -> Result<()> {
+    let Some(candidate) = out.last_mut() else {
+        return Ok(());
+    };
+    for fallback in fallbacks {
+        if fallback.chars().any(char::is_control) || fallback.contains("://") {
+            let field = if line == 0 {
+                "fallback version".to_string()
+            } else {
+                format!("line {line}: fallback version")
+            };
+            return Err(invalid(path, &field));
+        }
+        let fallback = fallback.trim_start_matches('v');
+        if !fallback.is_empty() {
+            candidate.active.fallbacks.push(fallback.to_string());
+        }
+    }
+    Ok(())
 }
 
 fn invalid(path: &Path, field: &str) -> Error {
@@ -549,6 +610,7 @@ fn push(
             spec: spec.trim().into(),
             source,
             is_range,
+            fallbacks: Vec::new(),
         },
         kind,
         path,
@@ -642,6 +704,74 @@ mod tests {
     }
     fn select(root: &Path, config: &Config) -> Result<super::super::ToolSelection> {
         resolve_selection("node", root, config, &[".nvmrc", ".node-version"])
+    }
+
+    /// asdf runs the first installed version of a multi-version line and
+    /// pyenv the first installed line of `.python-version`. Both used to be
+    /// rejected, and the error stopped selection for the whole directory.
+    #[test]
+    fn asdf_and_pyenv_version_lists_become_fallbacks() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        write(
+            root,
+            ".tool-versions",
+            "nodejs 20.11.1 18.19.0 # comment
+",
+        );
+        let node = select(root, &Config::default()).unwrap().winner.unwrap();
+        assert_eq!(node.spec, "20.11.1");
+        assert_eq!(node.fallbacks, vec!["18.19.0".to_string()]);
+
+        write(
+            root,
+            ".python-version",
+            "3.12.1
+# old
+3.11.7
+system
+",
+        );
+        let python = resolve_selection("python", root, &Config::default(), &[".python-version"])
+            .unwrap()
+            .winner
+            .unwrap();
+        assert_eq!(python.spec, "3.12.1");
+        assert_eq!(
+            python.fallbacks,
+            vec!["3.11.7".to_string(), "system".to_string()]
+        );
+
+        // A list is pyenv's convention only; `.nvmrc` still names one version.
+        let other = tempfile::tempdir().unwrap();
+        write(
+            other.path(),
+            ".nvmrc",
+            "20
+18
+",
+        );
+        assert!(select(other.path(), &Config::default()).is_err());
+    }
+
+    #[test]
+    fn the_first_installed_entry_of_a_list_runs() {
+        let active = |fallbacks: &[&str]| ActiveVersion {
+            tool: "node".into(),
+            spec: "20.11.1".into(),
+            source: VersionOrigin::GlobalConfig,
+            is_range: false,
+            fallbacks: fallbacks.iter().map(|s| s.to_string()).collect(),
+        };
+        let installed = ["18.19.0", "16.20.2"];
+        let has = |spec: &str| installed.contains(&spec);
+        assert_eq!(
+            active(&["17.0.0", "18.19.0", "16.20.2"]).choose_installed(has),
+            "18.19.0"
+        );
+        // Nothing installed: the first entry is named as the missing one.
+        assert_eq!(active(&["17.0.0"]).choose_installed(has), "20.11.1");
+        assert_eq!(active(&[]).choose_installed(has), "20.11.1");
     }
     #[test]
     fn custom_order_records_all_fields_and_shadowed_ancestors() {
@@ -914,6 +1044,7 @@ mod tests {
             spec: s.into(),
             source: VersionOrigin::GlobalConfig,
             is_range,
+            fallbacks: Vec::new(),
         };
         assert_eq!(
             compatible(

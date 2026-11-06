@@ -1017,7 +1017,10 @@ mod tests {
         let url = format!("https://{}/", listener.local_addr().unwrap());
         drop(listener);
         ctx.config.sources.registries.npm.urls = vec![url];
-        ctx.config.sources.registries.npm.probe_timeout_ms = 10;
+        // Long enough to observe the refusal: Windows takes about two seconds
+        // to refuse a closed loopback port, and a probe that merely times out
+        // is still tried (a slow registry is not a broken one).
+        ctx.config.sources.registries.npm.probe_timeout_ms = 10_000;
         // The real environment and the directories above the fixture can hold
         // the developer's own npm configuration, which would turn the
         // all-sources-failed path into a native pass-through.

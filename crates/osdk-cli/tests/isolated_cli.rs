@@ -612,6 +612,38 @@ fn env_file_formats_build_path_on_the_pre_activation_path() {
     assert!(!path.contains(&stale), "{path:?}");
 }
 
+/// The same, for a session activated by the current hook: it records only the
+/// entries it added, so a directory prepended afterwards (a venv, an IDE's
+/// tool dir) is part of the base and stays in the file.
+#[test]
+fn env_file_formats_keep_entries_added_after_activation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let later = temporary.path().join("venv-bin");
+    let added = temporary.path().join("other-project-bin");
+    let original = temporary.path().join("original-bin");
+    let path = std::env::join_paths([&later, &added, &original]).unwrap();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["env", "--format", "json"],
+        &[
+            ("PATH", &path.to_string_lossy()),
+            ("OSDK_ADDED_PATH", &added.display().to_string()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let vars: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&output.stdout).unwrap();
+    let path: Vec<PathBuf> = std::env::split_paths(&vars["PATH"]).collect();
+    assert!(path.contains(&later), "{path:?}");
+    assert!(path.contains(&original), "{path:?}");
+    assert!(!path.contains(&added), "{path:?}");
+}
+
 /// A shell the test can ask to print one variable, found on the host.
 fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str, String)>) {
     #[cfg(windows)]
@@ -631,6 +663,300 @@ fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str
             vec![("PATH", "/usr/bin:/bin".into())],
         )
     }
+}
+
+/// A task gets the directory's activation on top of the PATH it was given --
+/// without the entries an outer activation added. Started from a shell whose
+/// hook had activated something else, those entries used to stay in the
+/// task's PATH, behind the task's own.
+#[test]
+fn task_path_drops_entries_an_outer_activation_added() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let (program, args, mut env) = print_variable_command("PATH");
+    let argv = std::iter::once(program)
+        .chain(args)
+        .map(|arg| format!("{arg:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!("[tasks.show]\nrun = [{{ argv = [{argv}] }}]\n"),
+    )
+    .unwrap();
+    let stale = temporary.path().join("stale-activation-bin");
+    let kept = temporary.path().join("venv-bin");
+    // The helper's PATH may already hold several entries (`/usr/bin:/bin`).
+    let path = std::env::join_paths(
+        [kept.clone(), stale.clone()]
+            .into_iter()
+            .chain(std::env::split_paths(&env[0].1)),
+    )
+    .unwrap();
+    env[0].1 = path.to_string_lossy().into_owned();
+    let trusted = project.to_string_lossy().into_owned();
+    let added = stale.display().to_string();
+    let mut vars: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    vars.push(("OSDK_ADDED_PATH", &added));
+    vars.push(("OSDK_TRUSTED_CONFIG_PATHS", &trusted));
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["--offline", "run", "--no-deps", "show"],
+        &vars,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(&kept.display().to_string()), "{stdout}");
+    assert!(!stdout.contains(&added), "{stdout}");
+}
+
+/// One pinned tool that is not installed (a fresh clone, a `.nvmrc` moved by a
+/// pull) used to leave the whole directory unactivated. The hook now activates
+/// the rest and names the missing tool -- once, not above every prompt -- while
+/// `osdk env`, which scripts consume unattended, still refuses.
+#[test]
+fn hook_activates_installed_tools_and_names_a_missing_one_once() {
+    let temporary = tempfile::tempdir().unwrap();
+    let go = temporary.path().join("installs/go/1.22.5");
+    std::fs::create_dir_all(go.join("bin")).unwrap();
+    std::fs::write(go.join(".osdk-complete"), b"").unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\ngo = \"1.22\"\nnode = \"99\"\n",
+    )
+    .unwrap();
+
+    let first = run_isolated_in(temporary.path(), &project, &["hook-env", "--shell", "bash"]);
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(first.status.success(), "{stderr}");
+    assert!(stdout.contains("1.22.5"), "go is activated: {stdout}");
+    assert!(
+        stderr.contains("node@99"),
+        "the missing tool is named: {stderr}"
+    );
+    let marker = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("export OSDK_MISSING_WARNED="))
+        .expect("the warning is recorded")
+        .trim_matches('\'')
+        .to_string();
+
+    let again = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["hook-env", "--shell", "bash"],
+        &[("OSDK_MISSING_WARNED", &marker)],
+    );
+    assert!(again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).trim().is_empty(),
+        "already warned here: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(String::from_utf8_lossy(&again.stdout).contains("1.22.5"));
+
+    let env = run_isolated_in(temporary.path(), &project, &["env"]);
+    assert!(
+        !env.status.success(),
+        "osdk env must not hand out a partial environment"
+    );
+}
+
+/// An asdf line listing several versions runs the first installed one.
+#[test]
+fn where_falls_back_through_an_asdf_version_list() {
+    let temporary = tempfile::tempdir().unwrap();
+    let install = temporary.path().join("installs/go/1.22.5");
+    std::fs::create_dir_all(install.join("bin")).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".tool-versions"), "golang 1.99.0 1.22.5\n").unwrap();
+    let hook = run_isolated_in(temporary.path(), &project, &["hook-env", "--shell", "bash"]);
+    assert!(String::from_utf8_lossy(&hook.stdout).contains("1.22.5"));
+    assert!(
+        String::from_utf8_lossy(&hook.stderr).trim().is_empty(),
+        "nothing is missing: {}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+    let output = run_isolated_in(temporary.path(), &project, &["where", "go"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .ends_with("1.22.5"));
+    let current = run_isolated_in(temporary.path(), &project, &["current", "go"]);
+    assert!(
+        String::from_utf8_lossy(&current.stdout).contains("go 1.22.5"),
+        "{}{}",
+        String::from_utf8_lossy(&current.stdout),
+        String::from_utf8_lossy(&current.stderr)
+    );
+}
+
+/// `osdk install` replays the lock, so what runs must be the locked version
+/// too -- not the newest install that also matches the declaration. A lock
+/// resolved from a different request (the config was edited since) is stale
+/// and does not apply.
+#[test]
+fn where_runs_the_locked_version_of_a_project_declaration() {
+    let temporary = tempfile::tempdir().unwrap();
+    for version in ["1.22.5", "1.22.9"] {
+        let install = temporary.path().join("installs/go").join(version);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    }
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let key = osdk_core::version::lock_pin::platform_key(osdk_core::platform::Platform::current());
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            "schema = 4\n[platforms.{key}.tools.go]\nrequest = \"1.22\"\nversion = \"1.22.5\"\n"
+        ),
+    )
+    .unwrap();
+    let where_go = |declared: &str| {
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!("[tools]\ngo = \"{declared}\"\n"),
+        )
+        .unwrap();
+        let output = run_isolated_in(temporary.path(), &project, &["where", "go"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string()
+    };
+    assert!(where_go("1.22").ends_with("1.22.5"), "locked version");
+    assert!(
+        where_go("1").ends_with("1.22.9"),
+        "stale lock entry ignored"
+    );
+}
+
+/// `java = "temurin-21"` must run a Temurin JDK even when a Zulu one with a
+/// higher number is installed, and `zulu-21` the Zulu one.
+#[test]
+fn where_selects_java_within_the_declared_distribution() {
+    let temporary = tempfile::tempdir().unwrap();
+    for identity in ["21.0.5+11", "zulu-21.0.9+10"] {
+        let install = temporary.path().join("installs/java").join(identity);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    }
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for (declared, expected) in [("temurin-21", "21.0.5+11"), ("zulu-21", "zulu-21.0.9+10")] {
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!("[tools]\njava = \"{declared}\"\n"),
+        )
+        .unwrap();
+        let output = run_isolated_in(temporary.path(), &project, &["where", "java"]);
+        assert!(
+            output.status.success(),
+            "{declared}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string();
+        assert!(Path::new(&path).ends_with(expected), "{declared} -> {path}");
+    }
+}
+
+#[test]
+fn where_finds_a_java_install_through_a_distribution_prefix() {
+    let temporary = tempfile::tempdir().unwrap();
+    let install = temporary.path().join("installs/java/21.0.5+11");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]
+java = \"temurin-21\"
+",
+    )
+    .unwrap();
+
+    for args in [
+        &["where", "java"][..],
+        &["where", "java@temurin-21.0.5"][..],
+    ] {
+        let output = run_isolated_in(temporary.path(), &project, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .ends_with("21.0.5+11"));
+    }
+}
+
+#[test]
+fn alias_rejects_version_shaped_names_and_unknown_unsets() {
+    let temporary = tempfile::tempdir().unwrap();
+    let shadow = run_isolated(temporary.path(), &["alias", "set", "node", "20", "22"]);
+    assert!(!shadow.status.success());
+    assert!(String::from_utf8_lossy(&shadow.stderr).contains("looks like a version"));
+    let set = run_isolated(temporary.path(), &["alias", "set", "node", "work", "20"]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let missing = run_isolated(temporary.path(), &["alias", "unset", "node", "nosuch"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stdout).is_empty());
+    let removed = run_isolated(temporary.path(), &["alias", "unset", "node", "work"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+}
+
+#[test]
+fn exec_exits_with_the_childs_own_code_and_adds_no_error() {
+    // Scripts branch on `$?` after `osdk exec -- <cmd>`: the code must be the
+    // child's (as with `mise exec` / `npx`), not a generic 1 plus an error line.
+    let temporary = tempfile::tempdir().unwrap();
+    let (program, arguments, host) = {
+        let (program, _, host) = print_variable_command("X");
+        #[cfg(windows)]
+        let arguments = vec!["/D".to_string(), "/C".into(), "exit 7".into()];
+        #[cfg(not(windows))]
+        let arguments = vec!["-c".to_string(), "exit 7".into()];
+        (program, arguments, host)
+    };
+    let mut args = vec!["exec", "--no-deps", "--", program.as_str()];
+    args.extend(arguments.iter().map(String::as_str));
+    let env: Vec<(&str, &str)> = host.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let output = run_isolated_in_with_env(temporary.path(), temporary.path(), &args, &env);
+    assert_eq!(output.status.code(), Some(7));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("exited with"), "{stderr}");
 }
 
 #[test]
@@ -2832,6 +3158,15 @@ fn completions_emit_target_shell_script() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("_osdk"));
     assert!(stdout.contains("complete"));
+
+    // `activate pwsh` is the documented spelling; completions accept it too.
+    let pwsh = run_isolated(temp.path(), &["completions", "pwsh"]);
+    assert!(
+        pwsh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pwsh.stderr)
+    );
+    assert!(String::from_utf8_lossy(&pwsh.stdout).contains("Register-ArgumentCompleter"));
 }
 
 #[test]
@@ -2948,7 +3283,7 @@ fn deactivate_emits_shell_restoration_code() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("unset -f _osdk_hook"));
-    assert!(stdout.contains("OSDK_ORIGINAL_PATH"));
+    assert!(stdout.contains("OSDK_ADDED_PATH"));
 }
 
 #[test]

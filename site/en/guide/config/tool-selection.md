@@ -49,7 +49,7 @@ Explicit `tool@version`, explicit deps provider/installer choices, and lock repl
 | `system` | Existing executable from the adapter home or PATH; explicitly enabled only | Node, Python, Go, Java, npm, pnpm, Yarn, Bun, Deno, Zig; see [system tools](#system-tools) |
 | `osdk` | `[tools]` in the nearest project `osdk.toml` / `.osdk.toml`, including explicit `extends` | All tools with a matching backend key |
 | `global` | `[tools]` in osdk user configuration `$OSDK_CONFIG_DIR/config.toml`; locate it with `osdk config path` | All tools with a matching backend key |
-| `.tool-versions` | Matching tool line in the nearest applicable `.tool-versions` | All tools with a matching backend key |
+| `.tool-versions` | Matching tool line in the nearest applicable `.tool-versions` | All tools with a matching backend key; asdf's plugin names `nodejs` and `golang` count as `node` and `go` |
 | `.nvmrc` | `.nvmrc` version declaration | Node |
 | `.node-version` | `.node-version` version declaration | Node |
 | `idiomatic` | Backend-declared files, in the fixed order below | Backends in the matrix below; not Node's two separately named kinds |
@@ -89,7 +89,7 @@ Every row below also supports `osdk`, `global`, and `.tool-versions` for its bac
 | Other built-in and dynamic backends | None | None |
 | Declarative plugin backends | `idiomatic` if the definition declares files | The definition's `idiomatic_files` order for other filenames; reserved `.nvmrc` / `.node-version` retain their separate kinds; no new enum values |
 
-Plain version files accept one version line (with optional comments); this is not arbitrary native-manager configuration parsing. In particular, the registered `.sdkmanrc` path currently uses the plain-version reader, not SDKMAN's multi-key `java=...` format. Rust toolchain files and the Go `go` directive have dedicated parsing.
+Plain version files accept one version line (with optional comments), except that `.python-version` may list several versions one per line as pyenv does, and a `.tool-versions` line may list several versions as asdf does: the first one that is installed runs, and when none is, the first is reported as not installed; a leading UTF-8 byte-order mark, as Notepad and PowerShell write it, is ignored in these files, `.tool-versions` and `package.json`. This is not arbitrary native-manager configuration parsing. `.sdkmanrc` is read in SDKMAN's own multi-key format: only the `java=` entry is used, and its vendor suffix becomes the distribution (`java=21.0.2-tem` selects `temurin-21.0.2`, `-amzn` Corretto, `-zulu` Zulu, `-graalce` GraalVM Community, and so on). An unknown vendor or a JavaFX/CRaC build is an error rather than a silent switch to Temurin; a file without `java=` declares no Java. Rust toolchain files and the Go `go` directive have dedicated parsing.
 
 Unknown strings and duplicate entries are errors: `"node"`, `".python-version"`, and `"go.mod"` are not valid `tool_order` values. Omitted declaration kinds are appended in the default relative order determined by `tools`; omission does not disable those sources. `system` is never appended: omission disables it. `[]` clears an inherited custom order and disables inherited `system`. For `idiomatic`, backend filename priority is fixed before directory distance, so an ancestor `go.mod` declaration can outrank a nearer `.go-version`; `tool_order` cannot reverse those two files. See the [three runnable examples](#examples-node-python-and-javascript-managers) below.
 
