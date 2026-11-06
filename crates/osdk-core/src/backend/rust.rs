@@ -119,6 +119,10 @@ impl RustBackend {
             );
             match Self::run_rustup(ctx, args, cwd, Some(source)) {
                 Ok(output) => return Ok(output),
+                // rustup rejected its own arguments (`rust@99`: "invalid
+                // toolchain name") before contacting any server. Every mirror
+                // would print the same usage error, so stop at the first.
+                Err(error) if is_rustup_usage_error(&error) => return Err(error),
                 Err(error) => {
                     tracing::warn!(
                         source = %source.id,
@@ -618,8 +622,86 @@ impl RustBackend {
     }
 }
 
+/// Whether a failed rustup run is clap rejecting its command line.
+///
+/// clap ends every usage error with this trailer; network and mirror failures
+/// never do, so they keep failing over to the next dist server.
+fn is_rustup_usage_error(error: &Error) -> bool {
+    error
+        .to_string()
+        .contains("For more information, try '--help'")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_rustup_usage_errors_stop_the_dist_server_failover() {
+        use super::*;
+        let usage = Error::other(
+            "external command `rustup toolchain install 99` failed with status exit code: 1:\n\
+             error: invalid value '99' for '[TOOLCHAIN]...': invalid toolchain name: '99'\n\n\
+             For more information, try '--help'.\n",
+        );
+        assert!(is_rustup_usage_error(&usage));
+        let network = Error::other(
+            "external command `rustup toolchain install 1.80.0` failed with status exit code: 1:\n\
+             error: could not download file from 'https://mirror.invalid/dist/channel-rust-1.80.0.toml.sha256'",
+        );
+        assert!(!is_rustup_usage_error(&network));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rustup_usage_error_is_not_retried_on_other_dist_servers() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let rustup = dirs.cargo_home().join("bin/rustup");
+        let log = temp.path().join("calls.log");
+        std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rustup,
+            format!(
+                "#!/bin/sh\necho call >> '{}'\nprintf \"error: invalid value '99'\n\nFor more information, try '--help'.\n\" >&2\nexit 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config::default(),
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            show_progress: false,
+        };
+        let sources = vec![
+            Source::mirror("first", "https://first.invalid", 0),
+            Source::official("second", "https://second.invalid"),
+        ];
+
+        let error = RustBackend::run_rustup_with_source_fallback(
+            &ctx,
+            &["toolchain", "install", "99"],
+            None,
+            &sources,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid value"), "{error}");
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "call\n");
+    }
+
     #[cfg(unix)]
     #[test]
     fn downloading_command_falls_back_across_ranked_dist_servers() {
