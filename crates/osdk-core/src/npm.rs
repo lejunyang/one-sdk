@@ -212,7 +212,11 @@ pub async fn resolve_package_version(
         .ok_or_else(|| Error::VersionResolve {
             tool: backend.into(),
             spec: request.spec.to_string(),
-            hint: Some("no version matched prerelease policy".into()),
+            hint: Some(crate::version::no_match_hint(
+                &request.spec,
+                &versions,
+                ctx.config.settings.prerelease,
+            )),
         })?
         .version
         .clone()

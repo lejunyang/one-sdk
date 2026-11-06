@@ -254,6 +254,39 @@ pub fn select_version<'a>(
     }
 }
 
+/// Why [`select_version_with_prerelease`] found nothing, for an error hint.
+///
+/// The hints this replaces each guessed a single cause -- "no version matched
+/// prerelease policy" for `deno@99`, "no matching version ships a x64 asset"
+/// for `node@abc` -- and sent the reader after the wrong one. This tells the
+/// two real cases apart: only pre-releases match (the policy is the cause), or
+/// nothing published matches at all (then the newest release is the useful
+/// fact). `candidates` is ascending, as the selector expects.
+pub fn no_match_hint(
+    spec: &VersionSpec,
+    candidates: &[VersionInfo],
+    policy: crate::config::PrereleasePolicy,
+) -> String {
+    use crate::config::PrereleasePolicy;
+    if policy != PrereleasePolicy::Allow
+        && select_version_with_prerelease(spec, candidates, PrereleasePolicy::Allow).is_some()
+    {
+        return "only pre-releases match; name one exactly or pass `--prerelease allow`".into();
+    }
+    match candidates
+        .iter()
+        .rev()
+        .find(|candidate| candidate.stable)
+        .or(candidates.last())
+    {
+        Some(newest) => format!(
+            "no published version matches; the newest is {}",
+            newest.version
+        ),
+        None => "the version index lists no versions".into(),
+    }
+}
+
 pub fn select_version_with_prerelease<'a>(
     spec: &VersionSpec,
     candidates: &'a [VersionInfo],
@@ -542,6 +575,38 @@ mod tests {
         assert_eq!(
             crate::dirs::sanitize_tool_id(&request.backend),
             std::path::PathBuf::from("npm/@antfu/ni")
+        );
+    }
+
+    #[test]
+    fn no_match_hint_names_the_actual_cause() {
+        use crate::config::PrereleasePolicy;
+        let versions = vec![
+            vi("1.0.0", true, None),
+            vi("2.0.0", true, None),
+            vi("3.0.0-rc.1", false, None),
+        ];
+        let missing = no_match_hint(
+            &VersionSpec::parse("99"),
+            &versions,
+            PrereleasePolicy::IfExplicit,
+        );
+        assert_eq!(missing, "no published version matches; the newest is 2.0.0");
+        let only_pre = no_match_hint(
+            &VersionSpec::parse("3"),
+            &versions,
+            PrereleasePolicy::IfExplicit,
+        );
+        assert!(only_pre.contains("only pre-releases match"), "{only_pre}");
+        // Under `allow` a miss is a miss: blaming the policy would be wrong.
+        let allowed = no_match_hint(&VersionSpec::parse("4"), &versions, PrereleasePolicy::Allow);
+        assert!(
+            allowed.starts_with("no published version matches"),
+            "{allowed}"
+        );
+        assert!(
+            no_match_hint(&VersionSpec::Latest, &[], PrereleasePolicy::Allow)
+                .contains("no versions")
         );
     }
 

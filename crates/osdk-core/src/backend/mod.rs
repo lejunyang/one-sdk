@@ -118,7 +118,13 @@ pub trait Backend: Send + Sync {
         let chosen = select_version(&req.spec, &versions).ok_or_else(|| Error::VersionResolve {
             tool: self.id().to_string(),
             spec: req.spec.to_string(),
-            hint: Some("no matching version found".into()),
+            // `select_version` applies no pre-release filter, so a miss here
+            // is a miss under any policy.
+            hint: Some(crate::version::no_match_hint(
+                &req.spec,
+                &versions,
+                crate::config::PrereleasePolicy::Allow,
+            )),
         })?;
         let mut tv = ToolVersion::new(self.id(), chosen.version.clone());
         tv.options = req.options.clone();

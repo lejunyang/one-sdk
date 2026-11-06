@@ -264,11 +264,11 @@ impl Backend for ZigBackend {
         .ok_or_else(|| Error::VersionResolve {
             tool: self.id().to_string(),
             spec: request.spec.to_string(),
-            hint: Some(
-                "zig publishes `master` as a rolling nightly; \
-                 `latest` only selects tagged releases"
-                    .into(),
-            ),
+            hint: Some(crate::version::no_match_hint(
+                &request.spec,
+                &versions,
+                ctx.config.settings.prerelease,
+            )),
         })?;
         let mut resolved = ToolVersion::new(self.id(), &selected.version);
         resolved.options = request.options.clone();
