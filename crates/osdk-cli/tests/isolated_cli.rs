@@ -634,6 +634,28 @@ fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str
 }
 
 #[test]
+fn exec_exits_with_the_childs_own_code_and_adds_no_error() {
+    // Scripts branch on `$?` after `osdk exec -- <cmd>`: the code must be the
+    // child's (as with `mise exec` / `npx`), not a generic 1 plus an error line.
+    let temporary = tempfile::tempdir().unwrap();
+    let (program, arguments, host) = {
+        let (program, _, host) = print_variable_command("X");
+        #[cfg(windows)]
+        let arguments = vec!["/D".to_string(), "/C".into(), "exit 7".into()];
+        #[cfg(not(windows))]
+        let arguments = vec!["-c".to_string(), "exit 7".into()];
+        (program, arguments, host)
+    };
+    let mut args = vec!["exec", "--no-deps", "--", program.as_str()];
+    args.extend(arguments.iter().map(String::as_str));
+    let env: Vec<(&str, &str)> = host.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let output = run_isolated_in_with_env(temporary.path(), temporary.path(), &args, &env);
+    assert_eq!(output.status.code(), Some(7));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("exited with"), "{stderr}");
+}
+
+#[test]
 fn exec_without_a_tool_runs_in_the_activated_environment() {
     let temporary = tempfile::tempdir().unwrap();
     let enabled = run_isolated(temporary.path(), &["model", "env", "enable", "huggingface"]);

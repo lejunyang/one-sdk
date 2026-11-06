@@ -111,8 +111,8 @@ osdk exec -t java -- ./gradlew build   # 用项目 pin 的 JDK，无需重复写
 ```
 
 `pnpx` 路由到受管 `pnpm dlx`，`bunx` 路由到受管 `bun x`；未声明对应 backend
-会报错。包管理器调用可能在启动前执行 Registry 预检。子命令失败会使 osdk 返回
-错误，但当前不保证原样透传其数值退出码。
+会报错。包管理器调用可能在启动前执行 Registry 预检。osdk 以子命令自己的退出码
+退出，不额外打印错误，因此 `osdk exec -- cargo test; echo $?` 看到的就是测试进程的退出码。
 
 ## 版本别名
 

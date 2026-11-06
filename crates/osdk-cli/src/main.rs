@@ -324,7 +324,9 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
         Command::Outdated { tools } => commands::outdated(app, tools).await,
         Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
-        Command::Exec { tools, command, .. } => commands::exec_cmd(app, tools, command).await,
+        Command::Exec { tools, command, .. } => {
+            return commands::exec_cmd(app, tools, command).await;
+        }
         Command::Run {
             task,
             dry_run,

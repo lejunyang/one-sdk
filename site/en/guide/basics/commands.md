@@ -126,8 +126,9 @@ osdk exec -t java -- ./gradlew build   # uses the project's pinned JDK
 
 `pnpx` routes to managed `pnpm dlx` and `bunx` to managed `bun x`; omitting the
 corresponding backend is an error. A package-manager invocation may run registry
-preflight before startup. Child failure makes osdk return an error, but exact
-numeric exit-code pass-through is not currently guaranteed.
+preflight before startup. osdk exits with the child's own exit code and adds no
+error line of its own, so `osdk exec -- cargo test; echo $?` sees the test runner's
+code.
 
 ## Version aliases
 

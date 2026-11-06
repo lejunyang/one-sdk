@@ -348,12 +348,19 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
     Ok(())
 }
 
-pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
+/// Returns the child's exit status so `main` exits with the child's own code,
+/// the way `mise exec` and `npx` do: a script that checks `$?` after
+/// `osdk exec -- cargo test` must see the test runner's code, not osdk's.
+pub async fn exec_cmd(
+    app: &mut App,
+    tools: Vec<String>,
+    command: Vec<String>,
+) -> Result<Option<std::process::ExitStatus>> {
     if tools.is_empty() {
-        return exec_in_project_environment(app, &command);
+        return exec_in_project_environment(app, &command).map(Some);
     }
-    if super::system_exec::try_exec(app, &tools, &command).await? {
-        return Ok(());
+    if let Some(status) = super::system_exec::try_exec(app, &tools, &command).await? {
+        return Ok(Some(status));
     }
     let requests = gather_requests(app, tools)?;
     let resolved = install_requests(app, requests, Vec::new(), false, false).await?;
@@ -420,10 +427,7 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         .envs(env)
         .status()
         .with_context(|| format!("running {}", managed_program.display()))?;
-    if !status.success() {
-        return Err(anyhow!("command exited with {status}"));
-    }
-    Ok(())
+    Ok(Some(status))
 }
 
 /// `osdk exec -- <command>` without `--tool`: run under the directory's own
@@ -433,7 +437,7 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
 /// a CI step, a scheduled job. Nothing is installed: a selected tool that is
 /// missing fails the way it does in an activated shell, instead of starting a
 /// download the caller never asked for.
-fn exec_in_project_environment(app: &App, command: &[String]) -> Result<()> {
+fn exec_in_project_environment(app: &App, command: &[String]) -> Result<std::process::ExitStatus> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| anyhow!("exec requires a command"))?;
@@ -458,10 +462,7 @@ fn exec_in_project_environment(app: &App, command: &[String]) -> Result<()> {
         .envs(&env)
         .status()
         .with_context(|| format!("running {}", program.display()))?;
-    if !status.success() {
-        return Err(anyhow!("command exited with {status}"));
-    }
-    Ok(())
+    Ok(status)
 }
 
 pub(crate) fn resolve_managed_launcher_alias(
