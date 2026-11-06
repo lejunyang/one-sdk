@@ -2,7 +2,8 @@
 
 use super::*;
 
-pub fn completions(shell: clap_complete::Shell) -> Result<()> {
+pub fn completions(shell: crate::cli::CompletionShell) -> Result<()> {
+    let shell = clap_complete::Shell::from(shell);
     const COMPLETION_STACK_SIZE: usize = 8 * 1024 * 1024;
 
     // Rendered into memory first: clap_complete panics on a failed write, so

@@ -124,7 +124,7 @@ win a shared command name at run time either.
 ## Completions
 
 ```text
-osdk completions bash|elvish|fish|powershell|zsh
+osdk completions bash|elvish|fish|powershell|pwsh|zsh
 ```
 
 The command writes completion code to stdout; save or source it according to the

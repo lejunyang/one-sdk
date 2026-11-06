@@ -105,7 +105,7 @@ conda 这类与依赖闭包共用 prefix 的安装：激活不把它的目录放
 ## 补全
 
 ```text
-osdk completions bash|elvish|fish|powershell|zsh
+osdk completions bash|elvish|fish|powershell|pwsh|zsh
 ```
 
 命令把补全脚本写到 stdout；请按 shell 的惯例保存或 source。例如：

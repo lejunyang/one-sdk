@@ -2877,6 +2877,15 @@ fn completions_emit_target_shell_script() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("_osdk"));
     assert!(stdout.contains("complete"));
+
+    // `activate pwsh` is the documented spelling; completions accept it too.
+    let pwsh = run_isolated(temp.path(), &["completions", "pwsh"]);
+    assert!(
+        pwsh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pwsh.stderr)
+    );
+    assert!(String::from_utf8_lossy(&pwsh.stdout).contains("Register-ArgumentCompleter"));
 }
 
 #[test]
