@@ -598,6 +598,39 @@ pub enum AppendPolicy {
     Refuse,
 }
 
+/// Quote one appended argument so `shell` reads it back as one word.
+///
+/// Joining with spaces turned `osdk run test -- "my file.txt"` into two
+/// arguments; npm quotes what it appends for the same reason. `sh` and `pwsh`
+/// quoting is exact. `cmd` has no exact quoting: double quotes protect spaces
+/// and `& | < > ^ ( )`, but `%VAR%` still expands and an inner `"` cannot be
+/// escaped -- the documented reason `argv` steps exist. Arguments made only of
+/// characters no shell treats specially are left bare, so `--nocapture` stays
+/// readable in `--dry-run`.
+fn quote_for_shell(shell: &[String], arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+    if plain {
+        return arg.to_string();
+    }
+    let program = shell
+        .first()
+        .and_then(|program| Path::new(program).file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match program.as_str() {
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "ash" => {
+            format!("'{}'", arg.replace('\'', r"'\''"))
+        }
+        "pwsh" | "powershell" => format!("'{}'", arg.replace('\'', "''")),
+        "cmd" if !arg.contains('"') => format!("\"{arg}\""),
+        _ => arg.to_string(),
+    }
+}
+
 /// Decide the append policy for a planned task.
 pub fn append_policy(task: &PlannedTask) -> AppendPolicy {
     let mut commands = 0;
@@ -759,9 +792,11 @@ fn apply_arguments(
                     // A shell string can only be appended textually. On `sh`
                     // and `pwsh` that is quotable; on `cmd` it is not fully
                     // solvable, which is documented and is why `argv` exists.
-                    PlannedStep::Command { command, .. } => {
-                        command.push(' ');
-                        command.push_str(&values.rest.join(" "));
+                    PlannedStep::Command { command, shell, .. } => {
+                        for arg in &values.rest {
+                            command.push(' ');
+                            command.push_str(&quote_for_shell(shell, arg));
+                        }
                         return Ok(resolved);
                     }
                     PlannedStep::Parallel { .. } => continue,
@@ -1352,6 +1387,40 @@ fn execute_full_inner(
 mod tests {
     use super::*;
     use crate::tasks::TaskEntry;
+
+    #[test]
+    fn appended_arguments_stay_one_word_in_each_shell() {
+        let shell = |spec: &str| spec.split(' ').map(String::from).collect::<Vec<_>>();
+        let sh = shell("sh -c");
+        assert_eq!(quote_for_shell(&sh, "--nocapture"), "--nocapture");
+        assert_eq!(quote_for_shell(&sh, "my file.txt"), "'my file.txt'");
+        assert_eq!(quote_for_shell(&sh, "it's"), r"'it'\''s'");
+        assert_eq!(quote_for_shell(&sh, ""), "''");
+        let pwsh = shell("pwsh -Command");
+        assert_eq!(quote_for_shell(&pwsh, "it's $x"), "'it''s $x'");
+        let cmd = shell("cmd /c");
+        assert_eq!(quote_for_shell(&cmd, "a & b"), "\"a & b\"");
+        // An inner quote has no cmd escape; it is passed through untouched.
+        assert_eq!(quote_for_shell(&cmd, "a\"b"), "a\"b");
+    }
+
+    #[test]
+    fn an_appended_argument_with_a_space_reaches_the_shell_as_one_word() {
+        let shell = default_shell();
+        // Counts its arguments, so a split word shows up as 2.
+        let script = if cfg!(windows) {
+            format!(
+                "for %a in ({}) do @echo [%~a]",
+                quote_for_shell(&shell, "y z")
+            )
+        } else {
+            format!("set -- {}; echo \"[$#]\"", quote_for_shell(&shell, "y z"))
+        };
+        let output = shell_command(&shell, &script).unwrap().output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let expected = if cfg!(windows) { "[y z]" } else { "[1]" };
+        assert_eq!(stdout.trim_end(), expected);
+    }
 
     #[test]
     fn shell_steps_reach_the_default_shell_exactly_as_written() {

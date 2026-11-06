@@ -503,6 +503,11 @@ $ osdk run test -- --nocapture
 # runs: cargo test --nocapture
 ```
 
+Each appended argument is quoted for the task's shell, as npm does, so
+`osdk run test -- "my file.txt"` arrives as one argument: single quotes for `sh`
+and `pwsh`, double quotes for `cmd` (which still expands `%VAR%` inside them and
+cannot carry an inner `"`; use an `argv` step for arbitrary values).
+
 The rule keys on "one command step", not on "`run` was written as a string", so
 `run = "cargo test"` and `run = ["cargo test"]` behave identically. Rewriting one
 into the other never silently stops arguments from being accepted.

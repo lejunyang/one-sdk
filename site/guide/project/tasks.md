@@ -448,6 +448,10 @@ $ osdk run test -- --nocapture
 # 实际执行 cargo test --nocapture
 ```
 
+追加的每个参数都会按任务所用的 shell 加引号（与 npm 一致），所以
+`osdk run test -- "my file.txt"` 到达时仍是一个参数：`sh` 和 `pwsh` 用单引号，`cmd`
+用双引号（双引号内 `%VAR%` 仍会展开，也无法携带内部的 `"`；任意值请用 `argv` 步骤）。
+
 判据是「命令步骤只有一条」，而不是「`run` 写成了字符串」。所以
 `run = "cargo test"` 和 `run = ["cargo test"]` 行为完全一致——把一种写法改成
 另一种，不会让参数悄悄不被接收。
