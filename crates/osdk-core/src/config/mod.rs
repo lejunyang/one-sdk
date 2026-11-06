@@ -2462,7 +2462,9 @@ fn truthy(s: &str) -> bool {
 
 fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> {
     let value = inheritance::load(path, rel_base)?;
-    let mut file: ConfigFile = value.try_into().map_err(sanitize_config_parse_error)?;
+    let mut file: ConfigFile = value
+        .try_into()
+        .map_err(|error| with_config_path(path, sanitize_config_parse_error(error)))?;
     file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
         registries.validate()?;
@@ -2482,6 +2484,34 @@ pub fn dependency_tool_versions(
     let mut config = Config::default();
     config.apply_tool_configs(&file.tools)?;
     Ok(config.tools)
+}
+
+/// Name the file a shape error came from, with a hint for the commonest one.
+///
+/// `node = 20` failed as "toml parse error: invalid type: integer `20`,
+/// expected struct StructuredToolConfig in `tools.node`": no file, and nothing
+/// saying versions are strings. (They must be: `python = 3.10` would be the
+/// float 3.1.)
+fn with_config_path(path: &Path, error: Error) -> Error {
+    let Error::TomlDe(error) = error else {
+        return error;
+    };
+    let message = error.message();
+    let hint = if (message.contains("invalid type: integer")
+        || message.contains("invalid type: floating point"))
+        && message.contains("StructuredToolConfig")
+    {
+        "; write versions as quoted strings, e.g. `node = \"20\"`"
+    } else {
+        ""
+    };
+    // `Display` appends the key path on its own paragraph; keep one line.
+    let detail = error.to_string().trim_end().replace(
+        "
+
+in ", " in ",
+    );
+    Error::config(format!("{}: {detail}{hint}", path.display()))
 }
 
 fn sanitize_config_parse_error(error: toml::de::Error) -> Error {
@@ -3879,6 +3909,25 @@ probe_timeout_ms = 125
         for name in ["18-legacy", "v20-work", "work20", "lts20x"] {
             assert!(validate_alias_name(name).is_ok(), "{name}");
         }
+    }
+
+    #[test]
+    fn config_errors_name_the_file_and_where_in_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.toml");
+        std::fs::write(&path, "[tools]\nnode = \"20\"\n[tasks\n").unwrap();
+        let syntax = read_config_file(&path, None).unwrap_err().to_string();
+        assert!(
+            syntax.contains(&format!("{}:3:7:", path.display())),
+            "{syntax}"
+        );
+
+        std::fs::write(&path, "[tools]\nnode = 20\n").unwrap();
+        let shape = read_config_file(&path, None).unwrap_err().to_string();
+        assert!(shape.contains(&path.display().to_string()), "{shape}");
+        assert!(shape.contains("`tools.node`"), "{shape}");
+        assert!(shape.contains("quoted strings"), "{shape}");
+        assert!(!shape.contains('\n'), "{shape}");
     }
 
     #[test]
