@@ -1537,15 +1537,27 @@ pub(crate) fn installed_dynamic_match(
         }
     }?;
 
-    let install = candidates
-        .iter()
-        .find(|install| install.manifest.identity.version == selected)?;
+    let mut version = ToolVersion::new(backend.id(), selected.clone());
+    bind_dynamic_request_options(request, &mut version);
+    // Same version and options is not yet the same install: an npm tool is
+    // bound to a scope and a Node. A project's `"npm:cowsay" = "1"` under
+    // node 20 matched another project's install on node 22, printed "already
+    // installed", and then failed: selection (rightly) wants the node 20 one.
+    let expected = backend
+        .dynamic_install_identity(&app.ctx, &version)
+        .ok()
+        .flatten();
+    let install = candidates.iter().find(|install| {
+        let identity = &install.manifest.identity;
+        identity.version == selected
+            && expected.as_ref().is_none_or(|expected| {
+                identity.scope == expected.scope && identity.dependencies == expected.dependencies
+            })
+    })?;
     // The scan happened a moment ago; confirm the directory and manifest are
     // still the same objects before letting them decide no install is needed.
     install.revalidate().ok()?;
 
-    let mut version = ToolVersion::new(backend.id(), selected);
-    bind_dynamic_request_options(request, &mut version);
     Some(version)
 }
 
