@@ -743,7 +743,10 @@ fn same_tool_child_can_reenter_shim_in_another_project() {
 #[test]
 fn resolved_dispatcher_targets_are_refused_without_inherited_marker() {
     for copy in [false, true] {
-        let temporary = tempfile::tempdir().unwrap();
+        // Next to the shim binary: a hard link cannot cross volumes, and the
+        // system temp directory is often on another one (Windows CI keeps the
+        // workspace on D: and TEMP on C:).
+        let temporary = tempfile::tempdir_in(shim().parent().unwrap()).unwrap();
         let root = temporary.path();
         std::fs::write(root.join("package.json"), r#"{"engines":{"node":"1.0.0"}}"#).unwrap();
         let install = root.join("installs/node/1.0.0");
