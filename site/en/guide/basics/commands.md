@@ -58,8 +58,10 @@ the nearest project configuration, creating `osdk.toml` in the current directory
 if none exists. `--global` updates user `config.toml`. An explicit prefix or
 channel is preserved; a bare tool stores the exact resolved version.
 
-`uninstall` normally expects an exact version. A prefix selects the last
-string-sorted installed match; other non-exact requests are rejected. Bare
+`uninstall` normally expects an exact version. A prefix selects an installed
+version named exactly that, otherwise the newest installed version whose leading
+segments match (`go@1.2` never matches 1.22.x); other non-exact requests are
+rejected. Bare
 `rust` is the exception and removes `stable`. It asks for confirmation, so pass
 `--yes` in automation. When a regular dynamic tool is removed, osdk also removes
 any user-global pin and user lock entry that still select that version; project
