@@ -134,7 +134,8 @@ generation 可能作为可丢弃的本地状态保留。
 
 ## 安装全局 npm 工具
 
-全局作用域忽略当前项目的 manifest、声明和 lock：
+全局作用域忽略当前项目的 manifest、声明和 lock，也包括项目的 Node pin：全局工具在任何目录下
+都使用安装它时的 Node（用户全局的 `node` pin，或已安装的最新 Node）：
 
 ```bash
 # 使用配置的默认安装器，开箱即为 npm。

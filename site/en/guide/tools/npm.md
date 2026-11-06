@@ -158,7 +158,9 @@ future project metadata under that directory can still be committed deliberately
 
 ## Install a global npm tool
 
-Global scope ignores the current project's manifest, declaration, and locks:
+Global scope ignores the current project's manifest, declaration, and locks --
+including its Node pin: a global tool runs on the Node it was installed with (the
+user-global `node` pin, or the newest installed Node), in every directory:
 
 ```bash
 # The configured default installer is used; npm out of the box.

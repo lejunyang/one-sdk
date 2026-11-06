@@ -37,14 +37,31 @@ pub(crate) fn managed_node(ctx: &Ctx, npm_tool: &ToolVersion) -> Result<(PathBuf
 }
 
 pub(crate) fn selected_node_version(ctx: &Ctx) -> Option<String> {
+    node_version_from(ctx, &ctx.config.tools)
+}
+
+/// The Node an npm tool of `scope` runs on when nothing recorded one.
+///
+/// A global tool is documented to ignore the current project, but this used
+/// the merged configuration, where the project's pin wins. So inside a
+/// project pinning node 20, a global tool installed on node 22 was looked up
+/// under node 20, found missing, and `osdk env`, `osdk exec` and every prompt
+/// hook failed with "has no complete selected install" -- for a tool the
+/// project never mentions. Global scope reads the user-global pin only.
+pub(crate) fn selected_node_version_for(ctx: &Ctx, scope: ToolScope) -> Option<String> {
+    match scope {
+        ToolScope::Global => node_version_from(ctx, &ctx.config.global_tools),
+        ToolScope::Project => selected_node_version(ctx),
+    }
+}
+
+fn node_version_from(ctx: &Ctx, pins: &BTreeMap<String, String>) -> Option<String> {
     let node = crate::backend::node::NodeBackend;
     let versions = node.list_installed(ctx).ok()?;
     if versions.is_empty() {
         return None;
     }
-    ctx.config
-        .tools
-        .get("node")
+    pins.get("node")
         .and_then(|spec| {
             let infos = versions
                 .iter()
