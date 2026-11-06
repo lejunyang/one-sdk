@@ -35,7 +35,8 @@ osdk model sync [NAME]
 | `model sync [NAME]` | 是 | 解析新增/变更声明并合并模型 lock |
 | `list`、`current`、`where` | 否 | 否 |
 
-`outdated` 的“当前”列是该 backend 所有已安装版本中的最大值；它检查重新解析出的
+`outdated` 的“当前”列是请求所接受的最新已安装版本（没有则为 `-`；`lts` 与通道类请求取
+最新已安装版本）；它检查重新解析出的
 精确目标是否已安装，并不表示目录当前激活版本。`upgrade` 安装新的解析结果后刷新 lock。
 
 ## 项目 lock 只记项目自己的工具

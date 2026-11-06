@@ -37,8 +37,9 @@ osdk model sync [NAME]
 | `model sync [NAME]` | Yes | Resolves added/changed declarations and merges model locks |
 | `list`, `current`, `where` | No | No |
 
-For `outdated`, the “current” column is the greatest installed version for that
-backend. It checks whether the newly resolved exact target is installed; it does
+For `outdated`, the “current” column is the newest installed version the request
+accepts (`-` when none does; for `lts` and channels, the newest installed version).
+It checks whether the newly resolved exact target is installed; it does
 not mean the directory's active version. `upgrade` installs the new resolution
 and then refreshes the lock.
 

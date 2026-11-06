@@ -366,13 +366,7 @@ pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
     for (request, latest) in resolved {
         let backend = app.registry.get(&request.backend)?;
         let installed = backend.list_installed(&app.ctx)?;
-        let current = installed
-            .iter()
-            .max_by(|left, right| {
-                osdk_core::backend::python::cmp_versions(left, right).then_with(|| left.cmp(right))
-            })
-            .map(String::as_str)
-            .unwrap_or("-");
+        let current = outdated_current(&request.spec, &installed);
         if !installed.iter().any(|version| version == &latest.version) {
             any = true;
             println!("{} {} -> {}", request.backend, current, latest.version);
@@ -382,6 +376,31 @@ pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
         println!("all requested tools are up to date");
     }
     Ok(())
+}
+
+/// The "current" side of an `outdated` line: the newest installed version the
+/// request accepts, or `-`.
+///
+/// It was the newest installed version of the backend, so `node = "20"` with
+/// node 22 also installed printed `node 22.23.4 -> 20.20.2`, which reads as a
+/// downgrade. `mise outdated` compares against the matching install too.
+pub(crate) fn outdated_current(spec: &VersionSpec, installed: &[String]) -> String {
+    let infos: Vec<_> = installed
+        .iter()
+        .map(osdk_core::version::VersionInfo::stable)
+        .collect();
+    let matched = match spec {
+        // Version-shaped requests can be matched against installed versions.
+        VersionSpec::Exact(_) | VersionSpec::Prefix(_) | VersionSpec::Range(_) => {
+            osdk_core::version::select_version(spec, &infos)
+        }
+        // `lts`, channels and the like carry no meaning an installed version
+        // string can be tested against; the newest install is the best answer.
+        _ => infos.last(),
+    };
+    matched
+        .map(|version| version.version.clone())
+        .unwrap_or_else(|| "-".into())
 }
 
 pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
@@ -2520,7 +2539,26 @@ pub(crate) fn inject_rust_dependency_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{changed_requests, lock_drift, platform_exclusion};
+    use super::{changed_requests, lock_drift, outdated_current, platform_exclusion};
+
+    #[test]
+    fn outdated_compares_against_the_install_the_request_accepts() {
+        use osdk_core::version::VersionSpec;
+        let installed = ["20.9.0", "22.23.4"].map(String::from);
+        assert_eq!(
+            outdated_current(&VersionSpec::parse("20"), &installed),
+            "20.9.0"
+        );
+        assert_eq!(outdated_current(&VersionSpec::parse("18"), &installed), "-");
+        assert_eq!(
+            outdated_current(&VersionSpec::Latest, &installed),
+            "22.23.4"
+        );
+        assert_eq!(
+            outdated_current(&VersionSpec::parse("lts"), &installed),
+            "22.23.4"
+        );
+    }
 
     #[test]
     fn changed_requests_name_only_tools_whose_request_moved() {
