@@ -231,6 +231,18 @@ fn collect(
                 "toolchain.channel".to_string()
             } else if *name == "go.mod" {
                 "go".into()
+            } else if *name == ".sdkmanrc" {
+                match super::sdkman_java(&text) {
+                    Ok(Some(_)) => "java".into(),
+                    // Only other SDKMAN candidates (maven, gradle, ...) pinned.
+                    Ok(None) => continue,
+                    Err(value) => {
+                        return Err(invalid(
+                            &path,
+                            &format!("java={value} (unsupported SDKMAN identifier)"),
+                        ))
+                    }
+                }
             } else {
                 let lines: Vec<_> = text
                     .lines()

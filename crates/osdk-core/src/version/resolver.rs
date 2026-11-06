@@ -490,6 +490,67 @@ fn read_tool_value(value: &toml::Value) -> Option<String> {
 
 /// Read a simple idiomatic version file (`.nvmrc`, `.python-version`, ...).
 /// Takes the first non-empty, non-comment line and trims a leading `v`.
+/// SDKMAN identifier suffix -> Foojay distribution id, for `.sdkmanrc`.
+///
+/// SDKMAN names a JDK `<version>-<vendor>` (`21.0.2-tem`); osdk spells the same
+/// thing `<distribution>-<version>` (`temurin-21.0.2`). Only vendors with an
+/// unambiguous Foojay id are listed; anything else is rejected rather than
+/// silently resolved to Temurin, which would install a different JDK than the
+/// file names.
+const SDKMAN_JAVA_VENDORS: &[(&str, &str)] = &[
+    ("tem", "temurin"),
+    ("zulu", "zulu"),
+    ("amzn", "corretto"),
+    ("librca", "liberica"),
+    ("nik", "liberica_native"),
+    ("ms", "microsoft"),
+    ("graalce", "graalvm_community"),
+    ("oracle", "oracle"),
+    ("open", "oracle_open_jdk"),
+    ("sapmchn", "sap_machine"),
+    ("sem", "semeru"),
+    ("albba", "dragonwell"),
+    ("kona", "kona"),
+    ("mandrel", "mandrel"),
+    ("bisheng", "bisheng"),
+    ("jbr", "jetbrains"),
+    ("trava", "trava"),
+];
+
+/// The `java=` entry of an `.sdkmanrc`, translated to an osdk Java spec.
+///
+/// `Ok(None)` when the file pins no Java (it may pin only `maven=` or
+/// `gradle=`); `Err` with the offending value when the entry cannot be honored
+/// exactly. A bare version (`java=21`) is accepted as-is.
+pub(crate) fn sdkman_java(text: &str) -> Result<Option<String>, String> {
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "java" {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() || value.contains(char::is_whitespace) {
+            return Err(value.to_string());
+        }
+        let Some((version, vendor)) = value.rsplit_once('-') else {
+            return Ok(Some(value.to_string()));
+        };
+        // JavaFX / CRaC builds are separate Foojay packages osdk does not select.
+        if version.contains(".fx") || version.contains(".crac") {
+            return Err(value.to_string());
+        }
+        return SDKMAN_JAVA_VENDORS
+            .iter()
+            .find(|(suffix, _)| *suffix == vendor)
+            .map(|(_, distribution)| Some(format!("{distribution}-{version}")))
+            .ok_or_else(|| value.to_string());
+    }
+    Ok(None)
+}
+
 fn read_idiomatic(path: &Path) -> Option<String> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let text = crate::fs::read_text_without_bom(path).ok()?;
@@ -536,6 +597,7 @@ fn read_idiomatic(path: &Path) -> Option<String> {
             }
             return None;
         }
+        ".sdkmanrc" => return sdkman_java(&text).ok().flatten(),
         _ => {}
     }
 
@@ -916,6 +978,34 @@ mod precedence_tests {
             .unwrap();
         assert_eq!(pnpm.spec, "10.5.0");
         assert!(!pnpm.is_range);
+    }
+    #[test]
+    fn sdkmanrc_java_entry_maps_vendor_suffix_to_distribution() {
+        let config = Config::default();
+        let files = &[".java-version", ".sdkmanrc"];
+        let select = |text: &str| {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join(".sdkmanrc"), text).unwrap();
+            resolve_active_config("java", temp.path(), &config, files).map(|v| v.map(|v| v.spec))
+        };
+        // SDKMAN's own multi-key format, as `sdk env init` writes it.
+        let sdkman =
+            "# Enable auto-env through the sdkman_auto_env config\njava=21.0.2-tem\nmaven=3.9.6\n";
+        assert_eq!(select(sdkman).unwrap().as_deref(), Some("temurin-21.0.2"));
+        assert_eq!(
+            select("java=17.0.10-amzn\n").unwrap().as_deref(),
+            Some("corretto-17.0.10")
+        );
+        assert_eq!(
+            select("java=21.0.2-graalce\n").unwrap().as_deref(),
+            Some("graalvm_community-21.0.2")
+        );
+        assert_eq!(select("java = 21\n").unwrap().as_deref(), Some("21"));
+        // No Java pinned: not this tool's declaration, not an error.
+        assert_eq!(select("maven=3.9.6\n").unwrap(), None);
+        // An unknown vendor or a JavaFX build must not quietly become Temurin.
+        assert!(select("java=21.0.2-unknownvendor\n").is_err());
+        assert!(select("java=21.0.2.fx-zulu\n").is_err());
     }
     #[test]
     fn native_declarations_tolerate_a_leading_utf8_bom() {

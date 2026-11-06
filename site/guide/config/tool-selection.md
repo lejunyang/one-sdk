@@ -86,7 +86,7 @@ tool_conflicts = "prefer"
 | 其他内置及动态 backend | 无 | 无 |
 | 声明式插件 backend | 定义声明了文件时支持 `idiomatic` | 其他文件按定义的 `idiomatic_files` 顺序；保留名 `.nvmrc` / `.node-version` 仍使用独立类型；不增加枚举值 |
 
-普通版本文件接受一行版本值（可含注释）；这些文件以及 `.tool-versions`、`package.json` 开头的 UTF-8 BOM（记事本与 PowerShell 会写入）会被忽略。这不表示支持任意原生管理器配置语法。特别是已登记的 `.sdkmanrc` 路径目前使用普通版本读取器，不解释 SDKMAN 的多键 `java=...` 格式。Rust toolchain 文件和 Go 的 `go` 指令使用专门解析。
+普通版本文件接受一行版本值（可含注释）；这些文件以及 `.tool-versions`、`package.json` 开头的 UTF-8 BOM（记事本与 PowerShell 会写入）会被忽略。这不表示支持任意原生管理器配置语法。`.sdkmanrc` 按 SDKMAN 自己的多键格式读取：只使用 `java=` 一项，其厂商后缀映射为发行版（`java=21.0.2-tem` 选择 `temurin-21.0.2`，`-amzn` 为 Corretto，`-zulu` 为 Zulu，`-graalce` 为 GraalVM Community 等）。未知厂商或 JavaFX/CRaC 构建会报错，而不是悄悄换成 Temurin；没有 `java=` 的文件不声明 Java。Rust toolchain 文件和 Go 的 `go` 指令使用专门解析。
 
 未知字符串和重复项会报错：`"node"`、`".python-version"`、`"go.mod"` 都不是合法的 `tool_order` 值。遗漏的声明类型会按 `tools` 决定的默认相对顺序追加，不会被禁用。`system` 不会自动追加，遗漏即禁用。`[]` 清除继承的自定义顺序并禁用继承的 `system`。`idiomatic` 内先按固定文件名顺序，再看目录距离，因此祖先目录的 `go.mod` 声明可以优先于更近的 `.go-version`；`tool_order` 不能反转这两个文件。下方提供[三个可运行示例](#示例-node、python-与-javascript-管理器)。
 
