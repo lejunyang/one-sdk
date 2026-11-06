@@ -646,7 +646,9 @@ impl NpmPackageBackend {
                 versions.insert(candidate.version);
             }
         }
-        Ok(versions.into_iter().collect())
+        let mut versions: Vec<String> = versions.into_iter().collect();
+        crate::version::sort_installed_versions(&mut versions);
+        Ok(versions)
     }
 
     pub fn package(&self) -> &str {

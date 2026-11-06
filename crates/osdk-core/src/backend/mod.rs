@@ -221,7 +221,7 @@ pub trait Backend: Send + Sync {
                 }
             }
         }
-        out.sort();
+        crate::version::sort_installed_versions(&mut out);
         Ok(out)
     }
 
@@ -461,5 +461,16 @@ mod tests {
             MockBackend.list_installed(&ctx).unwrap(),
             vec!["1.2.3", "Release-2026", "release%2F2026", "release/2026"]
         );
+
+        // Ascending by version, not lexically: selection takes the last match,
+        // and lexically 20.9.0 sorted after 20.20.2.
+        for version in ["20.9.0", "20.20.2", "20.10.0"] {
+            let install = dirs.install_path("mock", version);
+            std::fs::create_dir_all(&install).unwrap();
+            std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+        }
+        let installed = MockBackend.list_installed(&ctx).unwrap();
+        let numeric: Vec<_> = installed.iter().filter(|v| v.starts_with("20.")).collect();
+        assert_eq!(numeric, ["20.9.0", "20.10.0", "20.20.2"]);
     }
 }

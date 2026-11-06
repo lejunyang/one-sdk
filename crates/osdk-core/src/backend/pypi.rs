@@ -1213,8 +1213,7 @@ impl Backend for PypiBackend {
             })
             .map(|install| install.manifest.identity.version.clone())
             .collect();
-        versions.sort();
-        versions.dedup();
+        crate::version::sort_installed_versions(&mut versions);
         Ok(versions)
     }
 

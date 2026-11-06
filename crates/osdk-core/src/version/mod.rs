@@ -254,6 +254,65 @@ pub fn select_version<'a>(
     }
 }
 
+/// Order two version strings oldest-first, the way a person reads them.
+///
+/// Installed-version listings came back sorted lexically, so `20.9.0` sorted
+/// after `20.20.2` and every "newest installed match" pick -- `node = "20"` in a
+/// shim, `osdk where node@20`, `osdk list` -- chose 20.9.0. Selection over a
+/// listing assumes ascending order, so listings sort with this.
+///
+/// Semver pairs use semver order. Anything else is compared in runs of digits
+/// (numerically) and non-digits (lexically); when one string is a prefix of the
+/// other, a tail starting with a letter or `-` is a pre-release and sorts first
+/// (`3.12.0rc1`, `1.0-rc1`), any other tail (`+11` build metadata, `.1`) last.
+pub fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if let (Ok(left), Ok(right)) = (semver::Version::parse(a), semver::Version::parse(b)) {
+        return left.cmp(&right).then_with(|| a.cmp(b));
+    }
+    fn runs(text: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let bytes = text.as_bytes();
+        for index in 1..=bytes.len() {
+            if index == bytes.len()
+                || bytes[index].is_ascii_digit() != bytes[index - 1].is_ascii_digit()
+            {
+                out.push(&text[start..index]);
+                start = index;
+            }
+        }
+        out
+    }
+    let (left, right) = (runs(a), runs(b));
+    for (x, y) in left.iter().zip(&right) {
+        let order = match (x.parse::<u128>(), y.parse::<u128>()) {
+            (Ok(x), Ok(y)) => x.cmp(&y),
+            _ => x.cmp(y),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    let tail_is_prerelease = |tail: Option<&&str>| {
+        tail.is_some_and(|tail| tail.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-'))
+    };
+    match left.len().cmp(&right.len()) {
+        Ordering::Equal => a.cmp(b),
+        Ordering::Less if tail_is_prerelease(right.get(left.len())) => Ordering::Greater,
+        Ordering::Less => Ordering::Less,
+        Ordering::Greater if tail_is_prerelease(left.get(right.len())) => Ordering::Less,
+        Ordering::Greater => Ordering::Greater,
+    }
+}
+
+/// Sort installed versions ascending and drop duplicates, as
+/// `Backend::list_installed` promises its callers.
+pub fn sort_installed_versions(versions: &mut Vec<String>) {
+    versions.sort_by(|a, b| compare_version_strings(a, b));
+    versions.dedup();
+}
+
 /// Why [`select_version_with_prerelease`] found nothing, for an error hint.
 ///
 /// The hints this replaces each guessed a single cause -- "no version matched
@@ -576,6 +635,52 @@ mod tests {
             crate::dirs::sanitize_tool_id(&request.backend),
             std::path::PathBuf::from("npm/@antfu/ni")
         );
+    }
+
+    #[test]
+    fn version_strings_order_numerically_with_prereleases_first() {
+        let mut versions: Vec<String> = [
+            "20.20.2",
+            "20.9.0",
+            "3",
+            "3.2.4",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "3.12.0",
+            "3.12.0rc1",
+            "21.0.5+11",
+            "21.0.5",
+            "1.0",
+            "1.0-rc1",
+            "stable",
+            "1.80.0",
+        ]
+        .map(String::from)
+        .to_vec();
+        sort_installed_versions(&mut versions);
+        assert_eq!(
+            versions,
+            [
+                "1.0-rc1",
+                "1.0",
+                "1.0.0-rc.1",
+                "1.0.0",
+                "1.80.0",
+                "3",
+                "3.2.4",
+                "3.12.0rc1",
+                "3.12.0",
+                "20.9.0",
+                "20.20.2",
+                "21.0.5",
+                "21.0.5+11",
+                "stable",
+            ]
+        );
+        // The pick that motivated it: newest installed 20.x.
+        let infos: Vec<_> = versions.iter().map(VersionInfo::stable).collect();
+        let picked = select_version(&VersionSpec::parse("20"), &infos).unwrap();
+        assert_eq!(picked.version, "20.20.2");
     }
 
     #[test]

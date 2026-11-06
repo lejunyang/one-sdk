@@ -924,9 +924,11 @@ impl Backend for GithubBackend {
                         .unwrap_or(false)
             })
             .map(|install| install.manifest.identity.version.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect())
+            .collect::<Vec<_>>())
+        .map(|mut versions| {
+            crate::version::sort_installed_versions(&mut versions);
+            versions
+        })
     }
 
     fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
