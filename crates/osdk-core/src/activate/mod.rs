@@ -264,6 +264,15 @@ pub struct EnvDelta {
     pub unset_vars: Vec<String>,
 }
 
+/// Whether `backend_id` is declared with `lazy = true` in the effective config.
+fn is_lazy_declaration(ctx: &Ctx, backend_id: &str) -> bool {
+    ctx.config.tool_configs.iter().any(|(key, entry)| {
+        entry.is_lazy()
+            && (key == backend_id
+                || crate::inventory::canonical_dynamic_id(key).ok().as_deref() == Some(backend_id))
+    })
+}
+
 /// Compute the env delta for the directory `cwd`: for each backend with an
 /// active + installed version, collect its bin dirs and exec env. Invalid
 /// dynamic-tool inventory aborts activation instead of producing a partial
@@ -373,6 +382,12 @@ pub fn compute_env_delta(
         };
         let version = match version {
             Some(v) => v,
+            // `lazy = true` means "install when a task or an explicit operand
+            // needs it", so being absent is its normal state. Treating that
+            // like a missing pin failed activation for the whole directory --
+            // this repository's own `bun = { lazy = true }` did -- and the
+            // prompt hook hid the error, so nothing else got activated either.
+            None if is_lazy_declaration(ctx, backend.id()) => continue,
             None => {
                 return Err(crate::error::Error::other(crate::t!(
                     "err.no_installed_match",
@@ -381,6 +396,16 @@ pub fn compute_env_delta(
                 )))
             }
         };
+        // An exact dynamic version skipped the installed listing above; a lazy
+        // one that was never installed is likewise absent, not invalid.
+        if dynamic_request.is_some()
+            && is_lazy_declaration(ctx, backend.id())
+            && !backend
+                .list_installed(ctx)
+                .is_ok_and(|installed| installed.contains(&version))
+        {
+            continue;
+        }
         let mut tv = ToolVersion::new(backend.id(), &version);
         let dynamic_install = if let Some(request) = dynamic_request.as_ref() {
             tv.options = request.options.clone();
@@ -1027,6 +1052,28 @@ mod tests {
             client: reqwest::Client::new(),
             show_progress: false,
         }
+    }
+
+    #[test]
+    fn an_uninstalled_lazy_tool_does_not_fail_activation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut ctx = test_ctx(temporary.path(), &[("bun", "1.4.3")]);
+        let lazy: crate::config::ToolConfigEntry =
+            toml::from_str::<toml::Value>("bun = { version = \"1.4.3\", lazy = true }").unwrap()
+                ["bun"]
+                .clone()
+                .try_into()
+                .unwrap();
+        ctx.config.tool_configs.insert("bun".into(), lazy);
+
+        compute_env_delta(&ctx, &Registry::new(), &project)
+            .expect("a lazy tool is absent until something needs it");
+
+        // The same pin without `lazy` is still a hard error.
+        let eager = test_ctx(temporary.path(), &[("bun", "1.4.3")]);
+        assert!(compute_env_delta(&eager, &Registry::new(), &project).is_err());
     }
 
     #[test]

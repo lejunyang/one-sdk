@@ -35,7 +35,9 @@ osdk upgrade
 
 结构化 `[tools]` 条目可设置 `lazy = true`，使裸安装默认跳过它；
 `--include-lazy` 会把所有这类条目纳入安装。显式点名工具已经表达安装意图，因此不需要该
-开关。被纳入工具所需的 runtime 依赖即使自身标为 lazy，也仍会安装。
+开关。被纳入工具所需的 runtime 依赖即使自身标为 lazy，也仍会安装。lazy 工具在安装前，
+shell 激活、`osdk env` 与不带 `--tool` 的 `osdk exec` 会跳过它而不是报错，因为未安装正是
+它的常态。
 
 更精确的读写矩阵、跨平台区段和陈旧 lock 行为见[可复现锁文件](../project/lockfiles)。
 Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 不会被锁成具体发行版本；需要

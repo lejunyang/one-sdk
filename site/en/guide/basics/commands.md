@@ -40,7 +40,9 @@ A structured `[tools]` entry with `lazy = true` stays out of a no-argument
 install by default. `--include-lazy` includes all such entries. The flag is not
 needed for explicit operands: naming a tool is already an explicit request to
 install it. Runtime dependencies of an included tool are installed even when
-their own declaration is lazy.
+their own declaration is lazy. Until a lazy tool is installed, shell activation,
+`osdk env` and tool-less `osdk exec` leave it out instead of failing, since being
+absent is its normal state.
 
 See [Reproducible Lockfiles](../project/lockfiles) for the exact read/write matrix.
 Floating Rust channels such as `stable`, `beta`, and `nightly` are not frozen to

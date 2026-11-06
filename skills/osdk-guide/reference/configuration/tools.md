@@ -20,7 +20,8 @@ zig = { version = "0.15", when = { os = ["linux", "macos"] } }
 
 - `version`：必填字符串。
 - `lazy`：可选布尔值；为 `true` 时裸 `osdk install` 默认跳过，
-  `osdk install --include-lazy` 或显式点名仍会安装。
+  `osdk install --include-lazy` 或显式点名仍会安装。未安装时 shell 激活、`osdk env`
+  和不带 `--tool` 的 `osdk exec` 会跳过它，不报错。
 - `when`：可选 `{ os = ..., arch = ... }`。
 - 其余字段：backend 专属选项，等价于命令行 `-o KEY=VALUE`。
 
