@@ -112,7 +112,7 @@ by hand:
 
 | Variable | Meaning |
 | --- | --- |
-| `OSDK_TASK`, `OSDK_TASK_NAME` | The process is a task started by `osdk run`, and its name; shell hooks skip re-activation when they see `OSDK_TASK` |
+| `OSDK_TASK`, `OSDK_TASK_NAME`, `OSDK_TASK_ROOT` | The process is a task started by `osdk run`, its name, and its project root; inside that root shell hooks skip re-activation when they see `OSDK_TASK`, and outside it they drop these variables and activate as usual |
 | `OSDK_SHIM_ACTIVE` | Legacy internal shim marker; inherited values are ignored and removed when launching tools. No user configuration is needed |
 | `OSDK_MANAGED_ENV`, `OSDK_ORIG_<NAME>` | Variables taken over during activation and their original values, restored by `deactivate` |
 | `OSDK_ADDED_PATH` | The PATH entries the last activation added; the next prompt replaces exactly these and `deactivate` removes them. Sessions from older versions carry `OSDK_ORIGINAL_PATH` instead and are migrated at the next prompt |

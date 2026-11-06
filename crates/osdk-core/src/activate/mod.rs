@@ -53,7 +53,22 @@ _osdk_hook() {{
   # Inside `osdk run`, the task already got its environment directly from the
   # runner. Re-running the hook here would re-derive PATH from the *config*,
   # discarding the per-task `env` and any tool the task just installed.
-  [[ -n "${{OSDK_TASK:-}}" ]] && return 0
+  if [[ -n "${{OSDK_TASK:-}}" ]]; then
+    # The marker is inherited by whatever the task starts, including shells
+    # and editors that outlive it, so it only holds inside the task's own
+    # project. Once this shell leaves it, it is an ordinary shell again.
+    local _osdk_root="${{OSDK_TASK_ROOT:-}}"
+    [[ -z "$_osdk_root" ]] && return 0
+    local _osdk_here="$PWD"
+    # Git Bash: compare both sides in one spelling. `cygpath -u` alone is not
+    # enough, since mounts such as /tmp give one directory two names.
+    if command -v cygpath >/dev/null 2>&1; then
+      _osdk_root="$(cygpath -m "$_osdk_root")"
+      _osdk_here="$(cygpath -m "$PWD")"
+    fi
+    case "$_osdk_here/" in "${{_osdk_root%/}}/"*) return 0 ;; esac
+    unset OSDK_TASK OSDK_TASK_NAME OSDK_TASK_ROOT
+  fi
   local out
   # stderr is left on the terminal: when this directory cannot be activated
   # (a pinned tool is not installed), the reason is shown instead of the
@@ -72,7 +87,22 @@ _osdk_hook
 _osdk_hook() {{
   # See the bash branch: a task's environment comes from the runner, not from
   # re-deriving it here.
-  [[ -n "${{OSDK_TASK:-}}" ]] && return 0
+  if [[ -n "${{OSDK_TASK:-}}" ]]; then
+    # The marker is inherited by whatever the task starts, including shells
+    # and editors that outlive it, so it only holds inside the task's own
+    # project. Once this shell leaves it, it is an ordinary shell again.
+    local _osdk_root="${{OSDK_TASK_ROOT:-}}"
+    [[ -z "$_osdk_root" ]] && return 0
+    local _osdk_here="$PWD"
+    # Git Bash: compare both sides in one spelling. `cygpath -u` alone is not
+    # enough, since mounts such as /tmp give one directory two names.
+    if command -v cygpath >/dev/null 2>&1; then
+      _osdk_root="$(cygpath -m "$_osdk_root")"
+      _osdk_here="$(cygpath -m "$PWD")"
+    fi
+    case "$_osdk_here/" in "${{_osdk_root%/}}/"*) return 0 ;; esac
+    unset OSDK_TASK OSDK_TASK_NAME OSDK_TASK_ROOT
+  fi
   local out
   # stderr stays visible; see the bash branch.
   out="$({bin} hook-env --shell zsh)" && eval "$out"
@@ -88,9 +118,16 @@ _osdk_hook
         Shell::Fish => format!(
             r#"# osdk shell integration (fish)
 function _osdk_hook --on-variable PWD --on-event fish_prompt
-  # See the bash branch.
+  # See the bash branch, including why the marker is bounded by its root.
   if set -q OSDK_TASK
-    return 0
+    if not set -q OSDK_TASK_ROOT
+      return 0
+    end
+    set -l _osdk_root (string trim -r -c / -- $OSDK_TASK_ROOT)
+    if test "$PWD" = "$_osdk_root"; or test (string sub -l (string length -- "$_osdk_root/") -- "$PWD/") = "$_osdk_root/"
+      return 0
+    end
+    set -e OSDK_TASK OSDK_TASK_NAME OSDK_TASK_ROOT
   end
   # stderr stays visible; see the bash branch.
   {bin} hook-env --shell fish | source
@@ -107,7 +144,15 @@ function global:Invoke-OsdkHook {{
   # runner. Re-deriving it here would discard the per-task `env` and any tool
   # the task just installed -- and on a project whose config is untrusted it
   # would print a trust error into the task's own output.
-  if ($env:OSDK_TASK) {{ return }}
+  # The marker is inherited by whatever the task starts, including shells and
+  # editors that outlive it, so it only holds inside the task's own project.
+  if ($env:OSDK_TASK) {{
+    if (-not $env:OSDK_TASK_ROOT) {{ return }}
+    $osdkTaskRoot = $env:OSDK_TASK_ROOT.TrimEnd([char]92, [char]47)
+    $osdkHere = (Get-Location).ProviderPath
+    if ($osdkHere -ieq $osdkTaskRoot -or $osdkHere.StartsWith($osdkTaskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {{ return }}
+    Remove-Item Env:OSDK_TASK,Env:OSDK_TASK_NAME,Env:OSDK_TASK_ROOT -ErrorAction SilentlyContinue
+  }}
   # stderr stays visible (see the bash branch); only stdout is evaluated.
   $out = & {bin} hook-env --shell powershell
   if ($out) {{ Invoke-Expression ($out -join "`n") }}
@@ -1627,6 +1672,123 @@ mod tests {
                 line("LEGACY="),
                 expect(&[b1, base[0], base[1]]),
                 "{shell:?}"
+            );
+            ran.push(shell);
+        }
+        eprintln!("ran in {ran:?}");
+    }
+
+    /// `OSDK_TASK` is inherited by everything a task starts, including an
+    /// editor or an interactive shell that outlives it. The hook used to stand
+    /// down on the bare marker, so such a shell never activated again in any
+    /// directory. Run in each real shell available: inside the task's root the
+    /// hook still stands down; outside it the hook runs and drops the markers.
+    #[test]
+    fn task_marker_only_holds_inside_the_task_root_in_real_shells() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temporary.path()).unwrap();
+        let project = root.join("project");
+        let inside = project.join("sub");
+        let outside = root.join("elsewhere");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let fake_sh = root.join("fake-osdk.sh");
+        std::fs::write(
+            &fake_sh,
+            "#!/bin/sh\ncase \"$3\" in fish) echo 'set -gx OSDK_HOOK_RAN 1' ;; *) echo 'export OSDK_HOOK_RAN=1' ;; esac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let fake_ps1 = root.join("fake-osdk.ps1");
+        std::fs::write(&fake_ps1, "Write-Output '$env:OSDK_HOOK_RAN = ''1'''\n").unwrap();
+
+        let mut ran = Vec::new();
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
+            let Some(mut command) = test_shell(shell) else {
+                eprintln!("skipping {shell:?}: not available");
+                continue;
+            };
+            let spell = |path: &std::path::Path| {
+                let text = path.display().to_string();
+                if matches!(shell, Shell::Bash | Shell::Zsh) {
+                    posix_path(&text)
+                } else {
+                    text
+                }
+            };
+            let script = match shell {
+                Shell::Powershell => format!(
+                    "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n\
+                     Set-Location -LiteralPath {inside}\n{activation}\n\
+                     Write-Output \"IN=$(if ($env:OSDK_HOOK_RAN) {{ 'ran' }} else {{ 'no' }}) TASK=$(if ($env:OSDK_TASK) {{ 'kept' }} else {{ 'gone' }})\"\n\
+                     Set-Location -LiteralPath {outside}\nInvoke-OsdkHook\n\
+                     Write-Output \"OUT=$(if ($env:OSDK_HOOK_RAN) {{ 'ran' }} else {{ 'no' }}) TASK=$(if ($env:OSDK_TASK) {{ 'kept' }} else {{ 'gone' }})\"\n",
+                    inside = powershell_quote(&inside.display().to_string()),
+                    outside = powershell_quote(&outside.display().to_string()),
+                    activation = activation_script(shell, &fake_ps1.display().to_string()),
+                ),
+                Shell::Fish => format!(
+                    "cd {inside}\n{activation}\n\
+                     if set -q OSDK_HOOK_RAN; set r ran; else; set r no; end\n\
+                     if set -q OSDK_TASK; set t kept; else; set t gone; end\necho IN=$r TASK=$t\n\
+                     cd {outside}\n_osdk_hook\n\
+                     if set -q OSDK_HOOK_RAN; set r ran; else; set r no; end\n\
+                     if set -q OSDK_TASK; set t kept; else; set t gone; end\necho OUT=$r TASK=$t\n",
+                    inside = shell_quote(shell, &inside.display().to_string()),
+                    outside = shell_quote(shell, &outside.display().to_string()),
+                    activation = activation_script(shell, &fake_sh.display().to_string()),
+                ),
+                _ => format!(
+                    "cd {inside}\n{activation}\n\
+                     echo \"IN=${{OSDK_HOOK_RAN:+ran}}${{OSDK_HOOK_RAN:-no}} TASK=${{OSDK_TASK:+kept}}${{OSDK_TASK:-gone}}\"\n\
+                     cd {outside}\n_osdk_hook\n\
+                     echo \"OUT=${{OSDK_HOOK_RAN:+ran}}${{OSDK_HOOK_RAN:-no}} TASK=${{OSDK_TASK:+kept}}${{OSDK_TASK:-gone}}\"\n",
+                    inside = shell_quote(shell, &spell(&inside)),
+                    outside = shell_quote(shell, &spell(&outside)),
+                    activation = activation_script(shell, &spell(&fake_sh)),
+                ),
+            };
+            match shell {
+                Shell::Powershell => {
+                    command.args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                }
+                Shell::Fish => command.args(["--no-config", "-c", &script]),
+                Shell::Zsh => command.args(["-f", "-c", &script]),
+                Shell::Bash => command.args(["--noprofile", "--norc", "-c", &script]),
+            };
+            command
+                .env("OSDK_TASK", "1")
+                .env("OSDK_TASK_NAME", "dev")
+                .env("OSDK_TASK_ROOT", &project)
+                .env_remove("OSDK_HOOK_RAN");
+            let output = command.output().expect("spawn shell");
+            let stdout = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+            let context = format!(
+                "{shell:?}\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // `${X:+ran}${X:-no}` prints `ran1` when set; only the prefix matters.
+            let field = |key: &str| {
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap_or_else(|| panic!("no {key}: {context}"))
+                    .to_string()
+            };
+            let inside_line = field("IN=");
+            let outside_line = field("OUT=");
+            assert!(
+                inside_line.starts_with("no") && inside_line.ends_with("TASK=kept1")
+                    || inside_line == "no TASK=kept",
+                "inside the task root the hook must stand down: {context}"
+            );
+            assert!(
+                outside_line.starts_with("ran") && outside_line.ends_with("TASK=gone"),
+                "outside the task root the hook must run and drop the marker: {context}"
             );
             ran.push(shell);
         }

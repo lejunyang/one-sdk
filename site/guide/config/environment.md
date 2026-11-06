@@ -101,7 +101,7 @@ osdk 读取的 `OSDK_*` 变量都列在本页，按用途分组。总体优先�
 
 | 变量 | 含义 |
 | --- | --- |
-| `OSDK_TASK`、`OSDK_TASK_NAME` | 当前进程是 `osdk run` 启动的任务，以及任务名；shell 钩子见到 `OSDK_TASK` 会跳过重新激活 |
+| `OSDK_TASK`、`OSDK_TASK_NAME`、`OSDK_TASK_ROOT` | 当前进程是 `osdk run` 启动的任务、任务名，以及任务所属项目的根目录；shell 钩子在这个目录之内见到 `OSDK_TASK` 会跳过重新激活，离开后清掉这些变量照常激活 |
 | `OSDK_SHIM_ACTIVE` | 旧版 shim 的内部标记；新版忽略继承值，并在启动工具时移除，不需用户配置 |
 | `OSDK_MANAGED_ENV`、`OSDK_ORIG_<NAME>` | 激活时记录被接管的变量及其原值，`deactivate` 据此恢复 |
 | `OSDK_ADDED_PATH` | 上一次激活加入的 PATH 条目；下一个提示符只替换这些条目，`deactivate` 只移除它们。旧版本激活的会话带的是 `OSDK_ORIGINAL_PATH`，会在下一个提示符迁移 |

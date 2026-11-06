@@ -230,6 +230,12 @@ all four shells **stands down** when it sees `OSDK_TASK`. Otherwise the profile
 hook would re-derive the environment from the config inside the task, discarding
 the task's own `env` and any tool it had just installed.
 
+Standing down only applies inside the task's project (`OSDK_TASK_ROOT`).
+Everything the task starts inherits these variables, and some of it outlives the
+task: an editor it opened, tmux, an interactive shell. When such a shell `cd`s
+out of the project, the hook drops the `OSDK_TASK*` variables and activates as
+usual, instead of never activating again in any directory.
+
 ## The fourth tier: embedded Lua
 
 The first three tiers cover the vast majority of tasks. When you genuinely need
@@ -715,12 +721,13 @@ Tools already installed are selected without a network request. Missing tools
 are installed only when the task explicitly lists their `[tools]` keys; osdk
 does not parse commands or scripts to guess dependencies.
 
-osdk also sets two variables:
+osdk also sets three variables:
 
 | Variable | Meaning |
 | --- | --- |
 | `OSDK_TASK` | always `1`; marks the process as an osdk task |
 | `OSDK_TASK_NAME` | the current task's name |
+| `OSDK_TASK_ROOT` | the root of the task's project; the hook stands down only inside it |
 
 The first exists so an osdk activation hook in a shell profile can tell that the
 environment is already prepared and skip layering a second activation on top.

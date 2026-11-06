@@ -35,6 +35,17 @@ pub const TASK_MARKER: &str = "OSDK_TASK";
 /// Names the task's own identity, for scripts that want to know.
 pub const TASK_NAME_VAR: &str = "OSDK_TASK_NAME";
 
+/// The project root the task runs for, which bounds where [`TASK_MARKER`]
+/// applies.
+///
+/// The marker is inherited by everything the task starts, and some of that
+/// outlives it or wanders off: an editor opened by a task, a tmux server, an
+/// interactive shell. A bare marker made the prompt hook stand down in every
+/// directory of such a shell for good, so `cd` into another project never
+/// activated it. The hook stands down only inside this root and drops the
+/// markers once the shell leaves it.
+pub const TASK_ROOT_VAR: &str = "OSDK_TASK_ROOT";
+
 /// What the runner decided to do, without doing it.
 ///
 /// `osdk run --dry-run` renders this, and the tests assert on it: checking the
@@ -365,7 +376,14 @@ impl TaskEnv {
     ///
     /// Order matters: the activation delta goes on first, the task's `env` last,
     /// so a task can override an exported variable when it means to.
-    pub fn apply(&self, command: &mut Command, task: &TaskDef, name: &str, current_path: &str) {
+    pub fn apply(
+        &self,
+        command: &mut Command,
+        task: &TaskDef,
+        name: &str,
+        current_path: &str,
+        root: &Path,
+    ) {
         for (key, value) in &self.set_vars {
             command.env(key, value);
         }
@@ -381,6 +399,7 @@ impl TaskEnv {
         }
         command.env(TASK_MARKER, "1");
         command.env(TASK_NAME_VAR, name);
+        command.env(TASK_ROOT_VAR, dunce::simplified(root));
     }
 }
 
@@ -485,7 +504,8 @@ impl Spawner for ProcessSpawner {
         let mut child = shell_command(shell, command)?;
         child.current_dir(dir);
         if let Some(def) = self.defs.get(task) {
-            self.env.apply(&mut child, def, task, &self.base_path);
+            self.env
+                .apply(&mut child, def, task, &self.base_path, &self.project_root);
         }
         for (key, value) in &self.arg_env {
             child.env(key, value);
@@ -518,6 +538,12 @@ impl Spawner for ProcessSpawner {
         }
         env.insert(TASK_MARKER.into(), "1".into());
         env.insert(TASK_NAME_VAR.into(), task.to_string());
+        env.insert(
+            TASK_ROOT_VAR.into(),
+            dunce::simplified(&self.project_root)
+                .to_string_lossy()
+                .into_owned(),
+        );
 
         let context = ScriptContext {
             dir: dir.to_path_buf(),
@@ -538,7 +564,8 @@ impl Spawner for ProcessSpawner {
         let mut child = Command::new(program);
         child.args(rest).current_dir(dir);
         if let Some(def) = self.defs.get(task) {
-            self.env.apply(&mut child, def, task, &self.base_path);
+            self.env
+                .apply(&mut child, def, task, &self.base_path, &self.project_root);
         }
         for (key, value) in &self.arg_env {
             child.env(key, value);
@@ -2517,7 +2544,13 @@ shell = "pwsh -Command"
 
         let def: TaskDef = toml::from_str("run = \"x\"\n[env]\nSHARED = \"from-task\"\n").unwrap();
         let mut command = Command::new("echo");
-        env.apply(&mut command, &def, "demo", "/usr/bin");
+        env.apply(
+            &mut command,
+            &def,
+            "demo",
+            "/usr/bin",
+            Path::new("/projects/demo"),
+        );
 
         let vars: BTreeMap<String, String> = command
             .get_envs()
@@ -2527,6 +2560,10 @@ shell = "pwsh -Command"
         assert_eq!(vars.get("JAVA_HOME").map(String::as_str), Some("/jdk"));
         assert_eq!(vars.get(TASK_MARKER).map(String::as_str), Some("1"));
         assert_eq!(vars.get(TASK_NAME_VAR).map(String::as_str), Some("demo"));
+        assert_eq!(
+            vars.get(TASK_ROOT_VAR).map(PathBuf::from),
+            Some(PathBuf::from("/projects/demo"))
+        );
         // The task's own env wins over the activation delta.
         assert_eq!(vars.get("SHARED").map(String::as_str), Some("from-task"));
         // PATH keeps the managed dir first and the inherited entries after.
