@@ -5,17 +5,27 @@ use super::*;
 pub fn completions(shell: clap_complete::Shell) -> Result<()> {
     const COMPLETION_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-    std::thread::Builder::new()
+    // Rendered into memory first: clap_complete panics on a failed write, so
+    // `osdk completions bash | head` used to end in "generator panicked".
+    let script = std::thread::Builder::new()
         .name("osdk-completions".into())
         .stack_size(COMPLETION_STACK_SIZE)
         .spawn(move || {
             use clap::CommandFactory;
             let mut command = crate::cli::Cli::command();
-            clap_complete::generate(shell, &mut command, "osdk", &mut std::io::stdout());
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut command, "osdk", &mut script);
+            script
         })
         .context("spawning shell completion generator")?
         .join()
-        .map_err(|_| anyhow!("shell completion generator panicked"))
+        .map_err(|_| anyhow!("shell completion generator panicked"))?;
+    use std::io::Write;
+    match std::io::stdout().lock().write_all(&script) {
+        // The reader stopped early; nothing is wrong with the script.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result.context("writing shell completions"),
+    }
 }
 
 pub fn list(app: &App, tool: Option<String>) -> Result<()> {
