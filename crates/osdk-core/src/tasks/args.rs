@@ -311,6 +311,14 @@ pub fn substitute(task: &str, element: &str, values: &Values) -> Result<String> 
             )));
         };
         let name = after[..end].trim();
+        // `{{args}}` is only expanded when it is a whole element (it becomes
+        // several argv entries); inside `"[{{args}}]"` it reaches here, and
+        // "not a declared argument" would send the reader looking for a typo.
+        if format!("{{{{{name}}}}}") == REST_PLACEHOLDER {
+            return Err(Error::config(format!(
+                "task `{task}`: `{REST_PLACEHOLDER}` expands to separate arguments, so it must be                  a whole argv element on its own, not part of `{element}`"
+            )));
+        }
         let Some(value) = values.named.get(name) else {
             return Err(Error::config(format!(
                 "task `{task}`: `{{{{{name}}}}}` is not a declared argument"
@@ -457,6 +465,16 @@ choices = ["staging", "prod"]
             .unwrap_err()
             .to_string();
         assert!(error.contains("not a declared argument"), "{error}");
+    }
+
+    #[test]
+    fn an_embedded_rest_placeholder_says_it_must_stand_alone() {
+        let values = Values::default();
+        let error = expand_argv("t", &args(&["echo", "[{{args}}]"]), &values)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("whole argv element"), "{error}");
+        assert!(!error.contains("not a declared argument"), "{error}");
     }
 
     #[test]
