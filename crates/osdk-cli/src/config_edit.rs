@@ -886,19 +886,42 @@ fn set_tool_version_in_doc(doc: &mut toml_edit::DocumentMut, tool: &str, spec: &
             let inline = item
                 .as_inline_table_mut()
                 .context("`tools.<tool>` is not an inline table")?;
-            inline.insert("version", toml_edit::Value::from(spec));
+            match inline.get_mut("version") {
+                Some(version) => replace_keeping_decor(version, spec),
+                None => {
+                    inline.insert("version", toml_edit::Value::from(spec));
+                }
+            }
         }
         Some(item) if item.is_table() => {
             let table = item
                 .as_table_mut()
                 .context("`tools.<tool>` is not a table")?;
-            table.insert("version", toml_edit::value(spec));
+            match table
+                .get_mut("version")
+                .and_then(toml_edit::Item::as_value_mut)
+            {
+                Some(version) => replace_keeping_decor(version, spec),
+                None => {
+                    table.insert("version", toml_edit::value(spec));
+                }
+            }
         }
+        // Edited in place: `insert` replaces the key too, which dropped the
+        // comment line above `node = "20"` and the one trailing it.
+        Some(toml_edit::Item::Value(version)) => replace_keeping_decor(version, spec),
         _ => {
             tools_tbl.insert(tool, toml_edit::value(spec));
         }
     }
     Ok(())
+}
+
+/// Overwrite a value but keep the whitespace and comments around it.
+fn replace_keeping_decor(slot: &mut toml_edit::Value, spec: &str) {
+    let decor = slot.decor().clone();
+    *slot = toml_edit::Value::from(spec);
+    *slot.decor_mut() = decor;
 }
 
 fn edit_tool_config(path: &Path, tool: &str, config: &StructuredToolConfig) -> Result<()> {
@@ -2085,5 +2108,31 @@ arch = ["x64", "arm64"]
         assert!(!text.contains("npm:prettier"));
         assert!(text.contains("node = \"22\""));
         assert!(text.contains("lts = \"22\""));
+    }
+}
+
+#[cfg(test)]
+mod comment_preservation_tests {
+    #[test]
+    fn repinning_a_tool_keeps_its_comments() {
+        let mut doc: toml_edit::DocumentMut =
+            "# my comment\n[tools]\n# keep me\nnode = \"20\" # trailing\npython = \"3.12\"\n"
+                .parse()
+                .unwrap();
+        super::set_tool_version_in_doc(&mut doc, "node", "20.20.2").unwrap();
+        assert_eq!(
+            doc.to_string(),
+            "# my comment\n[tools]\n# keep me\nnode = \"20.20.2\" # trailing\npython = \"3.12\"\n"
+        );
+
+        let mut inline: toml_edit::DocumentMut =
+            "[tools]\n# java\njava = { version = \"21\", lazy = true } # pinned\n"
+                .parse()
+                .unwrap();
+        super::set_tool_version_in_doc(&mut inline, "java", "21.0.5").unwrap();
+        assert_eq!(
+            inline.to_string(),
+            "[tools]\n# java\njava = { version = \"21.0.5\", lazy = true } # pinned\n"
+        );
     }
 }
