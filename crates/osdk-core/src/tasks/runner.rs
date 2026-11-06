@@ -387,12 +387,13 @@ impl TaskEnv {
         for (key, value) in &self.set_vars {
             command.env(key, value);
         }
-        if !self.path_prepend.is_empty() {
-            let mut entries: Vec<PathBuf> = self.path_prepend.clone();
-            entries.extend(std::env::split_paths(current_path));
-            if let Ok(joined) = std::env::join_paths(entries) {
-                command.env("PATH", joined);
-            }
+        // Set even with nothing to prepend: `current_path` is the inherited
+        // PATH without an outer activation's entries, which the child would
+        // otherwise inherit.
+        let mut entries: Vec<PathBuf> = self.path_prepend.clone();
+        entries.extend(std::env::split_paths(current_path));
+        if let Ok(joined) = std::env::join_paths(entries) {
+            command.env("PATH", joined);
         }
         for (key, value) in &task.env {
             command.env(key, value);
@@ -529,12 +530,10 @@ impl Spawner for ProcessSpawner {
         for (key, value) in &self.arg_env {
             env.insert(key.clone(), value.clone());
         }
-        if !self.env.path_prepend.is_empty() {
-            let mut entries = self.env.path_prepend.clone();
-            entries.extend(std::env::split_paths(&self.base_path));
-            if let Ok(joined) = std::env::join_paths(entries) {
-                env.insert("PATH".into(), joined.to_string_lossy().to_string());
-            }
+        let mut entries = self.env.path_prepend.clone();
+        entries.extend(std::env::split_paths(&self.base_path));
+        if let Ok(joined) = std::env::join_paths(entries) {
+            env.insert("PATH".into(), joined.to_string_lossy().to_string());
         }
         env.insert(TASK_MARKER.into(), "1".into());
         env.insert(TASK_NAME_VAR.into(), task.to_string());

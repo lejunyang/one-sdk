@@ -236,6 +236,10 @@ task: an editor it opened, tmux, an interactive shell. When such a shell `cd`s
 out of the project, the hook drops the `OSDK_TASK*` variables and activates as
 usual, instead of never activating again in any directory.
 
+A task's PATH is built on the inherited PATH minus the entries an outer
+activation added (`OSDK_ADDED_PATH`), as for `osdk exec` and `osdk env`;
+directories you added after activation, such as a venv, are kept.
+
 ## The fourth tier: embedded Lua
 
 The first three tiers cover the vast majority of tasks. When you genuinely need

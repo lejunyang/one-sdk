@@ -665,6 +665,57 @@ fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str
     }
 }
 
+/// A task gets the directory's activation on top of the PATH it was given --
+/// without the entries an outer activation added. Started from a shell whose
+/// hook had activated something else, those entries used to stay in the
+/// task's PATH, behind the task's own.
+#[test]
+fn task_path_drops_entries_an_outer_activation_added() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let (program, args, mut env) = print_variable_command("PATH");
+    let argv = std::iter::once(program)
+        .chain(args)
+        .map(|arg| format!("{arg:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!("[tasks.show]\nrun = [{{ argv = [{argv}] }}]\n"),
+    )
+    .unwrap();
+    let stale = temporary.path().join("stale-activation-bin");
+    let kept = temporary.path().join("venv-bin");
+    // The helper's PATH may already hold several entries (`/usr/bin:/bin`).
+    let path = std::env::join_paths(
+        [kept.clone(), stale.clone()]
+            .into_iter()
+            .chain(std::env::split_paths(&env[0].1)),
+    )
+    .unwrap();
+    env[0].1 = path.to_string_lossy().into_owned();
+    let trusted = project.to_string_lossy().into_owned();
+    let added = stale.display().to_string();
+    let mut vars: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    vars.push(("OSDK_ADDED_PATH", &added));
+    vars.push(("OSDK_TRUSTED_CONFIG_PATHS", &trusted));
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["--offline", "run", "--no-deps", "show"],
+        &vars,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(&kept.display().to_string()), "{stdout}");
+    assert!(!stdout.contains(&added), "{stdout}");
+}
+
 #[test]
 fn where_finds_a_java_install_through_a_distribution_prefix() {
     let temporary = tempfile::tempdir().unwrap();

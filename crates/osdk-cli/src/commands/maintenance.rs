@@ -553,7 +553,12 @@ pub async fn run_task(
 
     let cwd = std::env::current_dir()?;
     let env = task_environment(app, &cwd)?;
-    let base_path = std::env::var("PATH").unwrap_or_default();
+    // The PATH an activated shell would have here: its own entries go on top
+    // of the inherited PATH minus whatever an outer activation added, as for
+    // `osdk exec` and `osdk env`.
+    let base_path = osdk_core::execution::ambient_path()
+        .to_string_lossy()
+        .into_owned();
     let defs = app.ctx.config.tasks.tasks.clone();
 
     let mut spawner = runner::ProcessSpawner {
