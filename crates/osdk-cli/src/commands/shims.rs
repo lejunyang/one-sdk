@@ -547,8 +547,18 @@ pub(crate) fn installed_shim_owners(
                     }
                 }
             };
-            if let Some(version) = selected {
-                selected_versions.insert(version);
+            match selected {
+                Some(version) => {
+                    selected_versions.insert(version);
+                }
+                // The directory selects a version that is not installed (the
+                // global pin's version was just uninstalled, say). Shims are
+                // global launchers that choose a version per directory when
+                // they run, so this directory's gap must not delete `node`
+                // for every other project whose selection *is* installed --
+                // same as a failed selection above. The shim reports the
+                // missing version itself when run here.
+                None => selected_versions.extend(installed.iter().cloned()),
             }
         } else {
             selected_versions.extend(installed);

@@ -1589,6 +1589,38 @@ tools = ["node"]
     }
 
     #[test]
+    fn a_selected_but_uninstalled_version_keeps_the_installed_shim_owners() {
+        // Global config pins node 22, which was just uninstalled; node 20 is
+        // still installed and selected by other projects. Reconciliation used
+        // to count only this directory's selection, found no owner for `node`,
+        // and deleted the shim for every project.
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[tools]
+node = \"22\"
+",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let app = app_with_config(&temporary, config);
+        let root = app.ctx.dirs.install_path("node", "20.11.1");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("node.exe"), b"fixture").unwrap();
+        std::fs::write(root.join("bin").join("node"), b"fixture").unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+
+        let owners = installed_shim_owners(&app).unwrap();
+
+        assert!(
+            owners.get("node").is_some_and(|ids| ids.contains("node")),
+            "{owners:?}"
+        );
+    }
+
+    #[test]
     fn unconfigured_dynamic_inventory_is_not_a_runtime_shim_owner() {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");
