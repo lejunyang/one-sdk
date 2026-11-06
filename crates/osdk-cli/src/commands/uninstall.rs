@@ -22,6 +22,21 @@ pub(crate) fn installed_prefix_match(installed: &[String], prefix: &str) -> Opti
         .map(|version| version.version.clone())
 }
 
+/// The installed version an exact `uninstall TOOL@VERSION` names: that exact
+/// name, or the one install of the same core with a build number
+/// (`17.0.10` -> `17.0.10+7`).
+pub(crate) fn installed_exact_match(installed: &[String], version: &str) -> Option<String> {
+    if installed.iter().any(|candidate| candidate == version) {
+        return Some(version.to_string());
+    }
+    let infos: Vec<_> = installed
+        .iter()
+        .map(osdk_core::version::VersionInfo::stable)
+        .collect();
+    osdk_core::version::select_version(&VersionSpec::Exact(version.to_string()), &infos)
+        .map(|found| found.version.clone())
+}
+
 pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
     let req = if global {
         resolve_explicit_request(
@@ -73,7 +88,22 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
         selected.version.clone()
     } else {
         match &req.spec {
-            VersionSpec::Exact(v) => v.clone(),
+            // Checked against what is installed: `uninstall node@99.0.0`
+            // printed "uninstalled" and exited 0, and `java@17.0.10` did the
+            // same while leaving the `17.0.10+7` install in place.
+            VersionSpec::Exact(v) => installed_exact_match(&backend.list_installed(&app.ctx)?, v)
+                // An interrupted install has no completion marker and so is
+                // not listed, but removing it is exactly what one wants.
+                .or_else(|| {
+                    app.ctx
+                        .dirs
+                        .install_path(backend.id(), v)
+                        .exists()
+                        .then(|| v.clone())
+                })
+                .ok_or_else(|| {
+                    anyhow!(t!("err.no_installed_match", tool = req.backend, spec = v))
+                })?,
             VersionSpec::Latest if backend.id() == "rust" => "stable".to_string(),
             VersionSpec::Prefix(p) => installed_prefix_match(&backend.list_installed(&app.ctx)?, p)
                 .ok_or_else(|| {
@@ -1281,6 +1311,22 @@ pub(crate) fn with_uninstall_rollback(
 #[cfg(test)]
 mod prefix_match_tests {
     use super::installed_prefix_match;
+
+    #[test]
+    fn uninstall_exact_requires_an_install() {
+        use super::installed_exact_match;
+        let installed = ["17.0.10+7", "1.80.0", "stable"].map(String::from);
+        assert_eq!(
+            installed_exact_match(&installed, "17.0.10").as_deref(),
+            Some("17.0.10+7")
+        );
+        assert_eq!(
+            installed_exact_match(&installed, "1.80.0").as_deref(),
+            Some("1.80.0")
+        );
+        assert_eq!(installed_exact_match(&installed, "99.0.0"), None);
+        assert_eq!(installed_exact_match(&installed, "17.0.11"), None);
+    }
 
     #[test]
     fn uninstall_prefix_matches_whole_segments_and_prefers_an_exact_name() {
