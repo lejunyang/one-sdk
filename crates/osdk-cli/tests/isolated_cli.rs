@@ -771,6 +771,41 @@ fn hook_activates_installed_tools_and_names_a_missing_one_once() {
     );
 }
 
+/// An asdf line listing several versions runs the first installed one.
+#[test]
+fn where_falls_back_through_an_asdf_version_list() {
+    let temporary = tempfile::tempdir().unwrap();
+    let install = temporary.path().join("installs/go/1.22.5");
+    std::fs::create_dir_all(install.join("bin")).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".tool-versions"), "golang 1.99.0 1.22.5\n").unwrap();
+    let hook = run_isolated_in(temporary.path(), &project, &["hook-env", "--shell", "bash"]);
+    assert!(String::from_utf8_lossy(&hook.stdout).contains("1.22.5"));
+    assert!(
+        String::from_utf8_lossy(&hook.stderr).trim().is_empty(),
+        "nothing is missing: {}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+    let output = run_isolated_in(temporary.path(), &project, &["where", "go"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .ends_with("1.22.5"));
+    let current = run_isolated_in(temporary.path(), &project, &["current", "go"]);
+    assert!(
+        String::from_utf8_lossy(&current.stdout).contains("go 1.22.5"),
+        "{}{}",
+        String::from_utf8_lossy(&current.stdout),
+        String::from_utf8_lossy(&current.stderr)
+    );
+}
+
 /// `osdk install` replays the lock, so what runs must be the locked version
 /// too -- not the newest install that also matches the declaration. A lock
 /// resolved from a different request (the config was edited since) is stale

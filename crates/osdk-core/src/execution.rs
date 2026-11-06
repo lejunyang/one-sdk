@@ -606,17 +606,28 @@ pub fn runtime_environment(
             Ok((vec![target.bin_dir().to_path_buf()], target.env))
         }
         Some(ExecutionTarget::Managed(active)) => {
-            let text = ctx.config.expand_alias(tool, &active.spec)?;
+            let installed = backend.list_installed(ctx)?;
+            let chosen = active.choose_installed(|candidate| {
+                ctx.config
+                    .expand_alias(tool, candidate)
+                    .ok()
+                    .and_then(|candidate| {
+                        crate::version::installed_match(
+                            tool,
+                            &candidate,
+                            active.is_range,
+                            &installed,
+                        )
+                    })
+                    .is_some()
+            });
+            let text = ctx.config.expand_alias(tool, &chosen)?;
             let spec = if active.is_range {
                 VersionSpec::parse_range(&text)?
             } else {
                 VersionSpec::parse(&text)
             };
-            let versions: Vec<_> = backend
-                .list_installed(ctx)?
-                .iter()
-                .map(VersionInfo::stable)
-                .collect();
+            let versions: Vec<_> = installed.iter().map(VersionInfo::stable).collect();
             let version = crate::version::select_version(&spec, &versions).ok_or_else(|| {
                 Error::config(format!("selected {tool} runtime is not installed"))
             })?;

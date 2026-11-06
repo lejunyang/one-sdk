@@ -19,6 +19,27 @@ pub struct ActiveVersion {
     pub spec: String,
     pub source: VersionOrigin,
     pub is_range: bool,
+    /// Versions to fall back to, in order, when `spec` has no install: the
+    /// rest of an asdf `.tool-versions` line (`nodejs 20.11.1 18.19.0`) or of
+    /// a multi-line pyenv `.python-version`. Both tools use the first entry
+    /// that is installed; see [`ActiveVersion::choose_installed`].
+    pub fallbacks: Vec<String>,
+}
+
+impl ActiveVersion {
+    /// The spec to run: the declared one when `installed` accepts it, else
+    /// the first fallback that it accepts, else the declared one (which is
+    /// then reported as not installed, naming what the file asked for first).
+    pub fn choose_installed(&self, installed: impl Fn(&str) -> bool) -> String {
+        if self.fallbacks.is_empty() || installed(&self.spec) {
+            return self.spec.clone();
+        }
+        self.fallbacks
+            .iter()
+            .find(|fallback| installed(fallback))
+            .unwrap_or(&self.spec)
+            .clone()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +261,7 @@ pub fn resolve_active(
                     spec: package_manager.version,
                     source: VersionOrigin::ProjectMetadata(package_manager.source),
                     is_range: false,
+                    fallbacks: Vec::new(),
                 });
             }
         }
@@ -257,6 +279,7 @@ pub fn resolve_active(
                         spec,
                         source: VersionOrigin::ProjectConfig(p),
                         is_range: false,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -275,6 +298,7 @@ pub fn resolve_active(
                         spec: spec.clone(),
                         source: VersionOrigin::ToolVersions(tv),
                         is_range: false,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -292,6 +316,7 @@ pub fn resolve_active(
                         spec,
                         source: VersionOrigin::IdiomaticFile(p),
                         is_range: false,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -309,6 +334,7 @@ pub fn resolve_active(
                         spec,
                         source: VersionOrigin::ProjectMetadata(package),
                         is_range: true,
+                        fallbacks: Vec::new(),
                     });
                 }
             }
@@ -321,6 +347,7 @@ pub fn resolve_active(
         spec: spec.clone(),
         source: VersionOrigin::GlobalConfig,
         is_range: false,
+        fallbacks: Vec::new(),
     })
 }
 

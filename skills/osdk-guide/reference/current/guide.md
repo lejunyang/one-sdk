@@ -14,7 +14,8 @@ osdk current
 osdk current node
 ```
 
-相关配置：项目/全局 `[tools]`、`.tool-versions` 与 `[alias.tools]`。需要看安装目录和命令
+相关配置：项目/全局 `[tools]`、`.tool-versions` 与 `[alias.tools]`。`.tool-versions` 一行列多个版本（asdf）
+或 `.python-version` 多行（pyenv）时，显示的是第一个已安装的那个。需要看安装目录和命令
 归属时用 `osdk where <tool> --bins`。
 
 `current` 使用与执行相同的 `[settings.precedence]` 工具选择结果，每个工具一行（版本与来源）；有多个声明竞争时，在其下缩进列出落选项（`  shadowed: <field> in <path> (<reason>)`，`ignored` 同理），没有任何声明适用时显示 `<tool> (no applicable declaration)`。结构化记录（tool、path、field、category、status、reason）用 `current TOOL --sources --json` 获取。其他工具的声明只记录为 ignored，不解释其版本；已被近层覆盖的原生版本值不再校验。`tool_order`、冲突策略和范围兼容性详见 [settings](../configuration/settings.md)。

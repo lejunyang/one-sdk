@@ -16,7 +16,7 @@ use osdk_core::inventory::ScanReport;
 use osdk_core::package_registry::{manager_for_command, PackageManager};
 use osdk_core::platform::Platform;
 use osdk_core::version::resolver::resolve_active_config;
-use osdk_core::version::{select_version, ToolVersion, VersionSpec};
+use osdk_core::version::{ToolVersion, VersionSpec};
 
 // The shim resolves and execs already-installed tools; it never installs. Its
 // whole size advantage comes from `osdk-core` being compiled without the
@@ -211,7 +211,16 @@ fn real_main() -> i32 {
             return 1;
         }
     })
-    .map(|active| (active.spec, active.is_range))
+    .map(|active| {
+        let spec = active.choose_installed(|candidate| {
+            let candidate = ctx
+                .config
+                .expand_alias(backend.id(), candidate)
+                .unwrap_or_else(|_| candidate.to_string());
+            resolve_installed(&ctx, backend.as_ref(), &candidate, active.is_range).is_some()
+        });
+        (spec, active.is_range)
+    })
     .or_else(|| {
         dynamic_request
             .as_ref()
@@ -986,6 +995,10 @@ fn make_ctx(dirs: Dirs, platform: Platform, config: Config) -> osdk_core::backen
 }
 
 /// Resolve a spec against locally installed versions (no network).
+///
+/// `java = "17.0.10"` is an exact semver whose install is named `17.0.10+7`;
+/// the shared matcher falls back to the selector, which ignores build
+/// metadata, as activation does.
 fn resolve_installed(
     ctx: &osdk_core::backend::Ctx,
     backend: &dyn osdk_core::backend::Backend,
@@ -993,34 +1006,7 @@ fn resolve_installed(
     is_range: bool,
 ) -> Option<String> {
     let installed = backend.list_installed(ctx).ok()?;
-    if installed.is_empty() {
-        return None;
-    }
-    if backend.id() == "python" {
-        return osdk_core::backend::python::select_installed(spec, &installed);
-    }
-    // Strip a leading distribution prefix like `temurin-` (java) so the version
-    // part matches the installed dir names (e.g. `17.0.20+8`).
-    let spec = osdk_core::version::strip_distribution_prefix(spec);
-    let parsed = if is_range {
-        VersionSpec::parse_range(spec).ok()?
-    } else {
-        VersionSpec::parse(spec)
-    };
-    if let VersionSpec::Exact(v) = &parsed {
-        if let Some(found) = installed.iter().find(|i| *i == v) {
-            return Some(found.clone());
-        }
-    }
-    // Not only for prefixes: `java = "17.0.10"` is an exact semver whose
-    // install is named `17.0.10+7`. A literal-only match reported "is not
-    // installed" right after `osdk install` had installed it; the selector
-    // matches the same core ignoring build metadata, as activation does.
-    let infos: Vec<_> = installed
-        .iter()
-        .map(osdk_core::version::VersionInfo::stable)
-        .collect();
-    select_version(&parsed, &infos).map(|vi| vi.version.clone())
+    osdk_core::version::installed_match(backend.id(), spec, is_range, &installed)
 }
 
 fn managed_bin_paths(

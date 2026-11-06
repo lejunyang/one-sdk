@@ -432,7 +432,27 @@ pub fn compute_env_delta_allowing_missing(
         let active =
             match resolve_active_config(backend.id(), cwd, &ctx.config, backend.idiomatic_files())?
             {
-                Some(a) => Some((a.spec, a.is_range)),
+                Some(a) => {
+                    let installed = if a.fallbacks.is_empty() {
+                        Vec::new()
+                    } else {
+                        backend.list_installed(ctx).unwrap_or_default()
+                    };
+                    let spec = a.choose_installed(|candidate| {
+                        let candidate = ctx
+                            .config
+                            .expand_alias(backend.id(), candidate)
+                            .unwrap_or_else(|_| candidate.to_string());
+                        crate::version::installed_match(
+                            backend.id(),
+                            &candidate,
+                            a.is_range,
+                            &installed,
+                        )
+                        .is_some()
+                    });
+                    Some((spec, a.is_range))
+                }
                 None => dynamic_request
                     .as_ref()
                     .map(|request| (request.spec.to_string(), false)),

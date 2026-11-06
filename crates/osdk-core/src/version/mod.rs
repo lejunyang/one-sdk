@@ -196,6 +196,35 @@ impl fmt::Display for ToolVersion {
     }
 }
 
+/// The installed version `spec` selects, the way the shim and activation pick
+/// one: python by its own rules, an exact name first, then the selector.
+pub fn installed_match(
+    backend_id: &str,
+    spec: &str,
+    is_range: bool,
+    installed: &[String],
+) -> Option<String> {
+    if installed.is_empty() {
+        return None;
+    }
+    if backend_id == "python" {
+        return crate::backend::python::select_installed(spec, installed);
+    }
+    let spec = strip_distribution_prefix(spec);
+    let parsed = if is_range {
+        VersionSpec::parse_range(spec).ok()?
+    } else {
+        VersionSpec::parse(spec)
+    };
+    if let VersionSpec::Exact(version) = &parsed {
+        if let Some(found) = installed.iter().find(|i| *i == version) {
+            return Some(found.clone());
+        }
+    }
+    let infos: Vec<_> = installed.iter().map(VersionInfo::stable).collect();
+    select_version(&parsed, &infos).map(|info| info.version.clone())
+}
+
 /// Select the best matching version string from a candidate list for a spec.
 ///
 /// `candidates` should be sorted ascending (oldest first). `is_stable` and

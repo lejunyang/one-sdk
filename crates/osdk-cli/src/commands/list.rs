@@ -175,7 +175,25 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
                 osdk_core::execution::ExecutionTarget::Managed(active) => Some(active),
                 osdk_core::execution::ExecutionTarget::System(_) => None,
             })
-            .map(|active| (active.spec, Some(active.source)))
+            .map(|active| {
+                // An asdf / pyenv fallback runs when the first entry is not
+                // installed; show the one that runs.
+                let spec = if active.fallbacks.is_empty() {
+                    active.spec.clone()
+                } else {
+                    let installed = backend.list_installed(&app.ctx).unwrap_or_default();
+                    active.choose_installed(|spec| {
+                        osdk_core::version::installed_match(
+                            backend.id(),
+                            spec,
+                            active.is_range,
+                            &installed,
+                        )
+                        .is_some()
+                    })
+                };
+                (spec, Some(active.source))
+            })
             .or_else(|| {
                 osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
                     .map(|request| (request.spec.to_string(), None))
@@ -341,37 +359,22 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
             &app.ctx.config,
             backend.idiomatic_files(),
         )?
-        .map(|active| (active.spec, active.is_range))
+        .map(|active| {
+            let matches = |spec: &str| {
+                osdk_core::version::installed_match(backend.id(), spec, active.is_range, &installed)
+            };
+            (
+                active.choose_installed(|spec| matches(spec).is_some()),
+                active.is_range,
+            )
+        })
         .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
         match resolved {
-            Some((spec, _is_range)) if backend.id() == "python" => {
-                osdk_core::backend::python::select_installed(&spec, &installed)
-                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
-            }
+            // A configured `java = "temurin-21"` names its install `21.x`; the
+            // shared matcher strips the distribution, as the shim does.
             Some((spec, is_range)) => {
-                // A configured `java = "temurin-21"` names its install `21.x`.
-                let spec = osdk_core::version::strip_distribution_prefix(&spec);
-                let parsed = if is_range {
-                    VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
-                } else {
-                    VersionSpec::parse(spec)
-                };
-                match &parsed {
-                    VersionSpec::Exact(version)
-                        if installed.iter().any(|installed| installed == version) =>
-                    {
-                        version.clone()
-                    }
-                    _ => {
-                        let infos: Vec<_> = installed
-                            .iter()
-                            .map(osdk_core::version::VersionInfo::stable)
-                            .collect();
-                        osdk_core::version::select_version(&parsed, &infos)
-                            .map(|version| version.version.clone())
-                            .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
-                    }
-                }
+                osdk_core::version::installed_match(backend.id(), &spec, is_range, &installed)
+                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
             }
             None => installed
                 .into_iter()

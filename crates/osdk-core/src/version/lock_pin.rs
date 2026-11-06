@@ -172,6 +172,7 @@ mod tests {
             spec: spec.into(),
             source,
             is_range: false,
+            fallbacks: Vec::new(),
         }
     }
 

@@ -301,7 +301,12 @@ pub fn managed_jdk_env(
         java.idiomatic_files(),
     )
     .ok()?
-    .and_then(|active| installed_matching(&active.spec, active.is_range, &installed))
+    .and_then(|active| {
+        let spec = active.choose_installed(|candidate| {
+            installed_matching(candidate, active.is_range, &installed).is_some()
+        });
+        installed_matching(&spec, active.is_range, &installed)
+    })
     .or_else(|| installed.last().cloned())?;
     let version = ToolVersion::new(java.id(), selected);
     let env = java.exec_env(ctx, &version).ok()?;
