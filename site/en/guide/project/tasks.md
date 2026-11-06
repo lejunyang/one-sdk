@@ -678,6 +678,10 @@ Note that a developer machine may well *happen* to have `sh` on PATH — it can
 even be one of osdk's own shims — so a config that relies on it works locally
 and fails on a clean machine.
 
+cmd receives the step text exactly as written (as `cmd /s /c "<step>"`,
+the quoting Node uses for `shell: true`), so quotes in `run = 'echo "a b"'` are
+cmd's to interpret and are not backslash-escaped on the way in.
+
 To choose a different interpreter:
 
 ```toml

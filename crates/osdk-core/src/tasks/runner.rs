@@ -118,6 +118,38 @@ pub fn default_shell() -> Vec<String> {
     }
 }
 
+/// A command running `script` through `shell` (program plus its arguments).
+///
+/// cmd.exe does not split its command line by the MSVC rules Rust's argument
+/// quoting targets, so the script `echo "a b"` arrived as `"echo \"a b\""` and
+/// cmd printed the backslashes. For cmd the script is passed raw instead,
+/// inside one pair of quotes that `/S` makes cmd strip unconditionally -- the
+/// `/s /c "<script>"` form Node uses for `shell: true` -- so cmd sees the
+/// text exactly as written in `osdk.toml`.
+pub(crate) fn shell_command(shell: &[String], script: &str) -> Result<Command> {
+    let (program, args) = shell
+        .split_first()
+        .ok_or_else(|| Error::config("`shell` must name an interpreter"))?;
+    let mut child = Command::new(program);
+    #[cfg(windows)]
+    if let Some((switch, leading)) = args.split_last().filter(|(switch, _)| {
+        switch.eq_ignore_ascii_case("/c")
+            && Path::new(program)
+                .file_stem()
+                .is_some_and(|stem| stem.eq_ignore_ascii_case("cmd"))
+    }) {
+        use std::os::windows::process::CommandExt;
+        child
+            .args(leading)
+            .arg("/s")
+            .arg(switch)
+            .raw_arg(format!("\"{script}\""));
+        return Ok(child);
+    }
+    child.args(args).arg(script);
+    Ok(child)
+}
+
 /// Split a `shell` setting like `pwsh -Command` into program plus arguments.
 ///
 /// Deliberately whitespace-splitting rather than shell-parsing: a shell setting
@@ -447,11 +479,11 @@ impl Spawner for ProcessSpawner {
     }
 
     fn run(&mut self, task: &str, shell: &[String], command: &str, dir: &Path) -> Result<i32> {
-        let (program, args) = shell
-            .split_first()
+        let program = shell
+            .first()
             .ok_or_else(|| Error::config("`shell` must name an interpreter"))?;
-        let mut child = Command::new(program);
-        child.args(args).arg(command).current_dir(dir);
+        let mut child = shell_command(shell, command)?;
+        child.current_dir(dir);
         if let Some(def) = self.defs.get(task) {
             self.env.apply(&mut child, def, task, &self.base_path);
         }
@@ -1320,6 +1352,24 @@ fn execute_full_inner(
 mod tests {
     use super::*;
     use crate::tasks::TaskEntry;
+
+    #[test]
+    fn shell_steps_reach_the_default_shell_exactly_as_written() {
+        // Quotes inside a step are the shell's to interpret. cmd.exe used to
+        // receive them backslash-escaped and print `\"a b\"`.
+        let output = shell_command(&default_shell(), r#"echo "a b" 'c'"#)
+            .unwrap()
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let expected = if cfg!(windows) {
+            r#""a b" 'c'"#
+        } else {
+            "a b c"
+        };
+        assert_eq!(stdout.trim_end(), expected);
+    }
 
     fn set_from(toml: &str) -> TaskSet {
         let entries: BTreeMap<String, TaskEntry> = toml::from_str(toml).expect("parse");
