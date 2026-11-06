@@ -2460,8 +2460,103 @@ fn truthy(s: &str) -> bool {
     matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
+/// Top-level tables `ConfigFile` reads, plus `extends` (consumed by
+/// inheritance). Listed regardless of build features so the shim, which omits
+/// `[tasks]` and friends, still recognizes them.
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "settings",
+    "sources",
+    "registries",
+    "container",
+    "containers",
+    "sys",
+    "syspkg",
+    "tools",
+    "alias",
+    "aliases",
+    "tasks",
+    "models",
+    "skills",
+    "deps",
+    "task",
+    "task_config",
+    "extends",
+];
+
+/// Top-level keys of `value` that no part of osdk reads.
+///
+/// Nested tables reject unknown fields, but the top level accepts anything, so
+/// a misspelled `[toolz]` -- or `[env]` carried over from another tool's file
+/// -- was ignored without a word and every tool in it silently unselected.
+fn unknown_top_level_keys(value: &toml::Value) -> Vec<String> {
+    value
+        .as_table()
+        .map(|table| {
+            table
+                .keys()
+                .filter(|key| !KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The known key one or two edits away from `key`, for a "did you mean".
+fn closest_top_level_key(key: &str) -> Option<&'static str> {
+    fn distance(a: &str, b: &str) -> usize {
+        let b: Vec<char> = b.chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut previous = row[0];
+            row[0] = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let current = row[j + 1];
+                row[j + 1] = (previous + usize::from(ca != *cb))
+                    .min(row[j] + 1)
+                    .min(current + 1);
+                previous = current;
+            }
+        }
+        row[b.len()]
+    }
+    KNOWN_TOP_LEVEL_KEYS
+        .iter()
+        .copied()
+        .map(|known| (distance(key, known), known))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, known)| known)
+}
+
+fn warn_unknown_top_level_keys(path: &Path, value: &toml::Value) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    for key in unknown_top_level_keys(value) {
+        let seen = format!("{}|{key}", path.display());
+        let fresh = WARNED
+            .get_or_init(Default::default)
+            .lock()
+            .map(|mut warned| warned.insert(seen))
+            .unwrap_or(false);
+        if !fresh {
+            continue;
+        }
+        match closest_top_level_key(&key) {
+            Some(known) => tracing::warn!(
+                "{}: `{key}` is not an osdk config section and is ignored; did you mean `{known}`?",
+                path.display()
+            ),
+            None => tracing::warn!(
+                "{}: `{key}` is not an osdk config section and is ignored",
+                path.display()
+            ),
+        }
+    }
+}
+
 fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> {
     let value = inheritance::load(path, rel_base)?;
+    warn_unknown_top_level_keys(path, &value);
     let mut file: ConfigFile = value
         .try_into()
         .map_err(|error| with_config_path(path, sanitize_config_parse_error(error)))?;
@@ -3909,6 +4004,43 @@ probe_timeout_ms = 125
         for name in ["18-legacy", "v20-work", "work20", "lts20x"] {
             assert!(validate_alias_name(name).is_ok(), "{name}");
         }
+    }
+
+    #[test]
+    fn unknown_top_level_sections_are_reported_with_a_suggestion() {
+        let value: toml::Value = toml::from_str(
+            "extends = \"base.toml\"
+[toolz]
+node = \"20\"
+[env]
+X = \"1\"
+[tools]
+[tasks]
+[sys.pkg]
+",
+        )
+        .unwrap();
+        assert_eq!(unknown_top_level_keys(&value), ["env", "toolz"]);
+        assert_eq!(closest_top_level_key("toolz"), Some("tools"));
+        assert_eq!(closest_top_level_key("taks"), Some("tasks"));
+        assert_eq!(closest_top_level_key("env"), None);
+        // Every section ConfigFile reads must be on the list, or it would warn.
+        let all = KNOWN_TOP_LEVEL_KEYS
+            .iter()
+            .map(|key| {
+                format!(
+                    "[{key}]
+"
+                )
+            })
+            .collect::<String>()
+            .replace(
+                "[extends]
+",
+                "",
+            );
+        let value: toml::Value = toml::from_str(&all).unwrap();
+        assert!(unknown_top_level_keys(&value).is_empty());
     }
 
     #[test]
