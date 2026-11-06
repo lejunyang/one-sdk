@@ -1026,16 +1026,20 @@ fn resolve_installed(
     } else {
         VersionSpec::parse(spec)
     };
-    match &parsed {
-        VersionSpec::Exact(v) => installed.iter().find(|i| *i == v).cloned(),
-        _ => {
-            let infos: Vec<_> = installed
-                .iter()
-                .map(osdk_core::version::VersionInfo::stable)
-                .collect();
-            select_version(&parsed, &infos).map(|vi| vi.version.clone())
+    if let VersionSpec::Exact(v) = &parsed {
+        if let Some(found) = installed.iter().find(|i| *i == v) {
+            return Some(found.clone());
         }
     }
+    // Not only for prefixes: `java = "17.0.10"` is an exact semver whose
+    // install is named `17.0.10+7`. A literal-only match reported "is not
+    // installed" right after `osdk install` had installed it; the selector
+    // matches the same core ignoring build metadata, as activation does.
+    let infos: Vec<_> = installed
+        .iter()
+        .map(osdk_core::version::VersionInfo::stable)
+        .collect();
+    select_version(&parsed, &infos).map(|vi| vi.version.clone())
 }
 
 fn managed_bin_paths(
@@ -1568,5 +1572,41 @@ mod tests {
             &[first, second],
             &std::collections::BTreeMap::new(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod resolve_installed_tests {
+    use super::*;
+
+    #[test]
+    fn an_exact_request_finds_the_same_core_install_with_a_build_number() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        for version in ["17.0.10+7", "21.0.5+11"] {
+            let root = dirs.install_path("java", version);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        }
+        let ctx = make_ctx(dirs, Platform::current(), Config::default());
+        let java = osdk_core::Registry::new().get("java").unwrap();
+        // `java = "17.0.10"` and SDKMAN's `java=17.0.10-tem` (-> `temurin-17.0.10`).
+        for spec in ["17.0.10", "temurin-17.0.10", "17.0.10+7", "17"] {
+            assert_eq!(
+                resolve_installed(&ctx, java.as_ref(), spec, false).as_deref(),
+                Some("17.0.10+7"),
+                "{spec}"
+            );
+        }
+        assert_eq!(
+            resolve_installed(&ctx, java.as_ref(), "17.0.11", false),
+            None
+        );
     }
 }
