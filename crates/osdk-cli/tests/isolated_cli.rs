@@ -634,6 +634,38 @@ fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str
 }
 
 #[test]
+fn where_finds_a_java_install_through_a_distribution_prefix() {
+    let temporary = tempfile::tempdir().unwrap();
+    let install = temporary.path().join("installs/java/21.0.5+11");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]
+java = \"temurin-21\"
+",
+    )
+    .unwrap();
+
+    for args in [
+        &["where", "java"][..],
+        &["where", "java@temurin-21.0.5"][..],
+    ] {
+        let output = run_isolated_in(temporary.path(), &project, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .ends_with("21.0.5+11"));
+    }
+}
+
+#[test]
 fn alias_rejects_version_shaped_names_and_unknown_unsets() {
     let temporary = tempfile::tempdir().unwrap();
     let shadow = run_isolated(temporary.path(), &["alias", "set", "node", "20", "22"]);

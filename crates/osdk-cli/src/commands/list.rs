@@ -324,7 +324,11 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
                 .iter()
                 .map(osdk_core::version::VersionInfo::stable)
                 .collect();
-            osdk_core::version::select_version(&req.spec, &infos).map(|info| info.version.clone())
+            // `java@temurin-17.0.10`: installs are named by version only.
+            let spec = VersionSpec::parse(osdk_core::version::strip_distribution_prefix(
+                &req.spec.to_string(),
+            ));
+            osdk_core::version::select_version(&spec, &infos).map(|info| info.version.clone())
         };
         selected.ok_or_else(|| anyhow!("{}@{} is not installed", req.backend, literal))?
     } else {
@@ -345,10 +349,12 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
                     .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
             }
             Some((spec, is_range)) => {
+                // A configured `java = "temurin-21"` names its install `21.x`.
+                let spec = osdk_core::version::strip_distribution_prefix(&spec);
                 let parsed = if is_range {
-                    VersionSpec::parse_range(&spec).unwrap_or_else(|_| VersionSpec::parse(&spec))
+                    VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
                 } else {
-                    VersionSpec::parse(&spec)
+                    VersionSpec::parse(spec)
                 };
                 match &parsed {
                     VersionSpec::Exact(version)

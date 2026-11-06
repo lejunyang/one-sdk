@@ -254,6 +254,25 @@ pub fn select_version<'a>(
     }
 }
 
+/// Strip a leading `<word>-` distribution prefix: `temurin-17` -> `17`.
+///
+/// Installs are named by version alone, so every lookup of an installed
+/// version -- activation, the shim, `osdk where` -- has to drop it first. Only
+/// a left side of letters and `_` counts (Foojay ids such as
+/// `graalvm_community`, which SDKMAN's `-graalce` maps to), so `1.22` or
+/// `1.0-rc1` stay intact.
+pub fn strip_distribution_prefix(spec: &str) -> &str {
+    if let Some((left, right)) = spec.split_once('-') {
+        if left.starts_with(|c: char| c.is_ascii_alphabetic())
+            && left.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+            && !right.is_empty()
+        {
+            return right;
+        }
+    }
+    spec
+}
+
 /// Order two version strings oldest-first, the way a person reads them.
 ///
 /// Installed-version listings came back sorted lexically, so `20.9.0` sorted
@@ -635,6 +654,17 @@ mod tests {
             crate::dirs::sanitize_tool_id(&request.backend),
             std::path::PathBuf::from("npm/@antfu/ni")
         );
+    }
+
+    #[test]
+    fn distribution_prefixes_strip_but_versions_stay_whole() {
+        assert_eq!(strip_distribution_prefix("temurin-17.0.10"), "17.0.10");
+        assert_eq!(strip_distribution_prefix("zulu-21"), "21");
+        assert_eq!(strip_distribution_prefix("1.0-rc1"), "1.0-rc1");
+        assert_eq!(strip_distribution_prefix("graalvm_community-21"), "21");
+        assert_eq!(strip_distribution_prefix("sap_machine-17.0.10"), "17.0.10");
+        assert_eq!(strip_distribution_prefix("_x-1"), "_x-1");
+        assert_eq!(strip_distribution_prefix("lts"), "lts");
     }
 
     #[test]

@@ -288,6 +288,7 @@ pub fn compute_env_delta(
     registry: &Registry,
     cwd: &std::path::Path,
 ) -> crate::Result<EnvDelta> {
+    use crate::version::strip_distribution_prefix;
     let mut path_prepend = Vec::new();
     let mut system_paths = Vec::new();
     let mut set_vars = BTreeMap::new();
@@ -1039,16 +1040,6 @@ fn powershell_quote(value: &str) -> String {
     // A leading `[char]` would make `+` add code points as numbers; starting
     // from an empty string keeps every `+` a concatenation.
     format!("(''+{})", parts.join("+"))
-}
-
-/// Strip a leading `<word>-` distribution prefix (java's temurin-17).
-fn strip_distribution_prefix(spec: &str) -> &str {
-    if let Some((left, right)) = spec.split_once('-') {
-        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphabetic()) && !right.is_empty() {
-            return right;
-        }
-    }
-    spec
 }
 
 #[cfg(test)]

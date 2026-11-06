@@ -261,9 +261,11 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    let parsed_dynamic_spec = dynamic_request
-        .as_ref()
-        .map(|_| VersionSpec::parse(strip_distribution_prefix(&expanded_spec)));
+    let parsed_dynamic_spec = dynamic_request.as_ref().map(|_| {
+        VersionSpec::parse(osdk_core::version::strip_distribution_prefix(
+            &expanded_spec,
+        ))
+    });
     let version = match parsed_dynamic_spec {
         Some(VersionSpec::Exact(version)) => Some(version),
         _ => resolve_installed(&ctx, backend.as_ref(), &expanded_spec, is_range),
@@ -1020,7 +1022,7 @@ fn resolve_installed(
     }
     // Strip a leading distribution prefix like `temurin-` (java) so the version
     // part matches the installed dir names (e.g. `17.0.20+8`).
-    let spec = strip_distribution_prefix(spec);
+    let spec = osdk_core::version::strip_distribution_prefix(spec);
     let parsed = if is_range {
         VersionSpec::parse_range(spec).ok()?
     } else {
@@ -1060,18 +1062,6 @@ fn managed_executable_path(
     executable_name: &str,
 ) -> Option<PathBuf> {
     find_exe(&managed_bin_paths(ctx, backend, version), executable_name)
-}
-
-/// Strip a leading `<word>-` distribution prefix (e.g. `temurin-17` -> `17`).
-/// Only strips when the left side is purely alphabetic, so real versions like
-/// `1.22` or prereleases are untouched.
-fn strip_distribution_prefix(spec: &str) -> &str {
-    if let Some((left, right)) = spec.split_once('-') {
-        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphabetic()) && !right.is_empty() {
-            return right;
-        }
-    }
-    spec
 }
 
 fn find_exe(bin_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
