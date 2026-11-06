@@ -679,7 +679,7 @@ fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(
         {
             return Err(osdk_core::t!(
                 "err.untrusted_config",
-                path = project_config.display(),
+                path = dunce::simplified(&project_config).display(),
                 requirements = osdk_core::trust::describe_requirements(&requirements)
             ));
         }

@@ -3006,6 +3006,7 @@ dependencies = [
 name = "osdk-shim"
 version = "0.0.8"
 dependencies = [
+ "dunce",
  "osdk-core",
  "tempfile",
  "tokio",

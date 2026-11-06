@@ -235,8 +235,8 @@ fn trusting_leaf_does_not_trust_inherited_executable_config() {
     assert!(error.contains("deps.codegen.run"), "{error}");
     assert!(
         error.contains(
-            root.join("osdk.toml")
-                .canonicalize()
+            // Printed without the `\?\` prefix `canonicalize` adds on Windows.
+            dunce::canonicalize(root.join("osdk.toml"))
                 .unwrap()
                 .to_str()
                 .unwrap()

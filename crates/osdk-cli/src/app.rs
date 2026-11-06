@@ -287,7 +287,7 @@ impl App {
         }
         Err(anyhow::anyhow!(osdk_core::t!(
             "err.untrusted_config",
-            path = project_config.display(),
+            path = dunce::simplified(project_config).display(),
             requirements = osdk_core::trust::describe_requirements(&requirements)
         )))
     }
@@ -367,7 +367,7 @@ impl App {
                     {
                         return Err(anyhow::anyhow!(osdk_core::t!(
                             "err.untrusted_config",
-                            path = project_config.display(),
+                            path = dunce::simplified(&project_config).display(),
                             requirements = osdk_core::trust::describe_requirements(&requirements)
                         )));
                     }
