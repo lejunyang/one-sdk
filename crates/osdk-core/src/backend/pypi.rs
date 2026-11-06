@@ -1081,13 +1081,13 @@ impl Backend for PypiBackend {
         //
         // The requirement built from this is `==`-pinned, so the installer still
         // treats it as one exact release rather than a range.
-        let literal = match &req.spec {
-            crate::version::VersionSpec::Exact(version)
-            | crate::version::VersionSpec::Prefix(version)
-            | crate::version::VersionSpec::Pinned(version) => Some(version.clone()),
-            _ => None,
-        };
-        if let Some(version) = literal {
+        //
+        // Online, though, a prefix goes through the index: `==3` is PEP 440 for
+        // exactly `3.0.0`, so `pypi:httpie@3` installed the oldest 3.x (which
+        // crashes against urllib3 2) where `npm:x@3` gets the newest 3.x. The
+        // selector prefers an exact identifier match, so `@6.1` still selects
+        // the release `6.1` itself; offline there is no index to consult.
+        if let Some(version) = literal_release(&req.spec, _ctx.config.settings.offline) {
             let mut tv = ToolVersion::new(self.id(), version);
             tv.options = req.options.clone();
             return Ok(tv);
@@ -1326,8 +1326,41 @@ fn is_interpreter_plumbing(name: &str) -> bool {
         || stem.starts_with("easy_install-")
 }
 
+/// The release a request names outright, without consulting the index.
+///
+/// Exact and pinned versions qualify. A prefix qualifies only offline: `==3`
+/// is PEP 440 for exactly `3.0.0`, so treating `@3` as literal online would
+/// install the oldest 3.x instead of the newest (see `resolve_version`).
+fn literal_release(spec: &crate::version::VersionSpec, offline: bool) -> Option<String> {
+    use crate::version::VersionSpec;
+    match spec {
+        VersionSpec::Exact(version) | VersionSpec::Pinned(version) => Some(version.clone()),
+        VersionSpec::Prefix(version) if offline => Some(version.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_full_versions_skip_the_index_while_online() {
+        use super::literal_release;
+        use crate::version::VersionSpec;
+        assert_eq!(
+            literal_release(&VersionSpec::parse("1.2.3"), false).as_deref(),
+            Some("1.2.3")
+        );
+        // `@3` / `@6.1` must be matched against the index online, where an
+        // exact release `6.1` still wins over a longer `6.1.x`.
+        assert_eq!(literal_release(&VersionSpec::parse("3"), false), None);
+        assert_eq!(literal_release(&VersionSpec::parse("6.1"), false), None);
+        assert_eq!(
+            literal_release(&VersionSpec::parse("6.1"), true).as_deref(),
+            Some("6.1")
+        );
+        assert_eq!(literal_release(&VersionSpec::Latest, true), None);
+    }
+
     use super::*;
 
     /// Version ordering must be numeric, not lexical.

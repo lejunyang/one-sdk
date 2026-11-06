@@ -46,7 +46,11 @@ osdk list-remote pypi:cowsay
 
 ::: tip Versions are not semver
 Python versions have no fixed segment count: `6.1` and `2026.7.22` are both
-complete versions, not prefixes.
+complete versions, not prefixes. A request that names a published release
+installs exactly that release; one that does not, such as `pypi:httpie@3`, selects
+the newest matching release (3.2.x), as `npm:pkg@3` does -- not `==3`, which PEP
+440 reads as exactly `3.0.0`. Offline, with no index to consult, the request is
+taken literally.
 
 Ordering follows PEP 440 rather than string order, so `0.10.0` ranks above
 `0.9.0`. Pre-releases (`1.0rc1`, `2.0b3`, `3.0.dev1`) are never chosen by
