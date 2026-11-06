@@ -162,7 +162,7 @@ fn collect(
     for dir in cwd.ancestors() {
         let path = dir.join(".tool-versions");
         if path.is_file() {
-            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            let text = crate::fs::read_text_without_bom(&path).map_err(|e| Error::io(&path, e))?;
             for (line, text) in text.lines().enumerate() {
                 let words: Vec<_> = text
                     .split('#')
@@ -214,7 +214,7 @@ fn collect(
             if shadowed(&mut out, tool, kind, &path, "version declaration") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            let text = crate::fs::read_text_without_bom(&path).map_err(|e| Error::io(&path, e))?;
             let field = if *name == "rust-toolchain.toml"
                 || (*name == "rust-toolchain" && text.trim_start().starts_with('['))
             {
@@ -275,7 +275,7 @@ fn collect(
             if kinds.iter().all(|kind| out.iter().any(|c| c.kind == *kind)) {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            let text = crate::fs::read_text_without_bom(&path).map_err(|e| Error::io(&path, e))?;
             let value: serde_json::Value =
                 serde_json::from_str(&text).map_err(|_| invalid(&path, "JSON"))?;
             if tool == "node" {

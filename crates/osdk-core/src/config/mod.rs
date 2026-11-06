@@ -1,4 +1,4 @@
-﻿//! Layered configuration.
+//! Layered configuration.
 //!
 //! Precedence (highest wins): CLI flags → env (`OSDK_*`) → project config
 //! (`osdk.toml`, discovered by walking up) → user global config
@@ -2818,7 +2818,8 @@ fn find_tool_versions(start_dir: &Path) -> Result<Option<(PathBuf, BTreeMap<Stri
     while let Some(dir) = cur {
         let candidate = dir.join(".tool-versions");
         if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).map_err(|e| Error::io(&candidate, e))?;
+            let text = crate::fs::read_text_without_bom(&candidate)
+                .map_err(|e| Error::io(&candidate, e))?;
             return Ok(Some((candidate, parse_tool_versions(&text))));
         }
         cur = dir.parent();

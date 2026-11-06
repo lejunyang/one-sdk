@@ -47,7 +47,7 @@ pub struct PackageManagerRequest {
 pub fn package_manager_from_package_json(
     path: &Path,
 ) -> Result<Option<PackageManagerRequest>, String> {
-    let text = std::fs::read_to_string(path).map_err(|error| {
+    let text = crate::fs::read_text_without_bom(path).map_err(|error| {
         crate::t!(
             "err.package_manager_manifest_read",
             path = path.display(),
@@ -267,7 +267,7 @@ pub fn resolve_active(
     for dir in &ancestors {
         let tv = dir.join(".tool-versions");
         if tv.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&tv) {
+            if let Ok(text) = crate::fs::read_text_without_bom(&tv) {
                 let map = parse_tool_versions(&text);
                 if let Some(spec) = map.get(tool) {
                     return Some(ActiveVersion {
@@ -492,7 +492,7 @@ fn read_tool_value(value: &toml::Value) -> Option<String> {
 /// Takes the first non-empty, non-comment line and trims a leading `v`.
 fn read_idiomatic(path: &Path) -> Option<String> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = crate::fs::read_text_without_bom(path).ok()?;
 
     // Structured files need real parsing, not first-line heuristics.
     match name {
@@ -916,6 +916,40 @@ mod precedence_tests {
             .unwrap();
         assert_eq!(pnpm.spec, "10.5.0");
         assert!(!pnpm.is_range);
+    }
+    #[test]
+    fn native_declarations_tolerate_a_leading_utf8_bom() {
+        // Notepad and PowerShell's `-Encoding utf8` write a BOM; nvm, asdf and
+        // Node's own package.json loader ignore it, so osdk must too.
+        let config = Config::default();
+        let cases: [(&str, &str, &str, &[&str]); 4] = [
+            ("node", ".nvmrc", "\u{feff}20\n", &[".nvmrc"]),
+            ("node", ".tool-versions", "\u{feff}node 20\n", &[]),
+            (
+                "node",
+                "package.json",
+                "\u{feff}{\"engines\":{\"node\":\"20\"}}",
+                &[],
+            ),
+            (
+                "python",
+                ".python-version",
+                "\u{feff}3.12\n",
+                &[".python-version"],
+            ),
+        ];
+        for (tool, file, text, files) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join(file), text).unwrap();
+            let active = resolve_active_config(tool, temp.path(), &config, files)
+                .unwrap_or_else(|error| panic!("{file}: {error}"))
+                .unwrap_or_else(|| panic!("{file}: no selection"));
+            assert_eq!(
+                active.spec,
+                if tool == "node" { "20" } else { "3.12" },
+                "{file}"
+            );
+        }
     }
     #[test]
     fn invalid_native_declarations_are_errors_under_both_policies() {
