@@ -46,7 +46,7 @@ devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数�
 | `system` | 适配器 home 或 PATH 中已有的可执行文件；仅明确列出时启用 | Node、Python、Go、Java、npm、pnpm、Yarn、Bun、Deno、Zig；见[系统工具](#system-tools) |
 | `osdk` | 最近项目 `osdk.toml` / `.osdk.toml` 中的 `[tools]`，包括显式 `extends` | 所有具有匹配 backend 键的工具 |
 | `global` | osdk 用户配置 `$OSDK_CONFIG_DIR/config.toml` 中的 `[tools]`；用 `osdk config path` 查看实际位置 | 所有具有匹配 backend 键的工具 |
-| `.tool-versions` | 最近适用 `.tool-versions` 中匹配该工具的行 | 所有具有匹配 backend 键的工具 |
+| `.tool-versions` | 最近适用 `.tool-versions` 中匹配该工具的行 | 所有具有匹配 backend 键的工具；asdf 的插件名 `nodejs`、`golang` 视同 `node`、`go` |
 | `.nvmrc` | `.nvmrc` 版本声明 | Node |
 | `.node-version` | `.node-version` 版本声明 | Node |
 | `idiomatic` | backend 声明的文件，使用下表固定顺序 | 下表对应的 backend；不包含 Node 单独分类的两个文件 |

@@ -49,7 +49,7 @@ Explicit `tool@version`, explicit deps provider/installer choices, and lock repl
 | `system` | Existing executable from the adapter home or PATH; explicitly enabled only | Node, Python, Go, Java, npm, pnpm, Yarn, Bun, Deno, Zig; see [system tools](#system-tools) |
 | `osdk` | `[tools]` in the nearest project `osdk.toml` / `.osdk.toml`, including explicit `extends` | All tools with a matching backend key |
 | `global` | `[tools]` in osdk user configuration `$OSDK_CONFIG_DIR/config.toml`; locate it with `osdk config path` | All tools with a matching backend key |
-| `.tool-versions` | Matching tool line in the nearest applicable `.tool-versions` | All tools with a matching backend key |
+| `.tool-versions` | Matching tool line in the nearest applicable `.tool-versions` | All tools with a matching backend key; asdf's plugin names `nodejs` and `golang` count as `node` and `go` |
 | `.nvmrc` | `.nvmrc` version declaration | Node |
 | `.node-version` | `.node-version` version declaration | Node |
 | `idiomatic` | Backend-declared files, in the fixed order below | Backends in the matrix below; not Node's two separately named kinds |

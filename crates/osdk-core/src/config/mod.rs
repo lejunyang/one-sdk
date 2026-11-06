@@ -2827,6 +2827,22 @@ fn find_tool_versions(start_dir: &Path) -> Result<Option<(PathBuf, BTreeMap<Stri
     Ok(None)
 }
 
+/// asdf plugin names that differ from the osdk backend id.
+///
+/// asdf itself writes these into `.tool-versions` (`asdf set nodejs 20`), so
+/// they are the names real files contain. Each is also a CLI alias of its
+/// backend; `tool_versions_names_are_registered_aliases` keeps the two lists
+/// from drifting apart.
+pub const TOOL_VERSIONS_PLUGIN_NAMES: &[(&str, &str)] = &[("nodejs", "node"), ("golang", "go")];
+
+/// The osdk tool a `.tool-versions` line's first word names.
+pub fn tool_versions_tool(word: &str) -> &str {
+    TOOL_VERSIONS_PLUGIN_NAMES
+        .iter()
+        .find(|(plugin, _)| *plugin == word)
+        .map_or(word, |(_, tool)| tool)
+}
+
 pub fn parse_tool_versions(text: &str) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for line in text.lines() {
@@ -2836,7 +2852,7 @@ pub fn parse_tool_versions(text: &str) -> BTreeMap<String, String> {
         }
         let mut it = line.split_whitespace();
         if let (Some(tool), Some(ver)) = (it.next(), it.next()) {
-            map.insert(tool.to_string(), ver.to_string());
+            map.insert(tool_versions_tool(tool).to_string(), ver.to_string());
         }
     }
     map

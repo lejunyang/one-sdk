@@ -1008,6 +1008,34 @@ mod precedence_tests {
         assert!(select("java=21.0.2.fx-zulu\n").is_err());
     }
     #[test]
+    fn tool_versions_accepts_the_asdf_plugin_names() {
+        // `asdf set nodejs 20` writes `nodejs`, not `node`; `osdk install`
+        // already resolved it through the CLI alias, so selection must agree or
+        // the lock pins one version while shims run another.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".tool-versions"),
+            "nodejs 20.1.0\ngolang 1.22.3\n",
+        )
+        .unwrap();
+        let config = Config::default();
+        let spec = |tool| {
+            resolve_active_config(tool, temp.path(), &config, &[])
+                .unwrap()
+                .map(|v| v.spec)
+        };
+        assert_eq!(spec("node").as_deref(), Some("20.1.0"));
+        assert_eq!(spec("go").as_deref(), Some("1.22.3"));
+    }
+
+    #[test]
+    fn tool_versions_names_are_registered_aliases() {
+        let registry = crate::backend::registry::Registry::new();
+        for (plugin, tool) in crate::config::TOOL_VERSIONS_PLUGIN_NAMES {
+            assert_eq!(registry.get(plugin).unwrap().id(), *tool, "{plugin}");
+        }
+    }
+    #[test]
     fn native_declarations_tolerate_a_leading_utf8_bom() {
         // Notepad and PowerShell's `-Encoding utf8` write a BOM; nvm, asdf and
         // Node's own package.json loader ignore it, so osdk must too.

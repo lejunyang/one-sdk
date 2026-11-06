@@ -170,7 +170,11 @@ fn collect(
                     .unwrap_or("")
                     .split_whitespace()
                     .collect();
-                if words.first() == Some(&tool) {
+                if words
+                    .first()
+                    .map(|word| crate::config::tool_versions_tool(word))
+                    == Some(tool)
+                {
                     if shadowed(
                         &mut out,
                         tool,
