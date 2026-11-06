@@ -818,8 +818,13 @@ pub(crate) fn executable_basename(program: &str) -> String {
 
 pub(crate) fn project_yarn_version(app: &App, cwd: &std::path::Path) -> Result<Option<String>> {
     Ok(
-        osdk_core::version::resolver::resolve_active_config("yarn", cwd, &app.ctx.config, &[])?
-            .map(|request| request.spec),
+        osdk_core::version::resolver::resolve_active_config_declared(
+            "yarn",
+            cwd,
+            &app.ctx.config,
+            &[],
+        )?
+        .map(|request| request.spec),
     )
 }
 
@@ -1859,7 +1864,7 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
             }
             let backend = app.registry.get(&request.backend)?;
             if matches!(
-                osdk_core::execution::resolve(&app.ctx, backend.as_ref(), &cwd)?.target,
+                osdk_core::execution::resolve_declared(&app.ctx, backend.as_ref(), &cwd)?.target,
                 Some(osdk_core::execution::ExecutionTarget::System(_))
             ) {
                 anyhow::bail!("{} selects an external system tool; use exec for that target or specify an explicit managed version for install/lock", request.backend);
@@ -1945,7 +1950,7 @@ pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result
             continue;
         }
         if let Ok(backend) = app.registry.get(tool) {
-            let active = osdk_core::version::resolver::resolve_active_config(
+            let active = osdk_core::version::resolver::resolve_active_config_declared(
                 tool,
                 &cwd,
                 &app.ctx.config,
@@ -2007,7 +2012,7 @@ pub(crate) fn gather_requests_unchecked(app: &App, tools: Vec<String>) -> Result
         }
     }
     let backend = app.registry.get("node")?;
-    if let Some(active) = osdk_core::version::resolver::resolve_active_config(
+    if let Some(active) = osdk_core::version::resolver::resolve_active_config_declared(
         backend.id(),
         &cwd,
         &app.ctx.config,
@@ -2110,7 +2115,7 @@ pub(crate) fn bind_configured_spec_for_bare_operand_at(
     let Ok(backend) = app.registry.get(&request.backend) else {
         return Ok(());
     };
-    let Some(active) = osdk_core::version::resolver::resolve_active_config(
+    let Some(active) = osdk_core::version::resolver::resolve_active_config_declared(
         backend.id(),
         cwd,
         &app.ctx.config,
@@ -2295,7 +2300,7 @@ pub(crate) fn inject_node_dependency(
     }
     let cwd = std::env::current_dir()?;
     let backend = app.registry.get("node")?;
-    let spec = osdk_core::version::resolver::resolve_active_config(
+    let spec = osdk_core::version::resolver::resolve_active_config_declared(
         "node",
         &cwd,
         &app.ctx.config,
@@ -2452,7 +2457,7 @@ pub(crate) fn inject_go_dependency_at(
     }
 
     let backend = app.registry.get("go")?;
-    let active = osdk_core::version::resolver::resolve_active_config(
+    let active = osdk_core::version::resolver::resolve_active_config_declared(
         "go",
         cwd,
         &app.ctx.config,
@@ -2518,7 +2523,7 @@ pub(crate) fn inject_rust_dependency_at(
     }
 
     let backend = app.registry.get("rust")?;
-    let active = osdk_core::version::resolver::resolve_active_config(
+    let active = osdk_core::version::resolver::resolve_active_config_declared(
         "rust",
         cwd,
         &app.ctx.config,

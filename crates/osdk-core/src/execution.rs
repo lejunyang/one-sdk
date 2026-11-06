@@ -647,21 +647,33 @@ pub fn jdk_environment(
 }
 
 pub fn resolve(ctx: &Ctx, backend: &dyn Backend, cwd: &Path) -> Result<Selection> {
-    resolve_inner(ctx, backend, cwd, true)
+    resolve_inner(ctx, backend, cwd, true, true)
+}
+
+/// [`resolve`] with a managed winner as declared, not narrowed to the lock:
+/// for gathering what to install or record.
+pub fn resolve_declared(ctx: &Ctx, backend: &dyn Backend, cwd: &Path) -> Result<Selection> {
+    resolve_inner(ctx, backend, cwd, true, false)
 }
 
 /// Ownership reconciliation must not run external executables.
 pub fn resolve_without_probes(ctx: &Ctx, backend: &dyn Backend, cwd: &Path) -> Result<Selection> {
-    resolve_inner(ctx, backend, cwd, false)
+    resolve_inner(ctx, backend, cwd, false, true)
 }
 
-fn resolve_inner(ctx: &Ctx, backend: &dyn Backend, cwd: &Path, probes: bool) -> Result<Selection> {
-    let declarations = crate::version::resolver::resolve_selection(
-        backend.id(),
-        cwd,
-        &ctx.config,
-        backend.idiomatic_files(),
-    )?;
+fn resolve_inner(
+    ctx: &Ctx,
+    backend: &dyn Backend,
+    cwd: &Path,
+    probes: bool,
+    locked: bool,
+) -> Result<Selection> {
+    let resolve = if locked {
+        crate::version::resolver::resolve_selection
+    } else {
+        crate::version::resolver::resolve_selection_declared
+    };
+    let declarations = resolve(backend.id(), cwd, &ctx.config, backend.idiomatic_files())?;
     let mut result = Selection {
         target: declarations.winner.map(ExecutionTarget::Managed),
         evidence: declarations.evidence,

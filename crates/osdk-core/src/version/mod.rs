@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::error::{Error, Result};
 
+pub mod lock_pin;
 pub mod resolver;
 
 /// What the user asked for, before resolution against remote versions.

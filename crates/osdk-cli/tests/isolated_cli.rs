@@ -716,6 +716,51 @@ fn task_path_drops_entries_an_outer_activation_added() {
     assert!(!stdout.contains(&added), "{stdout}");
 }
 
+/// `osdk install` replays the lock, so what runs must be the locked version
+/// too -- not the newest install that also matches the declaration. A lock
+/// resolved from a different request (the config was edited since) is stale
+/// and does not apply.
+#[test]
+fn where_runs_the_locked_version_of_a_project_declaration() {
+    let temporary = tempfile::tempdir().unwrap();
+    for version in ["1.22.5", "1.22.9"] {
+        let install = temporary.path().join("installs/go").join(version);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    }
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let key = osdk_core::version::lock_pin::platform_key(osdk_core::platform::Platform::current());
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            "schema = 4\n[platforms.{key}.tools.go]\nrequest = \"1.22\"\nversion = \"1.22.5\"\n"
+        ),
+    )
+    .unwrap();
+    let where_go = |declared: &str| {
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!("[tools]\ngo = \"{declared}\"\n"),
+        )
+        .unwrap();
+        let output = run_isolated_in(temporary.path(), &project, &["where", "go"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string()
+    };
+    assert!(where_go("1.22").ends_with("1.22.5"), "locked version");
+    assert!(
+        where_go("1").ends_with("1.22.9"),
+        "stale lock entry ignored"
+    );
+}
+
 #[test]
 fn where_finds_a_java_install_through_a_distribution_prefix() {
     let temporary = tempfile::tempdir().unwrap();

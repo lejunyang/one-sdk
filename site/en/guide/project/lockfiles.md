@@ -35,13 +35,30 @@ osdk model sync [NAME]
 | `model use` | No | Writes project intent; does not write the lock itself |
 | `model import NAME PATH` | Yes, only to reject a same-name conflict | No; local paths are not portable |
 | `model sync [NAME]` | Yes | Resolves added/changed declarations and merges model locks |
-| `list`, `current`, `where` | No | No |
+| `list` | No | No |
+| `current`, `where`, shims, activation, `exec` | Yes, to pick the locked exact version | No |
 
 For `outdated`, the “current” column is the newest installed version the request
 accepts (`-` when none does; for `lts` and channels, the newest installed version).
 It checks whether the newly resolved exact target is installed; it does
 not mean the directory's active version. `upgrade` installs the new resolution
 and then refreshes the lock.
+
+## Running the locked version
+
+Shims, shell activation, `exec`, `where` and `current` narrow a project's
+declaration to the exact version the lock recorded: with `node = "20"` and a
+lock entry `20 -> 20.20.2`, 20.20.2 runs even when the machine also has a newer
+20.x installed (by another project, say). That is the version `install` put
+there when it replayed the lock.
+
+Both conditions must hold: the declaration comes from the project (`osdk.toml`,
+`.tool-versions`, files such as `.nvmrc`; the global config is not governed by a
+project lock), and the lock entry was resolved from that same request. After
+`node = "20"` is edited to `"22"`, the lock's `20 -> 20.20.2` is stale and does
+not apply; installs are chosen by `"22"`, and `install` warns about the drift. A
+locked version that is not installed is reported as not installed, not replaced
+by another match; run `osdk install`.
 
 ## A project lock records the project's own tools only
 

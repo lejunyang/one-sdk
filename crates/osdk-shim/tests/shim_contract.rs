@@ -2698,3 +2698,44 @@ fn native_global_broken_selected_host_never_escapes_to_ambient_path() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("missing or not executable"));
     }
 }
+
+/// The shim runs the version `osdk.lock` recorded for the declaration, the
+/// one `osdk install` put there -- not the newest install that also matches.
+#[cfg(unix)]
+#[test]
+fn shim_runs_the_locked_version_of_a_project_declaration() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\nnode = \"1.0\"\n").unwrap();
+    let key = osdk_core::version::lock_pin::platform_key(osdk_core::platform::Platform::current());
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            "schema = 4\n[platforms.{key}.tools.node]\nrequest = \"1.0\"\nversion = \"1.0.0\"\n"
+        ),
+    )
+    .unwrap();
+    for version in ["1.0.0", "1.0.5"] {
+        write_executable(
+            &root.join(format!("installs/node/{version}/bin/node")),
+            &format!("#!/bin/sh\nprintf '{version}\n'\n"),
+        );
+        std::fs::write(
+            root.join(format!("installs/node/{version}/.osdk-complete")),
+            b"",
+        )
+        .unwrap();
+    }
+    let output = isolated_command(root, &project)
+        .arg("node")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1.0.0\n");
+}

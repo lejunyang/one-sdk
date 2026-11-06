@@ -14,22 +14,10 @@ pub(crate) fn empty_lock_contents() -> String {
     format!("schema = {}\n", schema_version())
 }
 
+/// Shared with the runtime, which reads the same entries to run the locked
+/// versions.
 pub fn platform_key(platform: Platform) -> String {
-    let os = match platform.os {
-        Os::Linux => "linux",
-        Os::Macos => "macos",
-        Os::Windows => "windows",
-    };
-    let arch = match platform.arch {
-        Arch::X64 => "x64",
-        Arch::Arm64 => "arm64",
-        Arch::X86 => "x86",
-        Arch::Arm => "arm",
-    };
-    match platform.libc {
-        Libc::Musl => format!("{os}-{arch}-musl"),
-        _ => format!("{os}-{arch}"),
-    }
+    osdk_core::version::lock_pin::platform_key(platform)
 }
 
 pub fn platform_for_resolved(host: Platform, resolved: &[(ToolRequest, ToolVersion)]) -> Platform {

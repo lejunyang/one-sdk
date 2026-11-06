@@ -326,6 +326,9 @@ pub fn resolve_active(
 
 /// Apply one shared policy to tool selection. Explicit CLI requests and lock
 /// replay bypass this resolver and retain their authority.
+///
+/// The winner is narrowed to the version `osdk.lock` recorded for the same
+/// declaration (see [`super::lock_pin`]): this is what running a tool uses.
 pub fn resolve_active_config(
     tool: &str,
     start_dir: &Path,
@@ -333,6 +336,17 @@ pub fn resolve_active_config(
     idiomatic_files: &[&str],
 ) -> crate::Result<Option<ActiveVersion>> {
     Ok(resolve_selection(tool, start_dir, config, idiomatic_files)?.winner)
+}
+
+/// [`resolve_active_config`] without the lock: the declaration as written,
+/// for callers that install, write the lock, or edit the config.
+pub fn resolve_active_config_declared(
+    tool: &str,
+    start_dir: &Path,
+    config: &crate::config::Config,
+    idiomatic_files: &[&str],
+) -> crate::Result<Option<ActiveVersion>> {
+    Ok(resolve_selection_declared(tool, start_dir, config, idiomatic_files)?.winner)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -354,7 +368,35 @@ impl ToolSelection {
         serde_json::to_string(&self.evidence).expect("selection evidence serializes")
     }
 }
+/// Select the active declaration and narrow it to the locked version.
 pub fn resolve_selection(
+    tool: &str,
+    cwd: &Path,
+    config: &crate::config::Config,
+    files: &[&str],
+) -> crate::Result<ToolSelection> {
+    let mut selection = resolve_selection_declared(tool, cwd, config, files)?;
+    if let Some(winner) = selection.winner.as_mut() {
+        let declared = winner.spec.clone();
+        super::lock_pin::pin_to_lock(config, cwd, winner);
+        if winner.spec != declared {
+            if let Some(evidence) = selection
+                .evidence
+                .iter_mut()
+                .find(|evidence| evidence.status == "winner")
+            {
+                evidence.reason = format!(
+                    "{}; osdk.lock resolved `{declared}` to {}",
+                    evidence.reason, winner.spec
+                );
+            }
+        }
+    }
+    Ok(selection)
+}
+
+/// Select the active declaration as written, without consulting the lock.
+pub fn resolve_selection_declared(
     tool: &str,
     cwd: &Path,
     config: &crate::config::Config,

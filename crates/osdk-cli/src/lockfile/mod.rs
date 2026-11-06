@@ -12,7 +12,7 @@ use osdk_core::backend::npm_package::{
     LOCKED_NPM_NODE_VERSION_OPTION, LOCKED_NPM_PACKAGE_OPTION,
 };
 use osdk_core::pipeline::HashAlgo;
-use osdk_core::platform::{Arch, Libc, Os, Platform};
+use osdk_core::platform::{Arch, Platform};
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 use serde::{Deserialize, Serialize};
 
@@ -520,6 +520,8 @@ pub use write::*;
 
 #[cfg(test)]
 mod tests {
+    use osdk_core::platform::{Libc, Os};
+
     /// The interpreter version is parsed out of an osdk-managed path.
     ///
     /// This is what makes a lock entry replayable: a venv is bound to its
