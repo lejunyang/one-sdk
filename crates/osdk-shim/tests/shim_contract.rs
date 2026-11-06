@@ -679,15 +679,142 @@ fn forwards_stdio_arguments_environment_and_exit_code() {
 }
 
 #[test]
-fn recursive_invocation_fails_before_resolution() {
+fn inherited_same_tool_marker_does_not_block_resolution() {
+    for name in ["node", "go"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = isolated_command(temporary.path(), temporary.path())
+            .arg(name)
+            .env("OSDK_SHIM_ACTIVE", name)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(output.status.code(), Some(126), "{name}: {stderr}");
+        assert!(!stderr.contains("recursive shim invocation"), "{stderr}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn same_tool_child_can_reenter_shim_in_another_project() {
     let temporary = tempfile::tempdir().unwrap();
-    let output = isolated_command(temporary.path(), temporary.path())
-        .args(["node"])
-        .env("OSDK_SHIM_ACTIVE", "node")
+    let root = temporary.path();
+    let parent = root.join("parent");
+    let child = root.join("child");
+    let shims = root.join("data/shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    std::os::unix::fs::symlink(shim(), shims.join("node")).unwrap();
+    for (project, version) in [(&parent, "1.0.0"), (&child, "2.0.0")] {
+        std::fs::create_dir_all(project).unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            format!(r#"{{"engines":{{"node":"{version}"}}}}"#),
+        )
+        .unwrap();
+        let script = if version == "1.0.0" {
+            format!("#!/bin/sh\nprintf 'parent:1\\n'\ncd '{}' || exit 1\nPATH='{}' exec /usr/bin/env node leaf\n", child.display(), shims.display())
+        } else {
+            "#!/bin/sh\nprintf 'child:2:%s\\n' \"$1\"\n/usr/bin/env\n".into()
+        };
+        write_executable(
+            &root.join(format!("installs/node/{version}/bin/node")),
+            &script,
+        );
+        std::fs::write(
+            root.join(format!("installs/node/{version}/.osdk-complete")),
+            b"",
+        )
+        .unwrap();
+    }
+    let output = isolated_command(root, &parent)
+        .arg("node")
+        .env("OSDK_SHIM_ACTIVE", "outer")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(126));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("recursive shim invocation"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("parent:1\nchild:2:leaf\n"), "{stdout}");
+    assert!(!stdout.contains("OSDK_SHIM_ACTIVE="), "{stdout}");
+}
+
+#[test]
+fn resolved_dispatcher_targets_are_refused_without_inherited_marker() {
+    for copy in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::write(root.join("package.json"), r#"{"engines":{"node":"1.0.0"}}"#).unwrap();
+        let install = root.join("installs/node/1.0.0");
+        let bin = if cfg!(windows) {
+            install.clone()
+        } else {
+            install.join("bin")
+        };
+        std::fs::create_dir_all(&bin).unwrap();
+        let target = bin.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+        if copy {
+            std::fs::copy(shim(), &target).unwrap();
+        } else {
+            std::fs::hard_link(shim(), &target).unwrap();
+        }
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+        let mut child = isolated_command(root, root)
+            .arg("node")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none()
+            && start.elapsed() < std::time::Duration::from_secs(3)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if child.try_wait().unwrap().is_none() {
+            #[cfg(windows)]
+            let _ = Command::new("taskkill")
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                .status();
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("dispatcher target was executed recursively (copy={copy})");
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(126),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("recursive shim target"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_wrapper_target_is_refused_before_execution() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let project = root.join("project");
+    install_npm_fixture(
+        root,
+        &project,
+        "#!/bin/sh\nexit 0\n",
+        "#!/bin/sh\n# osdk-shim generated wrapper\nexit 42\n",
+    );
+    let output = isolated_command(root, &project)
+        .arg("node")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(126),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("recursive shim target"));
 }
 
 /// The shim directory must survive into the launched tool's PATH.

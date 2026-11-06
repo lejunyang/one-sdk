@@ -16,8 +16,10 @@ For dynamic tools, `reshim` publishes launchers only for the exact configured
 root, and legacy `.osdk-tool.json` state is never executable.
 
 Each shim resolves the version for the current directory at execution time, so
-project pins also work in IDEs, CI, and processes without a prompt hook. Shims
-avoid recursively invoking themselves. On Windows, `.cmd`/`.bat` targets run via
+project pins also work in IDEs, CI, and processes without a prompt hook. A child
+may invoke the same tool through its shim to select its own project's version.
+Recursion checks reject resolved targets that are osdk binaries, links, or
+generated wrappers. On Windows, `.cmd`/`.bat` targets run via
 `%ComSpec% /D /S /C call` to preserve arguments, standard I/O, and status. The
 generated `.cmd` wrapper writes the install path in the system OEM code page so a
 console-less cmd that falls back to the OEM code page can still reach a non-ASCII

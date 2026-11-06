@@ -14,7 +14,8 @@ osdk reshim
 不会选择同版本的其他根，旧 `.osdk-tool.json` 状态也永远不可执行。
 
 shim 在每次执行时按当前目录解析版本，因此 IDE、CI 和未安装 prompt hook 的进程也
-能使用项目 pin。它会避免递归调用自身；Windows `.cmd`/`.bat` 目标通过
+能使用项目 pin。同一工具的子进程也可重新经过 shim 选择所在项目的版本；递归检查
+针对解析后的目标文件，拒绝指回 osdk 的二进制、链接或生成的包装脚本。Windows `.cmd`/`.bat` 目标通过
 `%ComSpec% /D /S /C call` 执行以保留参数、stdin/stdout 和状态。生成的 `.cmd` 包装
 按系统 OEM 代码页写入安装路径，让没有控制台、回退到 OEM 代码页的 cmd 也能进入非
 ASCII 安装路径；遇到 OEM 代码页表达不了的字符时，再在引用行前用 `chcp 65001` 切到

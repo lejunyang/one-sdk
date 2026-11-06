@@ -106,6 +106,13 @@ fn excluded(ctx: &Ctx, path: &Path) -> bool {
     {
         return true;
     }
+    is_osdk_dispatcher(ctx, path)
+}
+
+/// Detect a launcher resolving back to osdk, including copied binaries and
+/// generated script wrappers. An inherited tool name does not prove recursion:
+/// a real runtime may legitimately start another instance through its shim.
+pub fn is_osdk_dispatcher(ctx: &Ctx, path: &Path) -> bool {
     let identities = [
         std::env::current_exe().ok(),
         crate::shim::find_shim_binary(&ctx.dirs),
