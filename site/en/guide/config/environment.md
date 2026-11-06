@@ -115,6 +115,7 @@ by hand:
 | `OSDK_TASK`, `OSDK_TASK_NAME`, `OSDK_TASK_ROOT` | The process is a task started by `osdk run`, its name, and its project root; inside that root shell hooks skip re-activation when they see `OSDK_TASK`, and outside it they drop these variables and activate as usual |
 | `OSDK_SHIM_ACTIVE` | Legacy internal shim marker; inherited values are ignored and removed when launching tools. No user configuration is needed |
 | `OSDK_MANAGED_ENV`, `OSDK_ORIG_<NAME>` | Variables taken over during activation and their original values, restored by `deactivate` |
+| `OSDK_MISSING_WARNED` | The missing-tool warning activation already showed (directory and tool set), so it is not repeated at every prompt |
 | `OSDK_ADDED_PATH` | The PATH entries the last activation added; the next prompt replaces exactly these and `deactivate` removes them. Sessions from older versions carry `OSDK_ORIGINAL_PATH` instead and are migrated at the next prompt |
 
 `[settings.download_cache]` has `max_size_bytes` (default 2147483648; 0 retains none; `"unlimited"` disables size limit) and `max_age_secs` (default 604800; 0 disables expiry). `OSDK_DOWNLOAD_CACHE_MAX_SIZE` overrides size. See [Caches and Cleanup](../maintenance/cache).

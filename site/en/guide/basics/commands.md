@@ -70,10 +70,13 @@ rejected. Bare
 `--yes` in automation. When a regular dynamic tool is removed, osdk also removes
 any user-global pin and user lock entry that still select that version; project
 configuration and project locks are unchanged. Newly unreferenced CAS objects
-are collected afterward. Shell activation fails explicitly when a configured
-runtime is not installed instead of silently using a same-named command from the
-system PATH: the prompt hook prints `osdk cannot activate <dir>: ...` above the
-prompt and leaves the environment unchanged until `osdk install` is run there.
+are collected afterward. When a configured tool is not installed, shell
+activation does not silently use a same-named command from the system PATH: the
+prompt hook activates the other installed tools and prints, once above the prompt,
+`osdk: <dir>: not installed: node@20; the other tools are active. Run `osdk install`
+to install them` (once per directory and set of missing tools). `osdk env`, `osdk
+exec` without `--tool`, and tasks still fail, since they run unattended and must not
+get an environment with a tool missing.
 
 ## Inspect local and remote versions
 

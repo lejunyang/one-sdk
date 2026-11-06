@@ -145,9 +145,9 @@ python --version
 ```
 
 Activation also supports zsh, fish, and PowerShell. Fish activation and
-deactivation return success when optional saved variables are already absent. If a configured runtime is
-not installed, activation fails explicitly instead of silently falling back to a
-system executable. Run `osdk --help` or `osdk <command> --help` whenever you need
+deactivation return success when optional saved variables are already absent. If a configured tool is
+not installed, activation names it once and activates the other tools; it never
+silently falls back to a system executable. Run `osdk --help` or `osdk <command> --help` whenever you need
 the full command reference.
 
 IDEs, CI steps, containers and scheduled jobs run without the shell hook. Shims

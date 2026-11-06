@@ -225,7 +225,7 @@ PROMPT_COMMAND="${PROMPT_COMMAND//;_osdk_hook;/;}"
 PROMPT_COMMAND="${PROMPT_COMMAND#;}"
 PROMPT_COMMAND="${PROMPT_COMMAND%;}"
 unset -f _osdk_hook 2>/dev/null || true
-unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH
+unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH OSDK_MISSING_WARNED
 "#
         .to_string(),
         Shell::Zsh => r#"# osdk shell deactivation (zsh)
@@ -246,7 +246,7 @@ fi
 @@OSDK_PATH@@
 precmd_functions=(${precmd_functions:#_osdk_hook})
 unfunction _osdk_hook 2>/dev/null || true
-unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH
+unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH OSDK_MISSING_WARNED
 "#
         .to_string(),
         Shell::Fish => r#"# osdk shell deactivation (fish)
@@ -266,7 +266,7 @@ if set -q OSDK_MANAGED_ENV
 end
 @@OSDK_PATH@@
 functions -e _osdk_hook
-set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH; or true
+set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH OSDK_MISSING_WARNED; or true
 "#
         .to_string(),
         Shell::Powershell => r#"# osdk shell deactivation (powershell)
@@ -298,7 +298,7 @@ if ((Test-Path Variable:script:OsdkOriginalPrompt) -and $script:OsdkOriginalProm
 $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = $null
 Remove-Item Function:\Invoke-OsdkHook -ErrorAction SilentlyContinue
 Remove-Variable OsdkHookRunning -Scope Script -ErrorAction SilentlyContinue
-Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET,Env:OSDK_ADDED_PATH -ErrorAction SilentlyContinue
+Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET,Env:OSDK_ADDED_PATH,Env:OSDK_MISSING_WARNED -ErrorAction SilentlyContinue
 "#
         .to_string(),
     };
@@ -333,11 +333,52 @@ fn is_lazy_declaration(ctx: &Ctx, backend_id: &str) -> bool {
 /// active + installed version, collect its bin dirs and exec env. Invalid
 /// dynamic-tool inventory aborts activation instead of producing a partial
 /// environment that could route around the configured tool.
+///
+/// A pinned tool that is not installed is an error here: `osdk env`, `exec`
+/// and tasks run unattended, and must not quietly fall back to whatever else
+/// is on PATH. The prompt hook uses [`compute_env_delta_allowing_missing`].
 pub fn compute_env_delta(
     ctx: &Ctx,
     registry: &Registry,
     cwd: &std::path::Path,
 ) -> crate::Result<EnvDelta> {
+    let (delta, missing) = compute_env_delta_allowing_missing(ctx, registry, cwd)?;
+    match missing.into_iter().next() {
+        Some(missing) => Err(crate::error::Error::other(crate::t!(
+            "err.no_installed_match",
+            tool = missing.tool,
+            spec = missing.spec
+        ))),
+        None => Ok(delta),
+    }
+}
+
+/// A pinned tool with no matching install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingTool {
+    pub tool: String,
+    pub spec: String,
+}
+
+impl std::fmt::Display for MissingTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.tool, self.spec)
+    }
+}
+
+/// [`compute_env_delta`] that activates what is installed and reports the
+/// pinned tools that are not.
+///
+/// For the prompt hook. A fresh clone before `osdk install`, or a `git pull`
+/// that moved `.nvmrc` to a version not yet installed, used to leave the whole
+/// directory unactivated: one missing tool took every other one off PATH with
+/// it. The caller warns about the missing ones instead.
+pub fn compute_env_delta_allowing_missing(
+    ctx: &Ctx,
+    registry: &Registry,
+    cwd: &std::path::Path,
+) -> crate::Result<(EnvDelta, Vec<MissingTool>)> {
+    let mut missing = Vec::new();
     use crate::version::strip_distribution_prefix;
     let mut path_prepend = Vec::new();
     let mut system_paths = Vec::new();
@@ -446,11 +487,11 @@ pub fn compute_env_delta(
             // prompt hook hid the error, so nothing else got activated either.
             None if is_lazy_declaration(ctx, backend.id()) => continue,
             None => {
-                return Err(crate::error::Error::other(crate::t!(
-                    "err.no_installed_match",
-                    tool = backend.id(),
-                    spec = spec
-                )))
+                missing.push(MissingTool {
+                    tool: backend.id().to_string(),
+                    spec: spec.to_string(),
+                });
+                continue;
             }
         };
         // An exact dynamic version skipped the installed listing above; a lazy
@@ -527,11 +568,14 @@ pub fn compute_env_delta(
         .map(str::to_string)
         .collect();
 
-    Ok(EnvDelta {
-        path_prepend,
-        set_vars,
-        unset_vars,
-    })
+    Ok((
+        EnvDelta {
+            path_prepend,
+            set_vars,
+            unset_vars,
+        },
+        missing,
+    ))
 }
 
 fn trusted_project_npm_bin(ctx: &Ctx, cwd: &std::path::Path) -> crate::Result<Option<PathBuf>> {
@@ -748,6 +792,50 @@ fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
         1
     } else {
         2
+    }
+}
+
+/// The variable recording which missing-tool warning this shell has shown.
+pub const MISSING_WARNED_VAR: &str = "OSDK_MISSING_WARNED";
+
+/// Shell code that records (or, with `None`, clears) the missing-tool warning
+/// already shown, so the prompt hook names a missing tool once per directory
+/// instead of above every prompt.
+pub fn render_missing_warned(shell: Shell, value: Option<&str>) -> String {
+    match (shell, value) {
+        (Shell::Fish, Some(value)) => {
+            format!(
+                "set -gx {MISSING_WARNED_VAR} {}
+",
+                shell_quote(shell, value)
+            )
+        }
+        (Shell::Fish, None) => format!(
+            "set -e {MISSING_WARNED_VAR}; or true
+"
+        ),
+        (Shell::Powershell, Some(value)) => {
+            format!(
+                "$env:{MISSING_WARNED_VAR} = {}
+",
+                powershell_quote(value)
+            )
+        }
+        (Shell::Powershell, None) => {
+            format!(
+                "Remove-Item Env:{MISSING_WARNED_VAR} -ErrorAction SilentlyContinue
+"
+            )
+        }
+        (_, Some(value)) => format!(
+            "export {MISSING_WARNED_VAR}={}
+",
+            shell_quote(shell, value)
+        ),
+        (_, None) => format!(
+            "unset {MISSING_WARNED_VAR}
+"
+        ),
     }
 }
 

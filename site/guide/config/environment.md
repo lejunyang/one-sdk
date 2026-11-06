@@ -104,6 +104,7 @@ osdk 读取的 `OSDK_*` 变量都列在本页，按用途分组。总体优先�
 | `OSDK_TASK`、`OSDK_TASK_NAME`、`OSDK_TASK_ROOT` | 当前进程是 `osdk run` 启动的任务、任务名，以及任务所属项目的根目录；shell 钩子在这个目录之内见到 `OSDK_TASK` 会跳过重新激活，离开后清掉这些变量照常激活 |
 | `OSDK_SHIM_ACTIVE` | 旧版 shim 的内部标记；新版忽略继承值，并在启动工具时移除，不需用户配置 |
 | `OSDK_MANAGED_ENV`、`OSDK_ORIG_<NAME>` | 激活时记录被接管的变量及其原值，`deactivate` 据此恢复 |
+| `OSDK_MISSING_WARNED` | 激活已提示过的缺失工具（目录与工具集合），避免每个提示符重复提示 |
 | `OSDK_ADDED_PATH` | 上一次激活加入的 PATH 条目；下一个提示符只替换这些条目，`deactivate` 只移除它们。旧版本激活的会话带的是 `OSDK_ORIGINAL_PATH`，会在下一个提示符迁移 |
 
 `[settings.download_cache]` 使用 `max_size_bytes`（默认 2147483648；0 不保留；`"unlimited"` 不限）与 `max_age_secs`（默认 604800；0 不过期）。`OSDK_DOWNLOAD_CACHE_MAX_SIZE` 覆盖容量。详见[缓存与清理](../maintenance/cache)。

@@ -716,6 +716,61 @@ fn task_path_drops_entries_an_outer_activation_added() {
     assert!(!stdout.contains(&added), "{stdout}");
 }
 
+/// One pinned tool that is not installed (a fresh clone, a `.nvmrc` moved by a
+/// pull) used to leave the whole directory unactivated. The hook now activates
+/// the rest and names the missing tool -- once, not above every prompt -- while
+/// `osdk env`, which scripts consume unattended, still refuses.
+#[test]
+fn hook_activates_installed_tools_and_names_a_missing_one_once() {
+    let temporary = tempfile::tempdir().unwrap();
+    let go = temporary.path().join("installs/go/1.22.5");
+    std::fs::create_dir_all(go.join("bin")).unwrap();
+    std::fs::write(go.join(".osdk-complete"), b"").unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\ngo = \"1.22\"\nnode = \"99\"\n",
+    )
+    .unwrap();
+
+    let first = run_isolated_in(temporary.path(), &project, &["hook-env", "--shell", "bash"]);
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(first.status.success(), "{stderr}");
+    assert!(stdout.contains("1.22.5"), "go is activated: {stdout}");
+    assert!(
+        stderr.contains("node@99"),
+        "the missing tool is named: {stderr}"
+    );
+    let marker = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("export OSDK_MISSING_WARNED="))
+        .expect("the warning is recorded")
+        .trim_matches('\'')
+        .to_string();
+
+    let again = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["hook-env", "--shell", "bash"],
+        &[("OSDK_MISSING_WARNED", &marker)],
+    );
+    assert!(again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).trim().is_empty(),
+        "already warned here: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(String::from_utf8_lossy(&again.stdout).contains("1.22.5"));
+
+    let env = run_isolated_in(temporary.path(), &project, &["env"]);
+    assert!(
+        !env.status.success(),
+        "osdk env must not hand out a partial environment"
+    );
+}
+
 /// `osdk install` replays the lock, so what runs must be the locked version
 /// too -- not the newest install that also matches the declaration. A lock
 /// resolved from a different request (the config was edited since) is stale

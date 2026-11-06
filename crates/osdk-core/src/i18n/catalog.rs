@@ -321,6 +321,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "warn.activation_missing_tools",
+        (
+            "osdk: {dir}: not installed: {tools}; the other tools are active. Run `osdk install` to install them",
+            "osdk：{dir}：未安装 {tools}；其余工具已激活。运行 `osdk install` 安装",
+        ),
+    );
+    m.insert(
         "warn.lock_requests_changed",
         (
             "warning: osdk.toml changed {changes} since osdk.lock was written; this install still uses the locked versions. Run `osdk lock` (or `osdk upgrade`) to re-resolve",
