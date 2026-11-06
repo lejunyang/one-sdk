@@ -144,11 +144,34 @@ impl JavaBackend {
         package_type: &str,
         version_filter: Option<&str>,
     ) -> String {
+        Self::packages_url_with(
+            ctx,
+            base_index,
+            distribution,
+            package_type,
+            version_filter,
+            true,
+        )
+    }
+
+    /// `latest_only` adds Foojay's `latest=available`: one package per release
+    /// line, small enough for every listing. It must not accompany a `version`
+    /// filter, because Foojay then ignores the filter and answers with the
+    /// newest of that line -- `version=21.0.12+8` returned 21.0.12.1+1, which
+    /// was installed and labelled 21.0.12+8.
+    fn packages_url_with(
+        ctx: &Ctx,
+        base_index: &str,
+        distribution: &str,
+        package_type: &str,
+        version_filter: Option<&str>,
+        latest_only: bool,
+    ) -> String {
         let os = Self::os_token(ctx.platform.os);
         let arch = Self::arch_token(ctx);
         let at = Self::archive_type(ctx.platform.os);
         let mut url = format!(
-            "{base}?distribution={dist}&operating_system={os}&architecture={arch}&archive_type={at}&package_type={package_type}&latest=available",
+            "{base}?distribution={dist}&operating_system={os}&architecture={arch}&archive_type={at}&package_type={package_type}",
             base = base_index.trim_end_matches('/'),
             dist = distribution,
             os = os,
@@ -156,8 +179,10 @@ impl JavaBackend {
             at = at,
             package_type = package_type,
         );
-        if let Some(v) = version_filter {
-            url.push_str(&format!("&version={v}"));
+        match version_filter {
+            Some(v) => url.push_str(&format!("&version={}", v.replace('+', "%2B"))),
+            None if latest_only => url.push_str("&latest=available"),
+            None => {}
         }
         url
     }
@@ -205,9 +230,19 @@ impl Backend for JavaBackend {
         opts.insert("package-type".into(), package_type.clone());
 
         // Query packages for this distribution and select by the spec.
-        let versions = self
+        let mut versions = self
             .list_for_distribution(ctx, &distribution, &package_type)
             .await?;
+        // The cheap listing holds only each line's newest release, so an
+        // older pin such as `21.0.5` or SDKMAN's `java=17.0.10-tem` needs the
+        // full catalog. Offline there is no catalog to widen to.
+        if crate::version::select_version(&spec, &versions).is_none()
+            && !ctx.config.settings.offline
+        {
+            versions = self
+                .list_for_distribution_with(ctx, &distribution, &package_type, false)
+                .await?;
+        }
         let chosen = crate::version::select_version(&spec, &versions).ok_or_else(|| {
             Error::VersionResolve {
                 tool: self.id().to_string(),
@@ -405,7 +440,11 @@ impl JavaBackend {
             match Self::fetch_packages::<Package>(ctx, source, &url).await {
                 Ok(response) => {
                     if let Some(package) = response.result.into_iter().find(|package| {
-                        !package.links.pkg_download_redirect.is_empty()
+                        // The catalog's answer has to be the version asked
+                        // for; anything else would be installed under the
+                        // wrong name and recorded in the lock as such.
+                        java_package_is_version(package, version)
+                            && !package.links.pkg_download_redirect.is_empty()
                             && (package.package_type.is_empty()
                                 || package.package_type == package_type)
                             && (ctx.platform.os != Os::Linux
@@ -437,13 +476,27 @@ impl JavaBackend {
         distribution: &str,
         package_type: &str,
     ) -> Result<Vec<VersionInfo>> {
+        self.list_for_distribution_with(ctx, distribution, package_type, true)
+            .await
+    }
+
+    /// Every published version when `latest_only` is false (about 100 KB for
+    /// Temurin on one platform), otherwise the newest of each release line.
+    async fn list_for_distribution_with(
+        &self,
+        ctx: &Ctx,
+        distribution: &str,
+        package_type: &str,
+        latest_only: bool,
+    ) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let mut response_error = None;
 
         use std::collections::BTreeSet;
         let mut set: BTreeSet<String> = BTreeSet::new();
         for (base, source) in Self::catalog_endpoints(ctx, &sources) {
-            let url = Self::packages_url(ctx, &base, distribution, package_type, None);
+            let url =
+                Self::packages_url_with(ctx, &base, distribution, package_type, None, latest_only);
             match Self::fetch_packages::<Package>(ctx, source, &url).await {
                 Ok(response) => {
                     for package in response.result {
@@ -563,6 +616,24 @@ async fn resolve_redirect(_client: &reqwest::Client, url: &str) -> Result<String
     }
     // Not a redirect (some mirrors serve directly); use the final URL.
     Ok(resp.url().to_string())
+}
+
+/// Whether a catalog package is exactly `version` (`21.0.5+11`), or its
+/// same-core build when `version` names no build (`21.0.5`).
+fn java_package_is_version(package: &Package, version: &str) -> bool {
+    let actual = if package.java_version.is_empty() {
+        package.distribution_version.as_str()
+    } else {
+        package.java_version.as_str()
+    };
+    if version.contains('+') {
+        actual == version
+    } else {
+        actual == version
+            || actual
+                .split_once('+')
+                .is_some_and(|(core, _)| core == version)
+    }
 }
 
 /// Split a java spec like `temurin-21` or `zulu-17.0.1` into (distribution,
@@ -710,6 +781,39 @@ mod tests {
         assert!(url.contains("package_type=jre"));
         assert!(url.contains("version=21"));
         assert_eq!(JavaBackend::libc_token(&ctx), "glibc");
+
+        // With `latest=available` Foojay ignores `version` and returns the
+        // line's newest build, so an exact query must never carry it.
+        let exact = JavaBackend::packages_url(
+            &ctx,
+            "https://x.test/p",
+            "temurin",
+            "jdk",
+            Some("21.0.12+8"),
+        );
+        assert!(exact.ends_with("&version=21.0.12%2B8"), "{exact}");
+        assert!(!exact.contains("latest="), "{exact}");
+        let listing = JavaBackend::packages_url(&ctx, "https://x.test/p", "temurin", "jdk", None);
+        assert!(listing.contains("&latest=available"), "{listing}");
+        let full =
+            JavaBackend::packages_url_with(&ctx, "https://x.test/p", "temurin", "jdk", None, false);
+        assert!(!full.contains("latest="), "{full}");
+    }
+
+    #[test]
+    fn a_catalog_package_must_be_the_requested_version() {
+        let package = |java_version: &str| -> Package {
+            serde_json::from_value(serde_json::json!({ "java_version": java_version })).unwrap()
+        };
+        assert!(java_package_is_version(&package("21.0.12+8"), "21.0.12+8"));
+        assert!(java_package_is_version(&package("21.0.12+8"), "21.0.12"));
+        // The respin Foojay answered with must not pass for the release.
+        assert!(!java_package_is_version(
+            &package("21.0.12.1+1"),
+            "21.0.12+8"
+        ));
+        assert!(!java_package_is_version(&package("21.0.12.1+1"), "21.0.12"));
+        assert!(!java_package_is_version(&package("21.0.5+11"), "21.0.5+12"));
     }
 
     #[tokio::test]

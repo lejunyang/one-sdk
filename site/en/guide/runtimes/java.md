@@ -26,7 +26,10 @@ JDK. Execution exports `JAVA_HOME`.
 Temurin versions carry a build number (such as `21.0.12+8`), and a PSU adds a
 fourth segment (such as `21.0.12.1+1`). You may omit the build number in the
 request: `java@21.0.12` matches the same-core `21.0.12+8`, and only falls back
-to a four-part PSU when no same-core release exists.
+to a four-part PSU when no same-core release exists. Any published release can be
+requested, not only the newest of each line: `java@21.0.5` and `java@17.0.10`
+resolve from the full catalog when the short newest-per-line listing has no match,
+and the downloaded package is checked to be exactly the version resolved.
 
 The embedded Temurin LTS catalog covers 8, 11, 17, 21, and 25, allowing
 resolution with an empty metadata cache. A locked artifact remains installable
