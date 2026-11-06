@@ -109,7 +109,11 @@ fn system_target_pnpm_shim_selects_external_node_and_keeps_native_home() {
 }
 
 fn isolated_command(root: &Path, cwd: &Path) -> Command {
-    let mut command = Command::new(shim());
+    isolated_command_with(&shim(), root, cwd)
+}
+
+fn isolated_command_with(program: &Path, root: &Path, cwd: &Path) -> Command {
+    let mut command = Command::new(program);
     command
         .current_dir(cwd)
         .env_clear()
@@ -743,11 +747,18 @@ fn same_tool_child_can_reenter_shim_in_another_project() {
 #[test]
 fn resolved_dispatcher_targets_are_refused_without_inherited_marker() {
     for copy in [false, true] {
-        // Next to the shim binary: a hard link cannot cross volumes, and the
-        // system temp directory is often on another one (Windows CI keeps the
-        // workspace on D: and TEMP on C:).
-        let temporary = tempfile::tempdir_in(shim().parent().unwrap()).unwrap();
+        // The dispatcher runs from a copy inside the fixture. A hard link
+        // cannot cross volumes, and the system temp directory is often not on
+        // the build directory's (Windows CI keeps the workspace on D: and
+        // TEMP on C:). The fixture itself must stay out of the repository,
+        // whose own osdk.toml would otherwise apply as an ancestor config.
+        let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
+        let dispatcher = root
+            .join("osdk-bin")
+            .join(format!("osdk-shim{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir_all(dispatcher.parent().unwrap()).unwrap();
+        std::fs::copy(shim(), &dispatcher).unwrap();
         std::fs::write(root.join("package.json"), r#"{"engines":{"node":"1.0.0"}}"#).unwrap();
         let install = root.join("installs/node/1.0.0");
         let bin = if cfg!(windows) {
@@ -758,20 +769,22 @@ fn resolved_dispatcher_targets_are_refused_without_inherited_marker() {
         std::fs::create_dir_all(&bin).unwrap();
         let target = bin.join(format!("node{}", std::env::consts::EXE_SUFFIX));
         if copy {
-            std::fs::copy(shim(), &target).unwrap();
+            std::fs::copy(&dispatcher, &target).unwrap();
         } else {
-            std::fs::hard_link(shim(), &target).unwrap();
+            std::fs::hard_link(&dispatcher, &target).unwrap();
         }
         std::fs::write(install.join(".osdk-complete"), b"").unwrap();
-        let mut child = isolated_command(root, root)
+        let mut child = isolated_command_with(&dispatcher, root, root)
             .arg("node")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
+        // A recursion never ends; the bound only has to outlast a slow first
+        // run (macOS scans a freshly copied, unsigned binary before it starts).
         let start = std::time::Instant::now();
         while child.try_wait().unwrap().is_none()
-            && start.elapsed() < std::time::Duration::from_secs(3)
+            && start.elapsed() < std::time::Duration::from_secs(30)
         {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

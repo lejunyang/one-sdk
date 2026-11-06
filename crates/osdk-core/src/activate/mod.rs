@@ -1312,18 +1312,23 @@ mod tests {
     }
 
     /// The form above only helps if PowerShell reads it back as the value.
+    /// Skipped without pwsh (Wine), like `powershell_snippets_survive_strict_mode`.
     #[cfg(windows)]
     #[test]
     fn powershell_literals_round_trip_through_pwsh() {
+        let Some(pwsh) = locate_pwsh() else {
+            eprintln!("skipping: no pwsh on PATH");
+            return;
+        };
         let value = r"C:\Users\张三's dir\😀";
         let script = format!(
             "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write({})",
             powershell_quote(value)
         );
-        let output = std::process::Command::new("pwsh")
+        let output = std::process::Command::new(pwsh)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
-            .expect("pwsh is required on Windows test machines");
+            .expect("spawn pwsh");
         assert!(
             output.status.success(),
             "{}",
