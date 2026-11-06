@@ -23,6 +23,17 @@ filters distribution, OS, architecture, archive type, JDK/JRE, and Linux libc.
 A JRE uses identity `jre-<resolved-version>` and can coexist with the matching
 JDK. Execution exports `JAVA_HOME`.
 
+Installs are named after their distribution: Temurin, the default, keeps the
+bare version (`21.0.5+11`), and any other gets a prefix (`zulu-21.0.5+11`,
+`zulu-jre-21.0.5+11`), so two distributions of the same version install side by
+side. Selection stays within the requested distribution: `java = "temurin-21"`
+runs a Temurin JDK even when a Zulu one with a higher number is installed, and a
+plain `21` means Temurin, as it does for install. The `distribution` and
+`package-type` options select the same way they install. Non-Temurin JDKs
+installed by earlier versions under a bare version are recognized by the
+`IMPLEMENTOR` in their `release` file and keep working; reinstalling the same
+version puts it in its own prefixed directory.
+
 Temurin versions carry a build number (such as `21.0.12+8`), and a PSU adds a
 fourth segment (such as `21.0.12.1+1`). You may omit the build number in the
 request: `java@21.0.12` matches the same-core `21.0.12+8`, and only falls back

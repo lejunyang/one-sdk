@@ -124,7 +124,11 @@ pub fn pin_to_lock(config: &crate::config::Config, start: &Path, active: &mut Ac
     if !declares(config, active, &pin.request) {
         return;
     }
-    active.spec = pin.version;
+    active.spec = if active.tool == "java" {
+        crate::backend::java::qualify_locked_version(&pin.request, &pin.version)
+    } else {
+        pin.version
+    };
     active.is_range = false;
 }
 

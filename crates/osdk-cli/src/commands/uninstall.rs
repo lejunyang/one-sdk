@@ -88,6 +88,25 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
         selected.version.clone()
     } else {
         match &req.spec {
+            // `java@zulu-21` names a distribution's install, never another
+            // distribution's of the same number.
+            spec @ (VersionSpec::Exact(_) | VersionSpec::Prefix(_)) if backend.id() == "java" => {
+                let text = spec.to_string();
+                osdk_core::version::installed_match(
+                    &app.ctx,
+                    "java",
+                    &text,
+                    false,
+                    &backend.list_installed(&app.ctx)?,
+                )
+                .ok_or_else(|| {
+                    anyhow!(t!(
+                        "err.no_installed_match",
+                        tool = req.backend,
+                        spec = text
+                    ))
+                })?
+            }
             // Checked against what is installed: `uninstall node@99.0.0`
             // printed "uninstalled" and exited 0, and `java@17.0.10` did the
             // same while leaving the `17.0.10+7` install in place.

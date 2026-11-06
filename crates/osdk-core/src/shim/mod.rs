@@ -302,43 +302,17 @@ pub fn managed_jdk_env(
     )
     .ok()?
     .and_then(|active| {
-        let spec = active.choose_installed(|candidate| {
-            installed_matching(candidate, active.is_range, &installed).is_some()
-        });
-        installed_matching(&spec, active.is_range, &installed)
+        let matching = |spec: &str| {
+            crate::backend::java::select_installed(ctx, spec, active.is_range, &installed)
+        };
+        let spec = active.choose_installed(|candidate| matching(candidate).is_some());
+        matching(&spec)
     })
     .or_else(|| installed.last().cloned())?;
     let version = ToolVersion::new(java.id(), selected);
     let env = java.exec_env(ctx, &version).ok()?;
     let paths = java.bin_paths(ctx, &version).ok()?;
     Some((env, paths))
-}
-
-fn installed_matching(spec: &str, is_range: bool, installed: &[String]) -> Option<String> {
-    // A java spec may carry a distribution prefix (`temurin-21`) that install
-    // directories do not use.
-    let spec = spec.split_once('-').map_or(spec, |(left, right)| {
-        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphabetic()) && !right.is_empty() {
-            right
-        } else {
-            spec
-        }
-    });
-    let parsed = if is_range {
-        VersionSpec::parse_range(spec).ok()?
-    } else {
-        VersionSpec::parse(spec)
-    };
-    match &parsed {
-        VersionSpec::Exact(exact) => installed.iter().find(|value| *value == exact).cloned(),
-        _ => {
-            let infos: Vec<_> = installed
-                .iter()
-                .map(crate::version::VersionInfo::stable)
-                .collect();
-            crate::version::select_version(&parsed, &infos).map(|info| info.version.clone())
-        }
-    }
 }
 
 /// Scan all persisted dynamic-tool manifests under the installs tree.

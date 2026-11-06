@@ -851,6 +851,37 @@ fn where_runs_the_locked_version_of_a_project_declaration() {
     );
 }
 
+/// `java = "temurin-21"` must run a Temurin JDK even when a Zulu one with a
+/// higher number is installed, and `zulu-21` the Zulu one.
+#[test]
+fn where_selects_java_within_the_declared_distribution() {
+    let temporary = tempfile::tempdir().unwrap();
+    for identity in ["21.0.5+11", "zulu-21.0.9+10"] {
+        let install = temporary.path().join("installs/java").join(identity);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    }
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for (declared, expected) in [("temurin-21", "21.0.5+11"), ("zulu-21", "zulu-21.0.9+10")] {
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!("[tools]\njava = \"{declared}\"\n"),
+        )
+        .unwrap();
+        let output = run_isolated_in(temporary.path(), &project, &["where", "java"]);
+        assert!(
+            output.status.success(),
+            "{declared}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string();
+        assert!(Path::new(&path).ends_with(expected), "{declared} -> {path}");
+    }
+}
+
 #[test]
 fn where_finds_a_java_install_through_a_distribution_prefix() {
     let temporary = tempfile::tempdir().unwrap();

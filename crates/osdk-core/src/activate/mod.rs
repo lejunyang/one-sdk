@@ -444,6 +444,7 @@ pub fn compute_env_delta_allowing_missing(
                             .expand_alias(backend.id(), candidate)
                             .unwrap_or_else(|_| candidate.to_string());
                         crate::version::installed_match(
+                            ctx,
                             backend.id(),
                             &candidate,
                             a.is_range,
@@ -484,6 +485,14 @@ pub fn compute_env_delta_allowing_missing(
                 };
                 if backend.id() == "python" {
                     crate::backend::python::select_installed(spec, &installed)
+                } else if backend.id() == "java" {
+                    // Within the requested distribution, not by version alone.
+                    crate::backend::java::select_installed(
+                        ctx,
+                        &expanded,
+                        active_is_range,
+                        &installed,
+                    )
                 } else {
                     match &parsed {
                         VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => {

@@ -199,6 +199,7 @@ impl fmt::Display for ToolVersion {
 /// The installed version `spec` selects, the way the shim and activation pick
 /// one: python by its own rules, an exact name first, then the selector.
 pub fn installed_match(
+    ctx: &crate::backend::Ctx,
     backend_id: &str,
     spec: &str,
     is_range: bool,
@@ -209,6 +210,10 @@ pub fn installed_match(
     }
     if backend_id == "python" {
         return crate::backend::python::select_installed(spec, installed);
+    }
+    // A JDK is selected within its distribution, not by version alone.
+    if backend_id == "java" {
+        return crate::backend::java::select_installed(ctx, spec, is_range, installed);
     }
     let spec = strip_distribution_prefix(spec);
     let parsed = if is_range {

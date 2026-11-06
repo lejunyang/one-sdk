@@ -108,14 +108,6 @@ impl JavaBackend {
         }
     }
 
-    /// The distribution to use, from request options or the default.
-    fn distribution(req_opts: &BTreeMap<String, String>) -> String {
-        req_opts
-            .get("distribution")
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_DISTRIBUTION.to_string())
-    }
-
     fn package_type(req_opts: &BTreeMap<String, String>) -> Result<String> {
         let value = req_opts
             .get("package-type")
@@ -223,7 +215,9 @@ impl Backend for JavaBackend {
                 return Ok(resolved);
             }
         }
-        let (distribution, spec) = split_distribution(&req.spec);
+        // A distribution in the spec wins; otherwise `-o distribution=zulu`,
+        // which used to be overwritten here with the default.
+        let (distribution, spec) = requested_distribution(&req.spec, &req.options);
         let mut opts = req.options.clone();
         opts.insert("distribution".to_string(), distribution.clone());
         let package_type = Self::package_type(&opts)?;
@@ -250,11 +244,7 @@ impl Backend for JavaBackend {
                 hint: Some(format!("no {distribution} {package_type} matched")),
             }
         })?;
-        let identity = if package_type == "jre" {
-            format!("jre-{}", chosen.version)
-        } else {
-            chosen.version.clone()
-        };
+        let identity = install_identity(&distribution, &package_type, &chosen.version);
         let mut tv = ToolVersion::new(self.id(), identity);
         opts.insert("java-version".into(), chosen.version.clone());
         tv.options = opts;
@@ -283,13 +273,20 @@ impl Backend for JavaBackend {
             pipeline::run(&plan, &pctx).await?;
             return Ok(());
         }
-        let distribution = Self::distribution(&tv.options);
+        let identity = parse_identity(&tv.version);
+        let distribution = tv
+            .options
+            .get("distribution")
+            .map(String::as_str)
+            .or(identity.distribution)
+            .unwrap_or(DEFAULT_DISTRIBUTION)
+            .to_string();
         let package_type = Self::package_type(&tv.options)?;
         let java_version = tv
             .options
             .get("java-version")
             .map(String::as_str)
-            .unwrap_or_else(|| tv.version.strip_prefix("jre-").unwrap_or(&tv.version));
+            .unwrap_or(identity.version);
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let (base_index, source, pkg) = self
             .package_for_version(ctx, &sources, &distribution, &package_type, java_version)
@@ -380,7 +377,7 @@ impl Backend for JavaBackend {
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths);
         if discovered.is_empty() {
-            if tv.version.starts_with("jre-")
+            if parse_identity(&tv.version).jre
                 || tv.options.get("package-type").map(String::as_str) == Some("jre")
             {
                 Ok(vec!["java".into(), "keytool".into()])
@@ -636,9 +633,222 @@ fn java_package_is_version(package: &Package, version: &str) -> bool {
     }
 }
 
+/// How a JDK install is named: `[<distribution>-][jre-]<java version>`.
+///
+/// The distribution used to be left out, so `temurin-21` and `zulu-21` both
+/// installed into `21.0.5+11` -- the second install found the first and called
+/// itself done -- and `java = "temurin-21"` could select a Zulu install that
+/// happened to carry a higher number. The default distribution keeps the bare
+/// name, so existing Temurin installs and locks stay valid.
+pub fn install_identity(distribution: &str, package_type: &str, version: &str) -> String {
+    let mut identity = String::new();
+    if distribution != DEFAULT_DISTRIBUTION {
+        identity.push_str(distribution);
+        identity.push('-');
+    }
+    if package_type == "jre" {
+        identity.push_str("jre-");
+    }
+    identity.push_str(version);
+    identity
+}
+
+/// The parts of an install identity (see [`install_identity`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaIdentity<'a> {
+    /// `None` for a bare name: the default distribution, or an install made
+    /// before identities carried one (see [`installed_distribution`]).
+    pub distribution: Option<&'a str>,
+    pub jre: bool,
+    pub version: &'a str,
+}
+
+fn is_distribution_name(word: &str) -> bool {
+    word.starts_with(|c: char| c.is_ascii_alphabetic())
+        && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !word.chars().all(|c| c.is_ascii_digit())
+}
+
+pub fn parse_identity(identity: &str) -> JavaIdentity<'_> {
+    let (distribution, rest) = match identity.split_once('-') {
+        Some((word, rest)) if word != "jre" && is_distribution_name(word) => (Some(word), rest),
+        _ => (None, identity),
+    };
+    let (jre, version) = match rest.strip_prefix("jre-") {
+        Some(version) => (true, version),
+        None => (false, rest),
+    };
+    JavaIdentity {
+        distribution,
+        jre,
+        version,
+    }
+}
+
+/// The distribution of an installed JDK.
+///
+/// A prefixed identity names it. A bare one is the default distribution --
+/// unless it predates prefixed identities, when any distribution installed
+/// that way. Every JDK records its vendor in `<home>/release`
+/// (`IMPLEMENTOR="Azul Systems, Inc."`), which tells them apart without
+/// asking anyone to reinstall.
+pub fn installed_distribution(ctx: &Ctx, identity: &str) -> String {
+    if let Some(distribution) = parse_identity(identity).distribution {
+        return distribution.to_string();
+    }
+    let root = ctx.dirs.install_path("java", identity);
+    [root.join("release"), root.join("Contents/Home/release")]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .and_then(|release| distribution_from_release(&release))
+        .unwrap_or(DEFAULT_DISTRIBUTION)
+        .to_string()
+}
+
+/// Map a JDK `release` file's `IMPLEMENTOR` to a Foojay distribution name.
+fn distribution_from_release(release: &str) -> Option<&'static str> {
+    let implementor = release.lines().find_map(|line| {
+        line.strip_prefix("IMPLEMENTOR=")
+            .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
+    })?;
+    let distribution = if implementor.contains("adoptium") {
+        "temurin"
+    } else if implementor.contains("azul") {
+        "zulu"
+    } else if implementor.contains("amazon") {
+        "corretto"
+    } else if implementor.contains("bellsoft") {
+        "liberica"
+    } else if implementor.contains("microsoft") {
+        "microsoft"
+    } else if implementor.contains("sap") {
+        "sap_machine"
+    } else if implementor.contains("ibm") || implementor.contains("international business") {
+        "semeru"
+    } else if implementor.contains("graalvm") {
+        "graalvm_community"
+    } else if implementor.contains("alibaba") {
+        "dragonwell"
+    } else if implementor.contains("tencent") {
+        "kona"
+    } else if implementor.contains("oracle") {
+        "oracle"
+    } else {
+        return None;
+    };
+    Some(distribution)
+}
+
+/// Split a configured Java spec into its distribution and version parts:
+/// `zulu-21` -> (`zulu`, `21`), `21` -> (`temurin`, `21`).
+pub fn split_spec(spec: &str) -> (&str, &str) {
+    let (named, version) = split_named_spec(spec);
+    (named.unwrap_or(DEFAULT_DISTRIBUTION), version)
+}
+
+/// [`split_spec`] without the default: `None` when the spec names no
+/// distribution, so a `distribution` option can supply it.
+fn split_named_spec(spec: &str) -> (Option<&str>, &str) {
+    match spec.split_once('-') {
+        Some((word, rest)) if word != "jre" && is_distribution_name(word) && !rest.is_empty() => {
+            (Some(word), rest)
+        }
+        _ => (None, spec),
+    }
+}
+
+/// A `java = { version = "21", distribution = "zulu" }` option.
+fn configured_option(ctx: &Ctx, key: &str) -> Option<String> {
+    ctx.config
+        .tool_configs
+        .get("java")
+        .and_then(|entry| entry.to_request_options().get(key).cloned())
+}
+
+/// The installed JDK `spec` selects: one of the requested distribution (the
+/// default when the spec names none), by version as any other tool.
+///
+/// A JRE install is selected only by its full identity, as before.
+pub fn select_installed(
+    ctx: &Ctx,
+    spec: &str,
+    is_range: bool,
+    installed: &[String],
+) -> Option<String> {
+    if parse_identity(spec).jre {
+        return installed
+            .iter()
+            .any(|identity| identity == spec)
+            .then(|| spec.to_string());
+    }
+    let (named, version) = split_named_spec(spec);
+    // The configured options select as they install: `distribution` when the
+    // spec names none, and `package-type = "jre"`.
+    let distribution = named
+        .map(str::to_string)
+        .or_else(|| configured_option(ctx, "distribution"))
+        .unwrap_or_else(|| DEFAULT_DISTRIBUTION.to_string());
+    let jre = configured_option(ctx, "package-type").as_deref() == Some("jre");
+    let mut candidates: Vec<(&String, &str)> = installed
+        .iter()
+        .filter_map(|identity| {
+            let parsed = parse_identity(identity);
+            (parsed.jre == jre && installed_distribution(ctx, identity) == distribution)
+                .then_some((identity, parsed.version))
+        })
+        .collect();
+    // Ascending by version, as the selector expects. The identities do not
+    // sort that way once a legacy bare name sits beside a prefixed one.
+    candidates.sort_by(|a, b| crate::version::compare_version_strings(a.1, b.1));
+    let parsed = if is_range {
+        VersionSpec::parse_range(version).ok()?
+    } else {
+        VersionSpec::parse(version)
+    };
+    if let VersionSpec::Exact(exact) = &parsed {
+        if let Some((identity, _)) = candidates.iter().find(|(_, v)| v == exact) {
+            return Some((*identity).clone());
+        }
+    }
+    let infos: Vec<VersionInfo> = candidates
+        .iter()
+        .map(|(_, version)| VersionInfo::stable(*version))
+        .collect();
+    let chosen = crate::version::select_version(&parsed, &infos)?;
+    candidates
+        .iter()
+        .find(|(_, version)| *version == chosen.version)
+        .map(|(identity, _)| (*identity).clone())
+}
+
+/// A lock written before identities carried the distribution records the
+/// bare version for a `zulu-21` request. Qualify it with the request's
+/// distribution so selection looks among that distribution's installs.
+pub fn qualify_locked_version(request: &str, version: &str) -> String {
+    let (distribution, _) = split_spec(request);
+    if distribution == DEFAULT_DISTRIBUTION || parse_identity(version).distribution.is_some() {
+        version.to_string()
+    } else {
+        format!("{distribution}-{version}")
+    }
+}
+
+/// The distribution a request installs: named in the spec, else the
+/// `distribution` option, else the default.
+fn requested_distribution(
+    spec: &VersionSpec,
+    options: &BTreeMap<String, String>,
+) -> (String, VersionSpec) {
+    let (named, spec) = split_distribution(spec);
+    let distribution = named
+        .or_else(|| options.get("distribution").cloned())
+        .unwrap_or_else(|| DEFAULT_DISTRIBUTION.to_string());
+    (distribution, spec)
+}
+
 /// Split a java spec like `temurin-21` or `zulu-17.0.1` into (distribution,
-/// version-spec). Plain `21`/`lts`/`latest` use the default distribution.
-fn split_distribution(spec: &VersionSpec) -> (String, VersionSpec) {
+/// version-spec). Plain `21`/`lts`/`latest` name no distribution.
+fn split_distribution(spec: &VersionSpec) -> (Option<String>, VersionSpec) {
     if let VersionSpec::Prefix(p) | VersionSpec::Exact(p) = spec {
         if let Some((dist, ver)) = p.split_once('-') {
             if dist
@@ -647,11 +857,11 @@ fn split_distribution(spec: &VersionSpec) -> (String, VersionSpec) {
                 .map(|c| c.is_ascii_alphabetic())
                 .unwrap_or(false)
             {
-                return (dist.to_string(), VersionSpec::parse(ver));
+                return (Some(dist.to_string()), VersionSpec::parse(ver));
             }
         }
     }
-    (DEFAULT_DISTRIBUTION.to_string(), spec.clone())
+    (None, spec.clone())
 }
 
 #[cfg(test)]
@@ -668,17 +878,110 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn install_identities_carry_a_non_default_distribution() {
+        assert_eq!(install_identity("temurin", "jdk", "21.0.5+11"), "21.0.5+11");
+        assert_eq!(
+            install_identity("temurin", "jre", "21.0.5+11"),
+            "jre-21.0.5+11"
+        );
+        assert_eq!(
+            install_identity("zulu", "jdk", "21.0.5+11"),
+            "zulu-21.0.5+11"
+        );
+        assert_eq!(
+            install_identity("sap_machine", "jre", "17.0.10"),
+            "sap_machine-jre-17.0.10"
+        );
+        for (identity, distribution, jre, version) in [
+            ("21.0.5+11", None, false, "21.0.5+11"),
+            ("jre-21.0.5+11", None, true, "21.0.5+11"),
+            ("zulu-21.0.5+11", Some("zulu"), false, "21.0.5+11"),
+            (
+                "sap_machine-jre-17.0.10",
+                Some("sap_machine"),
+                true,
+                "17.0.10",
+            ),
+        ] {
+            assert_eq!(
+                parse_identity(identity),
+                JavaIdentity {
+                    distribution,
+                    jre,
+                    version
+                },
+                "{identity}"
+            );
+        }
+        assert_eq!(split_spec("zulu-21"), ("zulu", "21"));
+        assert_eq!(split_spec("21"), ("temurin", "21"));
+        assert_eq!(split_spec("lts"), ("temurin", "lts"));
+    }
+
+    /// `java = "temurin-21"` must not run a Zulu install that carries a higher
+    /// number, and installs made before identities named their distribution
+    /// are told apart by the JDK's own `release` file.
+    #[test]
+    fn selection_stays_within_the_requested_distribution() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = offline_ctx(temp.path());
+        let installed: Vec<String> = ["21.0.5+11", "zulu-21.0.9+10", "21.0.7+6", "jre-21.0.8+9"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for identity in &installed {
+            std::fs::create_dir_all(ctx.dirs.install_path("java", identity)).unwrap();
+        }
+        // A pre-identity Zulu install, named by version only.
+        std::fs::write(
+            ctx.dirs.install_path("java", "21.0.7+6").join("release"),
+            "JAVA_VERSION=\"21.0.7\"
+IMPLEMENTOR=\"Azul Systems, Inc.\"
+",
+        )
+        .unwrap();
+        let pick = |spec: &str| select_installed(&ctx, spec, false, &installed);
+        assert_eq!(pick("temurin-21").as_deref(), Some("21.0.5+11"));
+        assert_eq!(pick("21").as_deref(), Some("21.0.5+11"));
+        assert_eq!(pick("zulu-21").as_deref(), Some("zulu-21.0.9+10"));
+        assert_eq!(pick("zulu-21.0.7").as_deref(), Some("21.0.7+6"));
+        assert_eq!(pick("21.0.7+6"), None, "that bare name is a Zulu install");
+        assert_eq!(pick("corretto-21"), None);
+        assert_eq!(pick("jre-21.0.8+9").as_deref(), Some("jre-21.0.8+9"));
+        assert_eq!(installed_distribution(&ctx, "21.0.7+6"), "zulu");
+        assert_eq!(installed_distribution(&ctx, "21.0.5+11"), "temurin");
+    }
+
+    #[test]
+    fn a_lock_from_before_identities_is_qualified_by_its_request() {
+        assert_eq!(
+            qualify_locked_version("zulu-21", "21.0.5+11"),
+            "zulu-21.0.5+11"
+        );
+        assert_eq!(
+            qualify_locked_version("zulu-21", "zulu-21.0.5+11"),
+            "zulu-21.0.5+11"
+        );
+        assert_eq!(qualify_locked_version("21", "21.0.5+11"), "21.0.5+11");
+        assert_eq!(
+            qualify_locked_version("temurin-21", "21.0.5+11"),
+            "21.0.5+11"
+        );
+    }
+
+    #[test]
     fn distribution_split() {
         let (d, v) = split_distribution(&VersionSpec::parse("temurin-21"));
-        assert_eq!(d, "temurin");
+        assert_eq!(d.as_deref(), Some("temurin"));
         assert_eq!(v, VersionSpec::Prefix("21".into()));
 
+        // No distribution named: the `distribution` option or the default.
         let (d, v) = split_distribution(&VersionSpec::parse("21"));
-        assert_eq!(d, "temurin");
+        assert_eq!(d, None);
         assert_eq!(v, VersionSpec::Prefix("21".into()));
 
         let (d, _) = split_distribution(&VersionSpec::parse("zulu-17.0.1"));
-        assert_eq!(d, "zulu");
+        assert_eq!(d.as_deref(), Some("zulu"));
     }
 
     fn offline_ctx(root: &std::path::Path) -> Ctx {
@@ -863,6 +1166,26 @@ mod tests {
         assert_eq!(base, format!("http://{address}/fallback"));
         assert_eq!(source.unwrap().id, "fallback");
         assert_eq!(package.id, "jdk-21");
+    }
+
+    /// `-o distribution=zulu` is documented, but resolution replaced it with
+    /// the default whenever the spec named no distribution, so the request
+    /// installed Temurin.
+    #[test]
+    fn the_distribution_option_applies_when_the_spec_names_none() {
+        let zulu = BTreeMap::from([("distribution".to_string(), "zulu".to_string())]);
+        let (distribution, spec) = requested_distribution(&VersionSpec::parse("21"), &zulu);
+        assert_eq!(distribution, "zulu");
+        assert_eq!(spec, VersionSpec::Prefix("21".into()));
+        assert_eq!(
+            install_identity(&distribution, "jdk", "21.0.9+10"),
+            "zulu-21.0.9+10"
+        );
+        // The spec's own distribution wins over the option.
+        let (distribution, _) = requested_distribution(&VersionSpec::parse("corretto-21"), &zulu);
+        assert_eq!(distribution, "corretto");
+        let (distribution, _) = requested_distribution(&VersionSpec::parse("21"), &BTreeMap::new());
+        assert_eq!(distribution, "temurin");
     }
 
     #[tokio::test]

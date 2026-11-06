@@ -1006,7 +1006,7 @@ fn resolve_installed(
     is_range: bool,
 ) -> Option<String> {
     let installed = backend.list_installed(ctx).ok()?;
-    osdk_core::version::installed_match(backend.id(), spec, is_range, &installed)
+    osdk_core::version::installed_match(ctx, backend.id(), spec, is_range, &installed)
 }
 
 fn managed_bin_paths(

@@ -613,6 +613,7 @@ pub fn runtime_environment(
                     .ok()
                     .and_then(|candidate| {
                         crate::version::installed_match(
+                            ctx,
                             tool,
                             &candidate,
                             active.is_range,
@@ -622,16 +623,17 @@ pub fn runtime_environment(
                     .is_some()
             });
             let text = ctx.config.expand_alias(tool, &chosen)?;
-            let spec = if active.is_range {
-                VersionSpec::parse_range(&text)?
-            } else {
-                VersionSpec::parse(&text)
-            };
-            let versions: Vec<_> = installed.iter().map(VersionInfo::stable).collect();
-            let version = crate::version::select_version(&spec, &versions).ok_or_else(|| {
-                Error::config(format!("selected {tool} runtime is not installed"))
-            })?;
-            let version = crate::version::ToolVersion::new(tool, &version.version);
+            if active.is_range {
+                VersionSpec::parse_range(&text)?;
+            }
+            // The shared matcher, so `java = "temurin-21"` selects within
+            // its distribution like everywhere else.
+            let version =
+                crate::version::installed_match(ctx, tool, &text, active.is_range, &installed)
+                    .ok_or_else(|| {
+                        Error::config(format!("selected {tool} runtime is not installed"))
+                    })?;
+            let version = crate::version::ToolVersion::new(tool, &version);
             Ok((
                 backend.bin_paths(ctx, &version)?,
                 backend.exec_env(ctx, &version)?,

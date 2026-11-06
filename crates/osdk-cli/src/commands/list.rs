@@ -184,6 +184,7 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
                     let installed = backend.list_installed(&app.ctx).unwrap_or_default();
                     active.choose_installed(|spec| {
                         osdk_core::version::installed_match(
+                            &app.ctx,
                             backend.id(),
                             spec,
                             active.is_range,
@@ -337,16 +338,21 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
             requested_spec_literal(&tool).expect("explicit_spec is derived from the same operand");
         let selected = if backend.id() == "python" {
             osdk_core::backend::python::select_installed(&literal, &installed)
+        } else if backend.id() == "java" {
+            // `java@zulu-21`: within that distribution's installs.
+            osdk_core::version::installed_match(
+                &app.ctx,
+                "java",
+                &req.spec.to_string(),
+                false,
+                &installed,
+            )
         } else {
             let infos: Vec<_> = installed
                 .iter()
                 .map(osdk_core::version::VersionInfo::stable)
                 .collect();
-            // `java@temurin-17.0.10`: installs are named by version only.
-            let spec = VersionSpec::parse(osdk_core::version::strip_distribution_prefix(
-                &req.spec.to_string(),
-            ));
-            osdk_core::version::select_version(&spec, &infos).map(|info| info.version.clone())
+            osdk_core::version::select_version(&req.spec, &infos).map(|info| info.version.clone())
         };
         selected.ok_or_else(|| anyhow!("{}@{} is not installed", req.backend, literal))?
     } else {
@@ -361,7 +367,13 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
         )?
         .map(|active| {
             let matches = |spec: &str| {
-                osdk_core::version::installed_match(backend.id(), spec, active.is_range, &installed)
+                osdk_core::version::installed_match(
+                    &app.ctx,
+                    backend.id(),
+                    spec,
+                    active.is_range,
+                    &installed,
+                )
             };
             (
                 active.choose_installed(|spec| matches(spec).is_some()),
@@ -372,10 +384,14 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
         match resolved {
             // A configured `java = "temurin-21"` names its install `21.x`; the
             // shared matcher strips the distribution, as the shim does.
-            Some((spec, is_range)) => {
-                osdk_core::version::installed_match(backend.id(), &spec, is_range, &installed)
-                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
-            }
+            Some((spec, is_range)) => osdk_core::version::installed_match(
+                &app.ctx,
+                backend.id(),
+                &spec,
+                is_range,
+                &installed,
+            )
+            .ok_or_else(|| anyhow!("{} is not installed", req.backend))?,
             None => installed
                 .into_iter()
                 .last()

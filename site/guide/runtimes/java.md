@@ -22,6 +22,13 @@ osdk install java@21 -o package-type=jre
 架构、archive 类型、JDK/JRE 和 Linux libc 过滤。JRE identity 为
 `jre-<resolved-version>`，可与相同版本的 JDK 共存；执行 JDK/JRE 时导出 `JAVA_HOME`。
 
+安装按发行版命名：默认的 Temurin 保持裸版本号（`21.0.5+11`），其他发行版带前缀
+（`zulu-21.0.5+11`、`zulu-jre-21.0.5+11`），因此同一版本的两个发行版可以并存。选择也
+限定在所请求的发行版内：`java = "temurin-21"` 运行 Temurin JDK，即使装着版本号更高的
+Zulu；不带发行版的 `21` 与安装时一样表示 Temurin。`distribution`、`package-type` 选项
+在选择时与安装时含义一致。早期版本以裸版本号安装的非 Temurin JDK，会按其 `release`
+文件中的 `IMPLEMENTOR` 识别，继续可用；重新安装同一版本会放进带前缀的新目录。
+
 Temurin 版本带 build 号（如 `21.0.12+8`），PSU 还会有第四段（如 `21.0.12.1+1`）。
 版本请求可以省略 build 号：`java@21.0.12` 会匹配同一核心版本的 `21.0.12+8`；只有当
 同一核心版本不存在时，才回退匹配四段式 PSU。可以请求任何已发布版本，而不只是每条版本线的
