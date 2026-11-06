@@ -634,6 +634,21 @@ fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str
 }
 
 #[test]
+fn alias_rejects_version_shaped_names_and_unknown_unsets() {
+    let temporary = tempfile::tempdir().unwrap();
+    let shadow = run_isolated(temporary.path(), &["alias", "set", "node", "20", "22"]);
+    assert!(!shadow.status.success());
+    assert!(String::from_utf8_lossy(&shadow.stderr).contains("looks like a version"));
+    let set = run_isolated(temporary.path(), &["alias", "set", "node", "work", "20"]);
+    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    let missing = run_isolated(temporary.path(), &["alias", "unset", "node", "nosuch"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stdout).is_empty());
+    let removed = run_isolated(temporary.path(), &["alias", "unset", "node", "work"]);
+    assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+}
+
+#[test]
 fn exec_exits_with_the_childs_own_code_and_adds_no_error() {
     // Scripts branch on `$?` after `osdk exec -- <cmd>`: the code must be the
     // child's (as with `mise exec` / `npx`), not a generic 1 plus an error line.

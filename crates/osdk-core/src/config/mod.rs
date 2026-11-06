@@ -2423,6 +2423,19 @@ pub fn validate_alias_name(name: &str) -> Result<()> {
     if name.contains(char::is_whitespace) || name.contains('@') {
         return Err(Error::config(format!("invalid version alias `{name}`")));
     }
+    // Aliases are expanded before version matching, so an alias spelled like a
+    // version (`osdk alias set node 20 22`) silently redirected every `node@20`
+    // to 22 -- in every project on the machine.
+    let digits = name.strip_prefix(['v', 'V']).unwrap_or(name);
+    if !digits.is_empty()
+        && digits
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return Err(Error::config(format!(
+            "`{name}` looks like a version and would shadow it; pick a name such as `my-{digits}`"
+        )));
+    }
     Ok(())
 }
 
@@ -3860,6 +3873,12 @@ probe_timeout_ms = 125
             .contains("cycle"));
         assert!(validate_alias_name("latest").is_err());
         assert!(validate_alias_name("default").is_ok());
+        for version_like in ["20", "20.1", "v20", "1.2.3"] {
+            assert!(validate_alias_name(version_like).is_err(), "{version_like}");
+        }
+        for name in ["18-legacy", "v20-work", "work20", "lts20x"] {
+            assert!(validate_alias_name(name).is_ok(), "{name}");
+        }
     }
 
     #[test]

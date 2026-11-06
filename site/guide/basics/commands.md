@@ -133,7 +133,9 @@ osdk alias unset node maintenance
 CLI 始终在用户全局配置中编辑别名；项目也可手写 `[alias.tools.<tool>]` 并覆盖同名
 全局别名。别名可以链式引用，但循环会被拒绝。名称不能留空、包含空白或 `@`，
 也不能使用 `latest`、`current`、`stable`、`system`、`lts`、`lts/*`、
-`lts-latest` 以及任何 `lts/`、`lts-` 前缀。工具别名会规范化后保存，例如
+`lts-latest` 以及任何 `lts/`、`lts-` 前缀。`alias set` 还会拒绝形如版本号的名称
+（`20`、`v20`、`20.1`），否则它会在所有地方把该版本重定向；`alias unset` 删除不存在的
+名称时报错。工具别名会规范化后保存，例如
 `nodejs` 保存为 `node`。
 
 这类别名只替换**版本请求**：`install`、`use`、`uninstall`、激活、shim 选择与全局

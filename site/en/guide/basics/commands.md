@@ -150,7 +150,10 @@ The CLI always edits user-global aliases. A project may define
 `[alias.tools.<tool>]` manually and override a global name. Alias chains are allowed;
 cycles are rejected. Names cannot be empty, contain whitespace or `@`, or use
 `latest`, `current`, `stable`, `system`, `lts`, `lts/*`, `lts-latest`, or any
-`lts/` or `lts-` prefix. Tool aliases are canonicalized before storage.
+`lts/` or `lts-` prefix. `alias set` also rejects names spelled like a version
+(`20`, `v20`, `20.1`), which would otherwise redirect that version everywhere, and
+`alias unset` fails for a name that is not defined. Tool aliases are canonicalized
+before storage.
 
 This kind of alias replaces a **version request** only. It is expanded by
 install/use/uninstall, activation, shim selection, and global npm-tool version

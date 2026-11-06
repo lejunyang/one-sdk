@@ -1600,7 +1600,9 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
         }
         AliasCommand::Unset { tool, name } => {
             let backend = app.registry.get(&tool)?;
-            crate::config_edit::remove_version_alias(&app.ctx, backend.id(), &name)?;
+            if !crate::config_edit::remove_version_alias(&app.ctx, backend.id(), &name)? {
+                return Err(anyhow!("no `{}` alias named `{name}`", backend.id()));
+            }
             println!("removed {} {}", backend.id(), name);
         }
     }
