@@ -314,6 +314,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.hook_env_failed",
+        (
+            "osdk cannot activate {dir}: {error}. Run `osdk install` there to install its pinned tools",
+            "osdk 无法激活 {dir}：{error}。在该目录运行 `osdk install` 安装其固定的工具",
+        ),
+    );
+    m.insert(
         "warn.lock_requests_changed",
         (
             "warning: osdk.toml changed {changes} since osdk.lock was written; this install still uses the locked versions. Run `osdk lock` (or `osdk upgrade`) to re-resolve",

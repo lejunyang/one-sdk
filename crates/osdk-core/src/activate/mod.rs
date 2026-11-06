@@ -55,7 +55,10 @@ _osdk_hook() {{
   # discarding the per-task `env` and any tool the task just installed.
   [[ -n "${{OSDK_TASK:-}}" ]] && return 0
   local out
-  out="$({bin} hook-env --shell bash 2>/dev/null)" && eval "$out"
+  # stderr is left on the terminal: when this directory cannot be activated
+  # (a pinned tool is not installed), the reason is shown instead of the
+  # environment silently staying as it was.
+  out="$({bin} hook-env --shell bash)" && eval "$out"
 }}
 if [[ ";${{PROMPT_COMMAND:-}};" != *";_osdk_hook;"* ]]; then
   PROMPT_COMMAND="_osdk_hook${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
@@ -71,7 +74,8 @@ _osdk_hook() {{
   # re-deriving it here.
   [[ -n "${{OSDK_TASK:-}}" ]] && return 0
   local out
-  out="$({bin} hook-env --shell zsh 2>/dev/null)" && eval "$out"
+  # stderr stays visible; see the bash branch.
+  out="$({bin} hook-env --shell zsh)" && eval "$out"
 }}
 typeset -ag precmd_functions
 if [[ -z ${{precmd_functions[(r)_osdk_hook]}} ]]; then
@@ -88,7 +92,8 @@ function _osdk_hook --on-variable PWD --on-event fish_prompt
   if set -q OSDK_TASK
     return 0
   end
-  {bin} hook-env --shell fish 2>/dev/null | source
+  # stderr stays visible; see the bash branch.
+  {bin} hook-env --shell fish | source
 end
 _osdk_hook
 "#,
@@ -103,7 +108,8 @@ function global:Invoke-OsdkHook {{
   # the task just installed -- and on a project whose config is untrusted it
   # would print a trust error into the task's own output.
   if ($env:OSDK_TASK) {{ return }}
-  $out = & {bin} hook-env --shell powershell 2>$null
+  # stderr stays visible (see the bash branch); only stdout is evaluated.
+  $out = & {bin} hook-env --shell powershell
   if ($out) {{ Invoke-Expression ($out -join "`n") }}
 }}
 Invoke-OsdkHook
@@ -1051,6 +1057,21 @@ mod tests {
             },
             client: reqwest::Client::new(),
             show_progress: false,
+        }
+    }
+
+    #[test]
+    fn the_prompt_hook_does_not_discard_hook_env_errors() {
+        // Activation fails closed when a pinned tool is missing; with stderr
+        // thrown away that failure was invisible and the environment simply
+        // stayed as it was.
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
+            let script = activation_script(shell, "osdk");
+            let line = script
+                .lines()
+                .find(|line| line.contains("hook-env --shell"))
+                .unwrap_or_else(|| panic!("{shell:?} has no hook-env call"));
+            assert!(!line.contains("2>"), "{shell:?}: {line}");
         }
     }
 

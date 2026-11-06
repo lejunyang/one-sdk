@@ -70,7 +70,8 @@ any user-global pin and user lock entry that still select that version; project
 configuration and project locks are unchanged. Newly unreferenced CAS objects
 are collected afterward. Shell activation fails explicitly when a configured
 runtime is not installed instead of silently using a same-named command from the
-system PATH.
+system PATH: the prompt hook prints `osdk cannot activate <dir>: ...` above the
+prompt and leaves the environment unchanged until `osdk install` is run there.
 
 ## Inspect local and remote versions
 

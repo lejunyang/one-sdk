@@ -292,7 +292,19 @@ pub fn deactivate(shell: String) -> Result<()> {
 pub fn hook_env(app: &App, shell: String) -> Result<()> {
     let sh: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
     let cwd = std::env::current_dir()?;
-    let delta = project_environment(app, &cwd)?;
+    // Printed above a prompt, a bare "no installed python version matches"
+    // names neither osdk nor the way out.
+    let delta = project_environment(app, &cwd).map_err(|error| {
+        let reason = error
+            .downcast_ref::<osdk_core::Error>()
+            .map(|error| error.localized())
+            .unwrap_or_else(|| format!("{error:#}"));
+        anyhow!(t!(
+            "err.hook_env_failed",
+            dir = cwd.display(),
+            error = reason
+        ))
+    })?;
     print!("{}", osdk_core::activate::render_hook_env(sh, &delta));
     Ok(())
 }
