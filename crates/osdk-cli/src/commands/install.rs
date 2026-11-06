@@ -108,6 +108,7 @@ fn warn_about_lock_drift(app: &App, locked: &[ToolRequest]) {
     let Ok(declared) = gather_install_requests(app, Vec::new()) else {
         return;
     };
+    let declared_requests = declared.clone();
     let eager: Vec<String> = declared
         .iter()
         .filter(|request| !configured_request_is_lazy(app, request))
@@ -125,6 +126,13 @@ fn warn_about_lock_drift(app: &App, locked: &[ToolRequest]) {
         .map(|request| request.backend.clone())
         .collect();
     let (stale, missing) = lock_drift(&locked, &expected, &eager);
+    let changed = changed_lock_requests(app, &declared_requests);
+    if !changed.is_empty() {
+        eprintln!(
+            "{}",
+            t!("warn.lock_requests_changed", changes = changed.join(", "))
+        );
+    }
     if !stale.is_empty() {
         eprintln!(
             "{}",
@@ -137,6 +145,56 @@ fn warn_about_lock_drift(app: &App, locked: &[ToolRequest]) {
             t!("warn.lock_tools_missing", tools = missing.join(", "))
         );
     }
+}
+
+/// Declared tools whose version request differs from the one their lock entry
+/// was resolved from, as `node: 20 -> 22`.
+///
+/// The tool-set drift above missed the commonest edit: changing `node = "20"`
+/// to `"22"` keeps the same tools, so the replay silently installed 20 while
+/// shims (which read osdk.toml) ran 22. Both sides are `VersionSpec::to_string`
+/// of the declaration -- the lock writer stores exactly that -- so a string
+/// comparison has no normalization gap to produce false alarms.
+fn changed_lock_requests(app: &App, declared: &[ToolRequest]) -> Vec<String> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    let Some(lock) =
+        existing_lock_path(app, &cwd).and_then(|path| crate::lockfile::load(&path).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(platform) = lock
+        .platforms
+        .get(&crate::lockfile::platform_key(app.ctx.platform))
+    else {
+        return Vec::new();
+    };
+    let locked: Vec<(String, String)> = platform
+        .tools
+        .iter()
+        .map(|(backend, tool)| (backend.clone(), tool.request.clone()))
+        .collect();
+    let declared: Vec<(String, String)> = declared
+        .iter()
+        .map(|request| (request.backend.clone(), request.spec.to_string()))
+        .collect();
+    changed_requests(&locked, &declared)
+}
+
+/// `backend: locked -> declared` for every backend present on both sides whose
+/// request text differs.
+pub(crate) fn changed_requests(
+    locked: &[(String, String)],
+    declared: &[(String, String)],
+) -> Vec<String> {
+    declared
+        .iter()
+        .filter_map(|(backend, wanted)| {
+            let (_, was) = locked.iter().find(|(locked, _)| locked == backend)?;
+            (was != wanted).then(|| format!("{backend}: {was} -> {wanted}"))
+        })
+        .collect()
 }
 
 /// Locked tools nothing expects, and eagerly declared tools the lock lacks.
@@ -2462,7 +2520,23 @@ pub(crate) fn inject_rust_dependency_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{lock_drift, platform_exclusion};
+    use super::{changed_requests, lock_drift, platform_exclusion};
+
+    #[test]
+    fn changed_requests_name_only_tools_whose_request_moved() {
+        let pairs = |items: &[(&str, &str)]| {
+            items
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let locked = pairs(&[("node", "20"), ("pnpm", "9"), ("bun", "1")]);
+        // pnpm unchanged, bun undeclared (reported by lock_drift instead),
+        // zig new (likewise).
+        let declared = pairs(&[("node", "22"), ("pnpm", "9"), ("zig", "0.14")]);
+        assert_eq!(changed_requests(&locked, &declared), ["node: 20 -> 22"]);
+        assert!(changed_requests(&locked, &locked).is_empty());
+    }
 
     #[test]
     fn lock_drift_names_removed_and_newly_declared_tools() {

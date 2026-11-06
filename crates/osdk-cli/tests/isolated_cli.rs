@@ -640,12 +640,20 @@ fn alias_rejects_version_shaped_names_and_unknown_unsets() {
     assert!(!shadow.status.success());
     assert!(String::from_utf8_lossy(&shadow.stderr).contains("looks like a version"));
     let set = run_isolated(temporary.path(), &["alias", "set", "node", "work", "20"]);
-    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
     let missing = run_isolated(temporary.path(), &["alias", "unset", "node", "nosuch"]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stdout).is_empty());
     let removed = run_isolated(temporary.path(), &["alias", "unset", "node", "work"]);
-    assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
 }
 
 #[test]

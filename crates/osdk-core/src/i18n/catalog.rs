@@ -314,6 +314,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "warn.lock_requests_changed",
+        (
+            "warning: osdk.toml changed {changes} since osdk.lock was written; this install still uses the locked versions. Run `osdk lock` (or `osdk upgrade`) to re-resolve",
+            "警告：osdk.lock 写入后 osdk.toml 改动了 {changes}；本次安装仍使用 lock 中的版本。运行 `osdk lock`（或 `osdk upgrade`）重新解析",
+        ),
+    );
+    m.insert(
         "warn.lock_tools_missing",
         (
             "warning: the project declares {tools}, which osdk.lock does not pin, so this install skips them. Run `osdk lock` to add them",

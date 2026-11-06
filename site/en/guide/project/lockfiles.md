@@ -353,7 +353,9 @@ project no longer declares (drop `bun` from `osdk.toml` and it is still installe
 the lock and reported as `already installed`), or a newly declared tool the lock lacks
 (not installed this time). The comparison uses the set a fresh `osdk lock` would write,
 including runtimes osdk injects such as node for npm tools, so those are not flagged.
-The warning only names the drift; the replay is unchanged.
+A tool still declared whose version request changed (`node = "20"` edited to `"22"`)
+is named too, as `node: 20 -> 22`. The warning only names the drift; the replay is
+unchanged.
 
 After changing project requests, run one of:
 
