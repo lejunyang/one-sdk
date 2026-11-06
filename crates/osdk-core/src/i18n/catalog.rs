@@ -321,6 +321,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.registry_selected_unverified",
+        (
+            "no registry answered within the probe budget; using the first that timed out, with the package manager's own timeouts",
+            "没有 registry 在探测预算内响应；改用第一个超时的候选，由包管理器按自己的超时访问",
+        ),
+    );
+    m.insert(
         "warn.activation_missing_tools",
         (
             "osdk: {dir}: not installed: {tools}; the other tools are active. Run `osdk install` to install them",

@@ -74,6 +74,8 @@ pub struct RegistryProbe {
     pub latency_ms: Option<u64>,
     /// A bounded, credential-free diagnostic suitable for display.
     pub error: Option<String>,
+    /// The probe ran out of time rather than getting a definite failure.
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,15 +675,26 @@ where
     }
 }
 
+/// Pick the registry to use: the first healthy one in configured order, or
+/// the fastest healthy built-in one.
+///
+/// With none healthy, a candidate that only ran out of time is still used, in
+/// candidate order. The probe budget (1.5 s by default) is a ranking device,
+/// far shorter than the package manager's own timeouts; on a slow or
+/// high-latency link every probe can expire while the registries work. Refusing
+/// to run then turned "slow network" into "osdk cannot install anything".
+/// Definite failures -- an HTTP error, a refused connection, a response that is
+/// not a registry -- still leave nothing to select.
 fn select_probe(probes: &[RegistryProbe], preserve_order: bool) -> Option<&RegistryProbe> {
-    if preserve_order {
+    let healthy = if preserve_order {
         probes.iter().find(|probe| probe.ok)
     } else {
         probes
             .iter()
             .filter(|probe| probe.ok)
             .min_by_key(|probe| probe.latency_ms.unwrap_or(u64::MAX))
-    }
+    };
+    healthy.or_else(|| probes.iter().find(|probe| probe.timed_out))
 }
 
 fn explicit_registry_env<F>(manager: PackageManager, getenv: F) -> Option<&'static str>
@@ -1562,6 +1575,7 @@ async fn probe_all(candidates: &[String], timeout_ms: u64) -> Vec<RegistryProbe>
                     ok: false,
                     latency_ms: None,
                     error: Some(format!("client error: {error}")),
+                    timed_out: false,
                 })
                 .collect();
         }
@@ -1653,11 +1667,13 @@ async fn probe_one(client: &reqwest::Client, base: String, timeout: Duration) ->
             ok: true,
             latency_ms: Some(started.elapsed().as_millis() as u64),
             error: None,
+            timed_out: false,
         },
         Ok(Err(error)) => RegistryProbe {
             url: base,
             ok: false,
             latency_ms: None,
+            timed_out: error == PROBE_TIMED_OUT,
             error: Some(error),
         },
         Err(_) => RegistryProbe {
@@ -1665,13 +1681,16 @@ async fn probe_one(client: &reqwest::Client, base: String, timeout: Duration) ->
             ok: false,
             latency_ms: None,
             error: Some(format!("timed out after {} ms", timeout.as_millis())),
+            timed_out: true,
         },
     }
 }
 
+const PROBE_TIMED_OUT: &str = "request timed out";
+
 fn probe_error(error: reqwest::Error) -> String {
     if error.is_timeout() {
-        "request timed out".into()
+        PROBE_TIMED_OUT.into()
     } else if error.is_connect() {
         "connection failed".into()
     } else if error.is_body() || error.is_decode() {
@@ -1932,16 +1951,60 @@ mod tests {
                 ok: true,
                 latency_ms: Some(80),
                 error: None,
+                timed_out: false,
             },
             RegistryProbe {
                 url: "fast".into(),
                 ok: true,
                 latency_ms: Some(5),
                 error: None,
+                timed_out: false,
             },
         ];
         assert_eq!(select_probe(&probes, true).unwrap().url, "primary");
         assert_eq!(select_probe(&probes, false).unwrap().url, "fast");
+    }
+
+    /// The probe budget ranks registries; it is far shorter than the package
+    /// manager's own timeouts. On a slow link every probe can expire while the
+    /// registries work, and refusing to run then made installs impossible.
+    /// A timed-out candidate is used in order; definite failures are not.
+    #[test]
+    fn a_registry_that_only_timed_out_is_still_tried() {
+        let probe = |url: &str, timed_out: bool| RegistryProbe {
+            url: url.into(),
+            ok: false,
+            latency_ms: None,
+            error: Some(
+                if timed_out {
+                    "timed out after 1500 ms"
+                } else {
+                    "HTTP 503"
+                }
+                .into(),
+            ),
+            timed_out,
+        };
+        let probes = vec![
+            probe("refused", false),
+            probe("slow", true),
+            probe("slower", true),
+        ];
+        for preserve_order in [true, false] {
+            assert_eq!(select_probe(&probes, preserve_order).unwrap().url, "slow");
+        }
+        // A healthy registry still wins over one that timed out.
+        let mut mixed = probes.clone();
+        mixed.push(RegistryProbe {
+            url: "healthy".into(),
+            ok: true,
+            latency_ms: Some(900),
+            error: None,
+            timed_out: false,
+        });
+        assert_eq!(select_probe(&mixed, false).unwrap().url, "healthy");
+        // Only definite failures: nothing to select.
+        assert!(select_probe(&[probe("a", false), probe("b", false)], true).is_none());
     }
 
     #[test]
@@ -2483,8 +2546,10 @@ npmRegistries:
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let (first, _first_guard) = unused_loopback();
-        let (second, _second_guard) = unused_loopback();
+        let (first, _first_request, first_server) =
+            registry_server("503 Service Unavailable", "{}", Duration::ZERO);
+        let (second, _second_request, second_server) =
+            registry_server("503 Service Unavailable", "{}", Duration::ZERO);
         let candidates = vec![first, second];
         let ctx = test_ctx(temp.path(), candidates, false);
         let args = vec!["install".into()];
@@ -2500,6 +2565,33 @@ npmRegistries:
         };
         assert_eq!(probes.len(), 2);
         assert!(probes.iter().all(|probe| !probe.ok));
+        first_server.join().unwrap();
+        second_server.join().unwrap();
+    }
+
+    /// Registries that accept the connection but do not answer within the
+    /// probe budget are slow, not broken: the first is used.
+    #[tokio::test]
+    async fn candidates_that_only_time_out_are_tried_in_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (first, _first_guard) = unused_loopback();
+        let (second, _second_guard) = unused_loopback();
+        let ctx = test_ctx(temp.path(), vec![first.clone(), second], false);
+        let args = vec!["install".into()];
+        let home_value = home.display().to_string();
+        let cwd = isolated_cwd(temp.path());
+        let plan = plan(&ctx, &cwd, PackageManager::Npm, "npm", &args, |key| {
+            (key == "HOME").then(|| home_value.clone())
+        })
+        .await
+        .unwrap();
+        let RegistryPlan::Selected { url, probes } = plan else {
+            panic!("expected the first slow candidate to be selected: {plan:?}");
+        };
+        assert_eq!(url, first);
+        assert!(probes.iter().all(|probe| !probe.ok && probe.timed_out));
     }
 
     #[tokio::test]
