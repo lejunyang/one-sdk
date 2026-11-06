@@ -53,6 +53,12 @@ adapters. osdk stores the original value of every managed variable; `deactivate`
 removes the hook and restores that environment. The PowerShell hook prevents
 re-entrant command lookup.
 
+Each refresh replaces only the PATH entries osdk added itself, in the same
+position. A directory you put on PATH after activation stays where you put it:
+a Python venv activated in the shell keeps its place in front of osdk's
+Python, and an entry an IDE added for its terminal is kept. `deactivate`
+removes osdk's entries and leaves the rest of PATH as it is.
+
 ### Without a shell hook
 
 IDEs, CI steps, containers, scheduled jobs and `pwsh -NoProfile` never run the
@@ -70,9 +76,10 @@ osdk exec -- cargo build           # without --tool, run under that environment
 ```
 
 - **dotenv / json** spell out the complete PATH, since whoever reads a file
-  cannot say "prepend to the existing PATH". It is built on the PATH from before
-  any activation, so exporting from an activated shell does not write another
-  directory's tools into the file. dotenv values are unquoted: `docker --env-file`
+  cannot say "prepend to the existing PATH". It is built on the current PATH minus
+  the entries an activation added, so exporting from an activated shell does not
+  write another directory's tools into the file, and directories added since
+  (a venv, say) are kept. dotenv values are unquoted: `docker --env-file`
   keeps quotes as part of the value, while most dotenv parsers strip them. A
   multi-line value cannot be written as dotenv and is refused with a pointer to
   json.

@@ -88,11 +88,78 @@ pub fn original_env(key: &str) -> Option<OsString> {
     std::env::var_os(key)
 }
 
+/// `PATH` without the entries an activation prepended.
+///
+/// The current `PATH` is the base, not a copy captured at activation: a venv
+/// activated afterwards, or a directory an IDE or build tool prepended for its
+/// child, is part of the environment this process was given. Only the entries
+/// osdk recorded in `OSDK_ADDED_PATH` are taken out. Sessions activated by an
+/// older osdk still carry `OSDK_ORIGINAL_PATH` and keep that meaning.
 pub fn ambient_path() -> OsString {
     if std::env::var_os("OSDK_ORIGINAL_PATH_SET").is_some() {
-        std::env::var_os("OSDK_ORIGINAL_PATH").unwrap_or_default()
+        return std::env::var_os("OSDK_ORIGINAL_PATH").unwrap_or_default();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    match std::env::var_os("OSDK_ADDED_PATH") {
+        Some(added) => without_added_entries(&path, &added),
+        None => path,
+    }
+}
+
+fn without_added_entries(path: &std::ffi::OsStr, added: &std::ffi::OsStr) -> OsString {
+    let added: Vec<String> = added_path_entries(&added.to_string_lossy())
+        .into_iter()
+        .map(|entry| comparable_path_entry(&entry))
+        .collect();
+    let kept: Vec<PathBuf> = std::env::split_paths(path)
+        .filter(|entry| {
+            let entry = comparable_path_entry(&entry.to_string_lossy());
+            entry.is_empty() || !added.contains(&entry)
+        })
+        .collect();
+    std::env::join_paths(kept).unwrap_or_else(|_| path.to_owned())
+}
+
+/// Split `OSDK_ADDED_PATH` as whichever shell wrote it.
+///
+/// PowerShell and native shells write the platform separator. A POSIX shell
+/// on Windows (Git Bash) writes `/c/dir:/d/dir`, which reaches a native
+/// process unconverted, so that spelling is recognised and mapped back.
+fn added_path_entries(value: &str) -> Vec<String> {
+    if cfg!(windows) && !value.contains(';') && value.starts_with('/') {
+        return value
+            .split(':')
+            .filter(|entry| !entry.is_empty())
+            .map(posix_to_windows_path)
+            .collect();
+    }
+    std::env::split_paths(value)
+        .map(|entry| entry.to_string_lossy().into_owned())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+fn posix_to_windows_path(entry: &str) -> String {
+    let bytes = entry.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && (bytes.len() == 2 || bytes[2] == b'/')
+    {
+        let drive = (bytes[1] as char).to_ascii_uppercase();
+        let rest = entry[2..].replace('/', "\\");
+        return format!("{drive}:{}", if rest.is_empty() { "\\" } else { &rest });
+    }
+    entry.to_string()
+}
+
+fn comparable_path_entry(entry: &str) -> String {
+    let trimmed = entry.trim_end_matches(['/', '\\']);
+    let trimmed = if trimmed.is_empty() { entry } else { trimmed };
+    if cfg!(windows) {
+        trimmed.replace('/', "\\").to_lowercase()
     } else {
-        std::env::var_os("PATH").unwrap_or_default()
+        trimmed.to_string()
     }
 }
 
@@ -716,6 +783,43 @@ fn resolve_inner(ctx: &Ctx, backend: &dyn Backend, cwd: &Path, probes: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::observed_version;
+
+    /// The ambient PATH is today's PATH minus what osdk added -- not a copy
+    /// captured at activation, which silently dropped a venv or an IDE's
+    /// entries that appeared afterwards. The user's own entries survive even
+    /// when they sit in front of osdk's.
+    #[test]
+    fn ambient_path_removes_only_entries_osdk_added() {
+        use std::path::PathBuf;
+        let (user, added, base) = if cfg!(windows) {
+            (r"C:\venv\Scripts", r"C:\osdk\node\bin", r"C:\Windows")
+        } else {
+            ("/venv/bin", "/osdk/node/bin", "/usr/bin")
+        };
+        let path = std::env::join_paths([user, added, base]).unwrap();
+        let recorded = std::env::join_paths([added]).unwrap();
+        let kept: Vec<PathBuf> =
+            std::env::split_paths(&super::without_added_entries(&path, &recorded)).collect();
+        assert_eq!(kept, vec![PathBuf::from(user), PathBuf::from(base)]);
+        // Nothing recorded, nothing removed.
+        let untouched = super::without_added_entries(&path, std::ffi::OsStr::new(""));
+        assert_eq!(std::env::split_paths(&untouched).count(), 3);
+    }
+
+    /// Git Bash records `OSDK_ADDED_PATH` in its own `/c/dir:/d/dir` spelling;
+    /// a native process must still recognise those entries in its `C:\` PATH.
+    #[cfg(windows)]
+    #[test]
+    fn ambient_path_understands_git_bash_spelling_of_added_entries() {
+        let path =
+            std::ffi::OsString::from(r"C:\venv\Scripts;C:\OSDK\Node\bin;D:\tools;C:\Windows");
+        let recorded = std::ffi::OsStr::new("/c/osdk/node/bin:/d/tools");
+        let kept = super::without_added_entries(&path, recorded);
+        assert_eq!(
+            kept,
+            std::ffi::OsString::from(r"C:\venv\Scripts;C:\Windows")
+        );
+    }
 
     #[test]
     fn native_banners_preserve_identity_and_reject_unsupported_formats() {

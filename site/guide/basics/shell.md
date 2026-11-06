@@ -46,6 +46,10 @@ hook 在 prompt/目录变化时重新计算环境。PATH 顺序为：
 它还导出 backend 环境、下游缓存和已启用的模型 adapter。osdk 保存所有被管理变量
 的原值；`deactivate` 移除 hook 并恢复环境。PowerShell hook 带重入保护。
 
+每次刷新只替换 osdk 自己加进 PATH 的条目，并放回原来的位置。激活之后你自己加的
+目录会留在原处：在 shell 里激活的 Python venv 仍排在 osdk 的 Python 前面，IDE 给
+终端加的条目也会保留。`deactivate` 只移除 osdk 的条目，PATH 的其余部分保持不变。
+
 ### 没有 shell 钩子时
 
 IDE、CI 步骤、容器、计划任务和 `pwsh -NoProfile` 都不会运行钩子。shim 在持久 PATH
@@ -61,8 +65,8 @@ osdk exec -- cargo build           # 不带 --tool，在这个环境里运行
 ```
 
 - **dotenv / json** 写出完整的 PATH，因为读文件的一方没法表达「在原 PATH 前追加」。
-  PATH 以激活之前的那份为基础，所以在已激活的 shell 里导出，也不会把别的目录的工具
-  写进文件。dotenv 的值不加引号：`docker --env-file` 会把引号当成值的一部分，而大多
+  PATH 以当前 PATH 去掉激活加入的条目为基础，所以在已激活的 shell 里导出，也不会把
+  别的目录的工具写进文件，之后加入的目录（例如 venv）则会保留。dotenv 的值不加引号：`docker --env-file` 会把引号当成值的一部分，而大多
   数 dotenv 解析器会去掉它。含换行的值写不进 dotenv，会报错并提示改用 json。
 - **shell 格式**只做在原 PATH 前追加的 `export`，没有钩子的 `OSDK_ORIG_*` /
   `OSDK_MANAGED_ENV` 簿记，适合在未激活的 shell 或 CI 脚本里执行一次，

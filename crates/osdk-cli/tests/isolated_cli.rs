@@ -612,6 +612,38 @@ fn env_file_formats_build_path_on_the_pre_activation_path() {
     assert!(!path.contains(&stale), "{path:?}");
 }
 
+/// The same, for a session activated by the current hook: it records only the
+/// entries it added, so a directory prepended afterwards (a venv, an IDE's
+/// tool dir) is part of the base and stays in the file.
+#[test]
+fn env_file_formats_keep_entries_added_after_activation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let later = temporary.path().join("venv-bin");
+    let added = temporary.path().join("other-project-bin");
+    let original = temporary.path().join("original-bin");
+    let path = std::env::join_paths([&later, &added, &original]).unwrap();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["env", "--format", "json"],
+        &[
+            ("PATH", &path.to_string_lossy()),
+            ("OSDK_ADDED_PATH", &added.display().to_string()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let vars: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&output.stdout).unwrap();
+    let path: Vec<PathBuf> = std::env::split_paths(&vars["PATH"]).collect();
+    assert!(path.contains(&later), "{path:?}");
+    assert!(path.contains(&original), "{path:?}");
+    assert!(!path.contains(&added), "{path:?}");
+}
+
 /// A shell the test can ask to print one variable, found on the host.
 fn print_variable_command(name: &str) -> (String, Vec<String>, Vec<(&'static str, String)>) {
     #[cfg(windows)]
@@ -3034,7 +3066,7 @@ fn deactivate_emits_shell_restoration_code() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("unset -f _osdk_hook"));
-    assert!(stdout.contains("OSDK_ORIGINAL_PATH"));
+    assert!(stdout.contains("OSDK_ADDED_PATH"));
 }
 
 #[test]
