@@ -998,8 +998,47 @@ fn shell_quote(shell: Shell, s: &str) -> String {
     }
 }
 
+/// A PowerShell expression for `value`, written in ASCII only.
+///
+/// PowerShell decodes a native command's stdout with `[Console]::OutputEncoding`
+/// -- GBK by default on Chinese Windows -- while osdk writes UTF-8. So a
+/// non-ASCII path in `osdk activate pwsh` or `hook-env` output (an install
+/// under `C:\Users\张三`) reached `Invoke-Expression` as mojibake: the hook's
+/// `& '<osdk.exe>'` was "not recognized", PATH entries pointed nowhere, and
+/// activation silently did nothing. Non-ASCII characters are spelled as
+/// `[char]0x....` instead, which survives any console encoding and works in
+/// Windows PowerShell 5.1 and PowerShell 7 alike.
 fn powershell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    if value.is_ascii() {
+        return format!("'{}'", value.replace('\'', "''"));
+    }
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    for character in value.chars() {
+        if character.is_ascii() {
+            if character == '\'' {
+                literal.push('\'');
+            }
+            literal.push(character);
+            continue;
+        }
+        if !literal.is_empty() {
+            parts.push(format!("'{literal}'"));
+            literal.clear();
+        }
+        let code = u32::from(character);
+        parts.push(if code <= 0xFFFF {
+            format!("[char]0x{code:04X}")
+        } else {
+            format!("[char]::ConvertFromUtf32(0x{code:X})")
+        });
+    }
+    if !literal.is_empty() {
+        parts.push(format!("'{literal}'"));
+    }
+    // A leading `[char]` would make `+` add code points as numbers; starting
+    // from an empty string keeps every `+` a concatenation.
+    format!("(''+{})", parts.join("+"))
 }
 
 /// Strip a leading `<word>-` distribution prefix (java's temurin-17).
@@ -1058,6 +1097,38 @@ mod tests {
             client: reqwest::Client::new(),
             show_progress: false,
         }
+    }
+
+    #[test]
+    fn powershell_literals_are_ascii_whatever_the_value() {
+        assert_eq!(powershell_quote(r"C:\it's"), r"'C:\it''s'");
+        let quoted = powershell_quote(r"C:\Users\张三's 😀");
+        assert!(quoted.is_ascii(), "{quoted}");
+        assert_eq!(
+            quoted,
+            r"(''+'C:\Users\'+[char]0x5F20+[char]0x4E09+'''s '+[char]::ConvertFromUtf32(0x1F600))"
+        );
+    }
+
+    /// The form above only helps if PowerShell reads it back as the value.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_literals_round_trip_through_pwsh() {
+        let value = r"C:\Users\张三's dir\😀";
+        let script = format!(
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write({})",
+            powershell_quote(value)
+        );
+        let output = std::process::Command::new("pwsh")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("pwsh is required on Windows test machines");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), value);
     }
 
     #[test]
@@ -1167,7 +1238,11 @@ mod tests {
 
         let powershell =
             activation_script(Shell::Powershell, r"C:\Program Files\中文 osdk\osdk.exe");
-        assert!(powershell.contains(r"& 'C:\Program Files\中文 osdk\osdk.exe' hook-env"));
+        // ASCII-only, so it survives a non-UTF-8 console decoding it.
+        assert!(powershell.contains(
+            r"& (''+'C:\Program Files\'+[char]0x4E2D+[char]0x6587+' osdk\osdk.exe') hook-env"
+        ));
+        assert!(powershell.is_ascii());
         assert!(powershell.contains("$script:OsdkHookRunning"));
         assert!(powershell.contains("finally"));
         assert!(
