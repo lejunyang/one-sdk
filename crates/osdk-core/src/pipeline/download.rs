@@ -514,13 +514,13 @@ mod tests {
             return;
         }
         use std::fs::File;
-        use std::os::fd::FromRawFd;
+        use std::os::fd::{AsRawFd, FromRawFd};
         use std::process::{Command, Stdio};
         for case in ["probe", "known", "resumed", "unknown"] {
             let temporary = tempfile::tempdir().unwrap();
             let mut master = -1;
             let mut slave = -1;
-            let size = libc::winsize {
+            let mut size = libc::winsize {
                 ws_row: 40,
                 ws_col: 160,
                 ws_xpixel: 0,
@@ -532,8 +532,10 @@ mod tests {
                         &mut master,
                         &mut slave,
                         std::ptr::null_mut(),
-                        std::ptr::null(),
-                        &size,
+                        // macOS requires mutable pointers; these also coerce to
+                        // the const pointers accepted by Linux.
+                        std::ptr::null_mut(),
+                        &raw mut size,
                     )
                 },
                 0,
@@ -542,12 +544,15 @@ mod tests {
             );
             let mut terminal = unsafe { File::from_raw_fd(master) };
             let slave = unsafe { File::from_raw_fd(slave) };
+            // Darwin discards unread PTY output when the last slave closes.
+            // Keep our slave alive until capture has drained, then use
+            // nonblocking reads so an empty capture does not wait for EOF.
             let stdout = temporary.path().join("stdout");
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "pipeline::download::tests::download_bar_never_draws_before_joining_the_shared_area", "--nocapture"])
                 .env_clear().env("TERM", "xterm").env(CASE, case)
                 .env("HOME", temporary.path()).current_dir(temporary.path())
-                .stdout(File::create(&stdout).unwrap()).stderr(Stdio::from(slave))
+                .stdout(File::create(&stdout).unwrap()).stderr(Stdio::from(slave.try_clone().unwrap()))
                 .spawn().unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             let status = loop {
@@ -561,16 +566,33 @@ mod tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             };
+            let flags = unsafe { libc::fcntl(terminal.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0, "{}", std::io::Error::last_os_error());
+            assert_eq!(
+                unsafe {
+                    libc::fcntl(
+                        terminal.as_raw_fd(),
+                        libc::F_SETFL,
+                        flags | libc::O_NONBLOCK,
+                    )
+                },
+                0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
             let mut captured = Vec::new();
             let mut chunk = [0; 1024];
             loop {
                 match terminal.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(size) => captured.extend_from_slice(&chunk[..size]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
                     Err(error) => panic!("terminal capture failed: {error}"),
                 }
             }
+            drop(slave);
             let output = String::from_utf8_lossy(&captured);
             let harness = std::fs::read_to_string(stdout).unwrap();
             assert!(
