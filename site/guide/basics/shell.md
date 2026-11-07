@@ -72,8 +72,9 @@ osdk exec -- cargo build           # 不带 --tool，在这个环境里运行
   `OSDK_MANAGED_ENV` 簿记，适合在未激活的 shell 或 CI 脚本里执行一次，
   例如 `eval "$(osdk env --format bash)"`。不要放进 rc 文件代替 `activate`：它不会
   随目录切换。
-- **`osdk exec -- <命令>`** 不带 `--tool` 时什么都不安装，选中但未安装的工具会报错
-  （激活的 shell 只会提示并激活其余工具），请先 `osdk install`。从已激活的 shell 调用时，外层激活设置
+- **`osdk exec -- <命令>`** 不带 `--tool` 时什么都不安装；选中但未安装的工具与激活的
+  shell 一样只在 stderr 提示并被跳过，其余工具照常可用。命令确实需要它时先
+  `osdk install`，或用 `--tool` 声明。从已激活的 shell 调用时，外层激活设置
   而当前目录不设置的变量，会恢复成激活前的值。带 `--tool` 时行为不变。
 
 导出的是**当前目录**的环境，项目选择随目录不同而不同；IDE 打开别的项目时需要重新

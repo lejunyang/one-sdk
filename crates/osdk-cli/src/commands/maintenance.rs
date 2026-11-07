@@ -336,22 +336,49 @@ pub fn hook_env(app: &App, shell: String) -> Result<()> {
     Ok(())
 }
 
-/// The environment an activated shell has in `cwd`.
+/// The environment an activated shell has in `cwd`, warning on stderr about
+/// pinned tools that are not installed.
 ///
 /// One function for every consumer -- the prompt hook, tasks, `osdk env` and a
 /// tool-less `osdk exec` -- so a process started without a shell hook sees
 /// exactly what an activated shell would, and none of them can quietly drop a
-/// layer the others keep.
+/// layer the others keep. That includes how a missing pin is treated: an
+/// activated shell activates everything else and says what is missing, so
+/// these do too. Failing instead meant one declared-but-unused tool (an
+/// Android-only SDK on a CI job that never builds Android) stopped every
+/// command before it ran, while the same command typed into an activated
+/// shell worked. A consumer that knows which tools it needs -- a task's
+/// `tools` -- enforces those itself; see [`task_environment`].
 pub(crate) fn project_environment(
     app: &App,
     cwd: &std::path::Path,
 ) -> Result<osdk_core::activate::EnvDelta> {
-    let delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, cwd)?;
-    Ok(with_shared_layers(app, delta))
+    let (delta, missing) = project_environment_allowing_missing(app, cwd)?;
+    warn_missing_tools(cwd, &missing);
+    Ok(delta)
 }
 
-/// [`project_environment`] for the prompt hook: pinned tools that are not
-/// installed are reported instead of failing the whole directory.
+fn warn_missing_tools(cwd: &std::path::Path, missing: &[osdk_core::activate::MissingTool]) {
+    if missing.is_empty() {
+        return;
+    }
+    let tools = missing
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "{}",
+        t!(
+            "warn.activation_missing_tools",
+            dir = cwd.display(),
+            tools = tools
+        )
+    );
+}
+
+/// The environment with the pinned tools that are not installed reported
+/// rather than warned about, for callers that decide what a missing one means.
 fn project_environment_allowing_missing(
     app: &App,
     cwd: &std::path::Path,
@@ -442,14 +469,41 @@ fn render_dotenv(vars: &std::collections::BTreeMap<String, String>) -> Result<St
 /// hide any tool that `ShimSettings` excluded from shim generation. Injecting
 /// the environment here gets both halves: the task sees what it declared, and no
 /// stale outer activation can shadow it.
+///
+/// Missing tools split in two. The ones the plan's tasks declare in `tools` were
+/// just installed by `ensure_task_tools`, so one still missing here means the
+/// task would run against whatever else is on PATH: that is an error. Any other
+/// pinned tool is the activated shell's case -- warned about, not required.
 pub(crate) fn task_environment(
     app: &App,
     cwd: &std::path::Path,
+    required: &[ToolRequest],
 ) -> Result<osdk_core::tasks::runner::TaskEnv> {
-    let delta = project_environment(app, cwd)?;
+    let (delta, missing) = project_environment_allowing_missing(app, cwd)?;
+    if let Some(required) = first_required_missing(&missing, required) {
+        return Err(anyhow!(t!(
+            "err.no_installed_match",
+            tool = required.tool,
+            spec = required.spec
+        )));
+    }
+    warn_missing_tools(cwd, &missing);
     Ok(osdk_core::tasks::runner::TaskEnv {
         path_prepend: delta.path_prepend,
         set_vars: delta.set_vars,
+    })
+}
+
+/// The first missing tool a task declared in `tools`, which unlike any other
+/// missing pin is an error.
+fn first_required_missing<'a>(
+    missing: &'a [osdk_core::activate::MissingTool],
+    required: &[ToolRequest],
+) -> Option<&'a osdk_core::activate::MissingTool> {
+    missing.iter().find(|missing| {
+        required
+            .iter()
+            .any(|request| request.backend == missing.tool)
     })
 }
 
@@ -597,10 +651,11 @@ pub async fn run_task(
         return Ok(None);
     }
 
+    let required = tool_requests.clone();
     ensure_task_tools(app, tool_requests).await?;
 
     let cwd = std::env::current_dir()?;
-    let env = task_environment(app, &cwd)?;
+    let env = task_environment(app, &cwd, &required)?;
     // The PATH an activated shell would have here: its own entries go on top
     // of the inherited PATH minus whatever an outer activation added, as for
     // `osdk exec` and `osdk env`.
@@ -1766,4 +1821,35 @@ pub(crate) fn doctor_verify(app: &App, only: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use osdk_core::activate::MissingTool;
+
+    #[test]
+    fn only_a_tool_the_task_declares_is_required() {
+        let missing = |tool: &str| MissingTool {
+            tool: tool.into(),
+            spec: "1".into(),
+        };
+        let request = |backend: &str| ToolRequest {
+            backend: backend.into(),
+            spec: VersionSpec::parse("1"),
+            options: Default::default(),
+        };
+        let absent = [missing("conda:lz4-c"), missing("java")];
+
+        assert_eq!(first_required_missing(&absent, &[request("node")]), None);
+        assert_eq!(first_required_missing(&absent, &[]), None);
+        assert_eq!(
+            first_required_missing(&absent, &[request("node"), request("java")]),
+            Some(&absent[1])
+        );
+        assert_eq!(
+            first_required_missing(&absent, &[request("conda:lz4-c")]),
+            Some(&absent[0])
+        );
+    }
 }

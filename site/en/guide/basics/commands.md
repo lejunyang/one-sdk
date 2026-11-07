@@ -75,8 +75,12 @@ activation does not silently use a same-named command from the system PATH: the
 prompt hook activates the other installed tools and prints, once above the prompt,
 `osdk: <dir>: not installed: node@20; the other tools are active. Run `osdk install`
 to install them` (once per directory and set of missing tools). `osdk env`, `osdk
-exec` without `--tool`, and tasks still fail, since they run unattended and must not
-get an environment with a tool missing.
+exec` without `--tool`, and tasks see that same environment: a missing tool is
+named once on stderr and left out, and everything else is available, so a tool
+that is declared but not needed this time (an Android SDK on a CI job that does
+not build Android) does not fail the command before it runs. Declare what a
+command does need: `osdk exec --tool`, or a task's `tools` list, whose tools are
+installed on demand and fail the task if they are still missing.
 
 ## Inspect local and remote versions
 

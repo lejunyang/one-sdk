@@ -334,9 +334,11 @@ fn is_lazy_declaration(ctx: &Ctx, backend_id: &str) -> bool {
 /// dynamic-tool inventory aborts activation instead of producing a partial
 /// environment that could route around the configured tool.
 ///
-/// A pinned tool that is not installed is an error here: `osdk env`, `exec`
-/// and tasks run unattended, and must not quietly fall back to whatever else
-/// is on PATH. The prompt hook uses [`compute_env_delta_allowing_missing`].
+/// A pinned tool that is not installed is an error here, for callers that need
+/// every pin present. The CLI's consumers (the prompt hook, `osdk env`, a
+/// tool-less `exec`, tasks) use [`compute_env_delta_allowing_missing`] and warn,
+/// so they all see what an activated shell sees; a task additionally requires
+/// the tools it declares.
 pub fn compute_env_delta(
     ctx: &Ctx,
     registry: &Registry,

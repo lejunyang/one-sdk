@@ -512,8 +512,9 @@ pub async fn exec_cmd(
 ///
 /// This is the entry point for callers that have no shell hook -- an IDE task,
 /// a CI step, a scheduled job. Nothing is installed: a selected tool that is
-/// missing fails the way it does in an activated shell, instead of starting a
-/// download the caller never asked for.
+/// missing is left out with a warning, the way an activated shell treats it,
+/// instead of starting a download the caller never asked for. `--tool` is how
+/// a caller says a tool is required.
 fn exec_in_project_environment(app: &App, command: &[String]) -> Result<std::process::ExitStatus> {
     let (program, args) = command
         .split_first()
