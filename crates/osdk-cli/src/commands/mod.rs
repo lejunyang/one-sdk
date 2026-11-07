@@ -29,6 +29,7 @@ mod runtimes;
 mod shims;
 mod system_exec;
 mod uninstall;
+mod upgrade;
 mod use_cmd;
 
 pub(crate) use install::*;
@@ -38,6 +39,7 @@ pub(crate) use registry::*;
 pub(crate) use runtimes::*;
 pub(crate) use shims::*;
 pub(crate) use uninstall::*;
+pub(crate) use upgrade::*;
 pub(crate) use use_cmd::*;
 
 #[cfg(test)]
@@ -1667,6 +1669,46 @@ tools = ["node"]
             std::fs::read(locator.install_root().join(&manifest.bins[0].path)).unwrap(),
             b"new release fixture"
         );
+    }
+
+    #[tokio::test]
+    async fn global_upgrade_resolves_an_alias_and_preserves_its_config() {
+        let (_temporary, mut app, request) = github_update_fixture().await;
+        let mut entry = request
+            .options
+            .iter()
+            .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+            .collect::<toml::map::Map<_, _>>();
+        entry.insert(
+            "version".into(),
+            toml::Value::String(format!("{}@latest", request.backend)),
+        );
+        entry.insert("lazy".into(), toml::Value::Boolean(true));
+        let config = toml::to_string(&toml::Value::Table(toml::map::Map::from_iter([(
+            "tools".into(),
+            toml::Value::Table(toml::map::Map::from_iter([
+                ("desktop".into(), toml::Value::Table(entry)),
+                ("node".into(), toml::Value::String("1.0.0".into())),
+            ])),
+        )])))
+        .unwrap();
+        std::fs::write(app.ctx.dirs.user_config_file(), &config).unwrap();
+        app.ctx.config =
+            osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file()).unwrap();
+        app.ctx.config.settings.offline = true;
+        app.global_only = true;
+        upgrade_global(&mut app, vec!["desktop".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(app.ctx.dirs.user_config_file()).unwrap(),
+            config
+        );
+        let lock = crate::lockfile::load(&app.ctx.dirs.user_lock_file()).unwrap();
+        let tools = &lock.platforms[&app.ctx.platform.to_string()].tools;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[&request.backend].version, "2.0.0");
+        assert_eq!(tools[&request.backend].request, "latest");
     }
 
     #[tokio::test]

@@ -57,6 +57,7 @@ fn localize_subcommands(cmd: Command) -> Command {
     .mut_subcommand("outdated", |c| c.about(h("help.outdated.about")))
     .mut_subcommand("upgrade", |c| {
         c.about(h("help.upgrade.about"))
+            .mut_arg("global", |a| a.help(h("help.upgrade.flag.global")))
             .mut_arg("tools", |a| a.help(h("help.install.arg.tools")))
             .mut_arg("opts", |a| a.help(h("help.opt")))
     })

@@ -72,6 +72,19 @@ therefore writes no lock.
 
 The lock records a resolution and artifact identity, not a claim that existing bytes are trusted. Reinstallation reruns any available or policy-required checksum/attestation checks. If the lock has no digest/evidence and `require_checksums=false`, installation may still proceed without cryptographic integrity verification. Supplying tools or `-o` bypasses the lockfile read fast path; the latter still records new results after a successful bare project install.
 
+## User-global upgrade scope
+
+`upgrade -g` excludes project configuration before App initialization and carries
+the user-only context through global npm reloads. Requests come directly from user
+tool declarations rather than the current directory's active resolver. Managed
+Node/Rust/Go dependencies are supplied from global declarations as well, keeping
+project version files out of injection. Ordinary tools share update resolution
+and upsert the user lock with global scope. npm/pnpm retains its controlled global
+transaction without rewriting selection metadata. Version and option changes
+belong to `use -g`, so global upgrade rejects selector overrides and `-o`.
+Batch upgrades can partially succeed: a later failure does not roll back tools
+and locks that were already published successfully.
+
 ## Verifiable invariants
 
 - Precedence, ancestor walking, structured files, and invalid package-manager values are covered by the [`resolver` unit tests](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs).

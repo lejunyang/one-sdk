@@ -61,6 +61,15 @@ CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolv
 
 锁定的是解析结果和 artifact 身份，不是“已经可信”的声明。重新安装会重新执行当前可用或策略要求的 checksum/attestation 验证；若锁记录没有 digest/evidence 且 `require_checksums=false`，pipeline 仍可能在没有加密完整性验证的情况下安装。若显式传工具或 `-o`，不会使用 lockfile 读取快路径；后者在裸项目安装成功后仍会写入新结果。
 
+## 用户全局升级作用域
+
+`upgrade -g` 在初始化 App 前排除项目配置，并将 user-only 上下文传递给全局 npm 的
+重新加载路径。请求直接从用户工具声明构造，不使用当前目录的 active resolver；受管
+Node/Rust/Go 依赖也显式取全局声明，避免项目版本文件参与注入。普通工具共用更新解析
+策略，按 global scope upsert 用户 lock；npm/pnpm 走原有受控全局事务，但不重写选择
+元数据。命令保留用户约束与选项，拒绝全局模式的版本覆盖和 `-o`，由 `use -g` 负责修改。
+批量升级可部分成功：先成功发布的工具和 lock 不会因后续工具失败而整体回滚。
+
 ## 可验证的不变量
 
 - 解析优先级、父目录继承、结构化文件和非法 package-manager 值由 [`resolver` 单元测试](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs) 覆盖。

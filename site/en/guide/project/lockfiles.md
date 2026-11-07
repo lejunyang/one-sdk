@@ -15,6 +15,7 @@ osdk lock [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk upgrade -g|--global [TOOL ...]
 osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
 osdk model use NAME REFERENCE [OPTIONS]
 osdk model import NAME PATH [OPTIONS]
@@ -30,6 +31,7 @@ osdk model sync [NAME]
 | `use --global TOOL...` | No | Never writes the project lock; global npm/Go tools maintain the user lock according to their own semantics |
 | `lock` | Loads the old file only to preserve other platforms and models | Yes; rebuilds the target platform's tool map (only tools the project itself declares -- see below) |
 | `outdated` | No; re-resolves configuration or explicit requests | No |
+| `upgrade -g [TOOL...]` | No project lock read | Updates the user lock, preserving global constraints and unrelated entries |
 | `upgrade` | No; re-resolves configuration or explicit requests | Yes; rebuilds the host platform's tool map (project tools only, likewise) |
 | `exec` | No | No |
 | `model use` | No | Writes project intent; does not write the lock itself |

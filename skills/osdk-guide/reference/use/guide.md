@@ -27,6 +27,9 @@ catalog 的权威性不变。更新全局 GitHub 工具：
 osdk use -g github:lejunyang/ai-auto-desktop@latest
 ```
 
+维护已有全局选择用 `osdk upgrade -g [TOOL...]`：只接受工具名，遵守原版本约束和选项，
+更新用户 lock，忽略当前项目。改变约束或 backend 选项仍用 `use -g`。
+
 项目级选择写入最近的 `osdk.toml [tools]`，并把实际安装的精确工具及受管 runtime 依赖
 写入同目录的当前平台 `osdk.lock`。配置与 lock 作为一个元数据事务发布：lock 更新失败时
 恢复原配置。已有结构化工具若被 `when` 排除在当前平台之外，`use TOOL@VERSION` 只更新其

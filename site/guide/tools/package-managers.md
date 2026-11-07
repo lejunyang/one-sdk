@@ -18,6 +18,7 @@ osdk 把 npm、pnpm 和 Yarn 当作可独立锁定的 backend，也直接管理 
 osdk install MANAGER[@VERSION]... [-o|--opt KEY=VALUE ...]
 osdk lock [MANAGER[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk upgrade [MANAGER[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk upgrade -g|--global [MANAGER ...]
 osdk use|u MANAGER[@VERSION] [-g|--global] [-o|--opt KEY=VALUE ...]
 osdk exec (-t|--tool MANAGER[@VERSION])... -- COMMAND [ARG ...]
 osdk list|ls [MANAGER]

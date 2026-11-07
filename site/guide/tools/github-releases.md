@@ -19,6 +19,10 @@ osdk use -g github:lejunyang/ai-auto-desktop@latest
 它先解析当前来源的最新稳定 Release，再安装或复用该精确版本。默认不会选择 draft
 或预发布；预发布由 `--prerelease` 策略控制。配置了静态 catalog 时仍以 catalog 为准。
 
+已经通过 `use -g` 选择的工具，也可运行
+`osdk upgrade -g github:lejunyang/ai-auto-desktop`，或用 `osdk upgrade -g` 升级全部
+全局选择。它遵守原约束、保留工具选项，只更新用户 lock；修改约束仍用 `use -g`。
+
 ## Asset 选择选项
 
 所有选项通过可重复的 `-o|--opt KEY=VALUE` 传入：

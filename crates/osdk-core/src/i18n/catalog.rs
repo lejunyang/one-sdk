@@ -2458,8 +2458,15 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.upgrade.about",
         (
-            "Install current remote resolutions and update osdk.lock",
-            "安装当前远端解析结果并更新 osdk.lock",
+            "Upgrade configured tools and update the project or user lock",
+            "升级配置中的工具并更新项目或用户 lock",
+        ),
+    );
+    m.insert(
+        "help.upgrade.flag.global",
+        (
+            "Upgrade user-global selections and their lock, ignoring the project; pass tool names, and use `use -g TOOL@VERSION` to change constraints",
+            "按用户全局约束升级并更新用户 lock，忽略项目；传工具名，修改约束请用 `use -g TOOL@VERSION`",
         ),
     );
     m.insert(

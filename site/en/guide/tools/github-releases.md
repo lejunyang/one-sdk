@@ -20,6 +20,11 @@ This resolves the newest stable release from the current source before installin
 or reusing that exact version. Drafts are excluded, and prereleases follow
 `--prerelease`. A configured static catalog remains authoritative.
 
+For tools already selected with `use -g`, run
+`osdk upgrade -g github:lejunyang/ai-auto-desktop`, or `osdk upgrade -g` for all
+global selections. It follows existing constraints, preserves tool options, and
+updates the user lock. Use `use -g` to change constraints.
+
 ## Asset selection options
 
 Pass every option through repeatable `-o|--opt KEY=VALUE`:

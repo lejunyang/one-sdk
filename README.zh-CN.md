@@ -153,6 +153,16 @@ osdk exec -- ./gradlew build       # 不带 --tool：使用当前目录自己的
 osdk use -g github:lejunyang/ai-auto-desktop@latest
 ```
 
+按已有全局约束升级指定工具或全部全局工具：
+
+```bash
+osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g                     # 全部全局选择
+```
+
+全局升级更新用户 lock，保留全局版本约束和选项，并忽略当前项目；修改约束继续用
+`use -g TOOL@VERSION`。
+
 显式版本选择器会先解析当前符合约束的版本，再判断是否需要安装；目标精确版本已安装时
 直接复用。裸 `use` 可以复用本地版本；`install --force` 用于重装或修复指定版本。
 
