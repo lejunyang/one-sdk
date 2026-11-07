@@ -20,7 +20,8 @@ osdk use npm:prettier@3 -o installer=pnpm
 
 显式 `TOOL@latest`、前缀或范围先解析当前来源中的匹配版本，再检查该精确目标是否已
 安装；已安装则复用并提示已是最新，不把本地最高版本当成远端最新。裸 `TOOL` 可以
-复用本地匹配版本。离线仅使用缓存或本地 catalog，不能确认远端最新；固定 GitHub
+复用本地匹配版本。动态工具的精确版本及 `=...` 逐字 pin 保留本地直接复用。
+浮动请求离线仅使用缓存或本地 catalog，不能确认远端最新；固定 GitHub
 catalog 的权威性不变。更新全局 GitHub 工具：
 
 ```bash

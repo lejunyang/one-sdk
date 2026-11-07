@@ -1720,14 +1720,16 @@ tools = ["node"]
             .iter()
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
-        use_cmd(
-            &mut app,
-            format!("{}@1.0.0", request.backend),
-            true,
-            opts.clone(),
-        )
-        .await
-        .unwrap();
+        for selector in ["1.0.0", "=1.0.0"] {
+            use_cmd(
+                &mut app,
+                format!("{}@{selector}", request.backend),
+                true,
+                opts.clone(),
+            )
+            .await
+            .unwrap();
+        }
         let before = std::fs::read(app.ctx.dirs.user_config_file()).unwrap();
         let error = use_cmd(&mut app, format!("{}@latest", request.backend), true, opts)
             .await

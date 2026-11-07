@@ -53,7 +53,7 @@ Installation distinguishes local reuse from update resolution. Ordinary executio
 bare `use`, and lock replay retain the dynamic inventory fast path. An explicitly
 selected `use` or `upgrade` resolves floating requests through the backend first;
 the highest installed version must not substitute for remote resolution. Exact
-requests can still reuse local installations directly. After resolution, the exact
+requests and verbatim `=...` pins can still reuse local installations directly. After resolution, the exact
 version and full dynamic identity are matched again, so checking for updates does
 not force another download or installation. Runtime, scope, public options, and
 artifact identity must still match. `--force` skips reuse, while offline resolution

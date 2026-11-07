@@ -180,7 +180,7 @@ osdk upgrade -g                     # all global selections
 Global upgrades update the user lock and preserve the global constraints and options.
 They ignore the current project. Use `use -g TOOL@VERSION` to change a constraint.
 
-An explicit selector resolves the current matching release before reusing an installation.
+An explicit floating selector resolves the current matching release before reusing an installation.
 If that exact target is already installed, osdk keeps it. A bare `use` can reuse a local
 version; `install --force` is for reinstalling or repairing a version.
 

@@ -1646,7 +1646,11 @@ async fn install_one_with_resolution(
     // fail with no network, for a tool that is already installed.
     if !force
         && !app.refresh_sources
-        && (!resolve_remote || matches!(effective.spec, VersionSpec::Exact(_)))
+        && (!resolve_remote
+            || matches!(
+                effective.spec,
+                VersionSpec::Exact(_) | VersionSpec::Pinned(_)
+            ))
     {
         if let Some(installed) = installed_dynamic_match(app, backend.as_ref(), &effective) {
             backend.ensure_post_install(&app.ctx, &installed)?;
