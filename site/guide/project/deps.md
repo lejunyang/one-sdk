@@ -321,6 +321,25 @@ default = "https://registry.example.com/"
 通过 `env` 设 `NPM_CONFIG_REGISTRY` 之类的变量达到同样效果时，同样需要批准——
 否则一个写法要批准、另一个绕过去，等于没有门禁。
 
+写了自定义 `run` 的 provider 同样按这里选源。例如只为一个应用装依赖，并且要压过
+本机 `.npmrc` 里的镜像：
+
+```toml
+[settings.precedence]
+npm = "osdk"
+
+[registries.npm]
+default = "https://registry.example/"
+
+[deps.pnpm]
+run = "pnpm install --frozen-lockfile --filter app"
+```
+
+osdk 按这条命令自己的程序名和参数判定，给 pnpm 注入选中的源。命令里写了
+`--registry`，或在 `[deps.pnpm].env` 里显式给了 `npm_config_registry` 之类的
+源变量时，以你写的为准，osdk 不覆盖；程序不是包管理器的 `run`（脚本、`make`
+等）不受影响。`osdk deps --dry-run --explain` 的 `sources:` 一行说明这次的结论。
+
 ## 完整配置
 
 ```toml
@@ -398,7 +417,7 @@ pnpm 上还多抓到一种 npm 收据抓不到的：**改动后文件长度不�
 未声明 `sources`、或声明后一个文件都没匹配上，一律不算「新鲜」——
 一个匹配不到任何文件的判据恒为真，那会把「什么都没检查」伪装成「没有变化」。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧包源字段已移除，迁移方式见下文。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本；调用包管理器的覆盖命令仍按 `registries` 选源（见[换 registry](#换-registry)）。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧包源字段已移除，迁移方式见下文。
 
 ### 按项目声明依赖
 
@@ -451,13 +470,14 @@ proxy = "https://proxy.golang.org,direct"
 ```
 
 - 本次命令行源参数和进程中显式源变量优先；`deps.env` 是本次子进程环境。`packages` 只决定 osdk 显式配置和原生文件之间的顺序，不对认证排序。
+- 自定义 `deps.<provider>.run` 同样经过这组适配器：按这条命令的程序名（`npm`、`pnpm`、`yarn`、`bun`、`deno`、`uv`、`go mod` 等）和它自己的参数判定，规则与内置命令相同——显式源参数（如 `--registry`）、改变目录或原生配置的参数（如 `--dir`、`--config`）、`deps.env` 或进程环境里显式的源变量都直通、不注入；程序不是包管理器的命令（脚本、`make` 等）不注入任何源变量。
 - `packages = "native"` 保留原生源、scope、认证、代理和 TLS 配置链；`"osdk"` 仅覆盖声明的默认源/附加索引，scope 与认证保持原生。缺少覆盖时委托原生配置；自动镜像不得覆盖显式原生配置。uv 的复杂原生表采用保守整组保留，不尝试重写命名索引或包绑定。
 - npm、pnpm、Yarn Classic、Yarn Berry、Bun 使用各自变量：`npm_config_registry`、`npm_config_registry` + `pnpm_config_registry`（pnpm 10/11）、`YARN_REGISTRY`、`YARN_NPM_REGISTRY_SERVER`、`BUN_CONFIG_REGISTRY`。Yarn major 必须已知；不会把 Node 版本当作 Yarn major。pnpm 工作区配置委托 pnpm 解析。
 - Python 两种 deps provider 都运行 uv。`default` 是最低优先级默认索引；`indexes` 是按声明顺序排列的显式附加索引，保留 `first-index`，不是请求失败后的镜像 fallback。命名索引、包绑定和认证插值继续放在原生配置。
 - `urls` 仍是只用于默认源的匿名镜像候选；全部不可用时在启动包管理器前失败，不在安装失败后重跑生命周期脚本。离线不探测，原生安装由其离线参数约束。
 - `default = ""` 清除继承的 osdk 默认覆盖并关闭该项自动镜像；`indexes = []` 清除 osdk 附加索引。两者不删除原生配置。`urls = []` 保留原来的内置候选含义。
 - 用户层到项目层的 `registries` 整段替换；显式 `extends` 按字段合并、数组替换。`[deps.<provider>.registries]` 使用相同 schema，作为该 provider 的整段局部替换。Cargo、Deno 和自定义 deps 不接受此局部字段；使用原生配置和 `env`。Go 保留 GOPROXY 的逗号/竖线语义，不统一成 URL 重试列表。
-- `osdk current` 显示工具选择来源及策略；`osdk deps --dry-run --explain` 显示包源决策、发现的原生候选文件和工具选择。原生链最终赢家由包管理器解析，不能确定的来源不会被声称已解析。原生文件、源相关环境及配置参与不透明 freshness 哈希；凭据不写入显示命令或 osdk.lock。自定义命令的参数和环境在显示中整体隐藏；原生子进程自己的输出由原生工具负责脱敏。
+- `osdk current` 显示工具选择来源及策略；`osdk deps --dry-run --explain` 显示包源决策（自定义 `run` 也输出 `sources:` 结论）、发现的原生候选文件和工具选择。原生链最终赢家由包管理器解析，不能确定的来源不会被声称已解析。原生文件、源相关环境及配置参与不透明 freshness 哈希；凭据不写入显示命令或 osdk.lock。自定义命令的参数和环境在显示中整体隐藏；原生子进程自己的输出由原生工具负责脱敏。
 
 ### 迁移
 

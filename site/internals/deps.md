@@ -180,6 +180,27 @@ required / optional-once-seen 的混合。
 直接把名字交给操作系统按 PATH 查找——而子进程拿到的 PATH 是「先解析出的工具，再继承
 的那份」，所以 `depends` 装好的东西能被找到。
 
+## 自定义 `run` 也走包源适配器
+
+包源适配器 `package_sources::apply` 按**程序名和这条命令自己的参数**判定，与 exec、
+shim 用的是同一个入口。它不需要知道计划是内置的还是自定义的，所以 deps 也不该替它
+区分。早先两处调用都包在 `config.run.is_none()` 里，后果是：为了加一个 `--filter`
+而写的 `[deps.pnpm] run = "pnpm install --filter app"`，会静默丢掉 `[registries.npm]`
+和 `[settings.precedence] npm = "osdk"`。`osdk registry test pnpm` 显示选中了配置的
+源，`osdk deps` 实际启动的 pnpm 却仍读本机 `.npmrc` 里的镜像；没有任何报错，只表现
+为镜像缺版本时的一次安装失败。
+
+去掉这个条件后，判定规则没有任何变化，例外全部来自适配器原有的规则：
+
+- 显式源参数、改变目录或原生配置的参数直通；
+- `deps.env` 本来就进入计划的 `env`，与进程环境一起构成「显式源变量」，命中即直通；
+- 程序不是适配器认识的包管理器时返回 `native command; no package-source adapter`，
+  环境原样不动——`run = "make deps"` 的行为与以前完全一致。
+
+freshness 不需要另开分支。规划阶段注入的源写进计划的 `env`，而 `freshness_command`
+哈希的就是整个计划；执行后、记录前把 `env` 恢复成规划时那份，判定与记录用的是同一份
+材料，所以自定义 `run` 跑完能变成 fresh，源一变又会变 stale。
+
 ## depends 决定顺序，环是错误
 
 `order_by_depends` 做拓扑排序。环报错而不是随便挑一个顺序：挑了就会让某一步在它的

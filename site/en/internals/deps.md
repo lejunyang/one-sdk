@@ -215,6 +215,37 @@ of its own, so there are no install directories to search. The name goes to the 
 for a PATH lookup, and the PATH the child receives is "resolved tools first, then
 the inherited one", so whatever `depends` installed is found.
 
+## A custom `run` goes through the package-source adapter too
+
+The package-source adapter, `package_sources::apply`, decides from **the program
+and that command's own arguments**; exec and the shims call the same entry point.
+It has no need to know whether a plan is built-in or custom, so deps should not
+make that distinction for it. Both call sites used to sit inside
+`config.run.is_none()`, and the consequence was that
+`[deps.pnpm] run = "pnpm install --filter app"`, written only to add a `--filter`,
+silently lost `[registries.npm]` and `[settings.precedence] npm = "osdk"`.
+`osdk registry test pnpm` showed the configured registry as selected, while the
+pnpm that `osdk deps` actually started still read the mirror from the machine's
+`.npmrc`. Nothing reported an error; it surfaced only as an install failure when
+that mirror was missing a version.
+
+Removing the condition changes no rule. Every exception comes from the adapter's
+existing rules:
+
+- registry arguments, and arguments selecting another directory or native
+  configuration, pass through;
+- `deps.env` was already part of the plan's `env`, so together with the process
+  environment it forms the "explicit source variables", and a hit passes through;
+- a program the adapter does not recognise as a package manager returns
+  `native command; no package-source adapter` with the environment untouched, so
+  `run = "make deps"` behaves exactly as before.
+
+Freshness needs no special case. The registry injected while planning is written
+into the plan's `env`, and `freshness_command` hashes the whole plan. After the
+run and before recording, `env` is restored to the planning-time copy, so the
+decision and the record use the same material: a custom `run` becomes fresh after
+it succeeds, and stale again when the selection changes.
+
 ## depends decides order, and a cycle is an error
 
 `order_by_depends` topologically sorts. A cycle is refused rather than resolved
