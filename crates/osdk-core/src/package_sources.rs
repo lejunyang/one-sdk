@@ -7,6 +7,22 @@ use crate::package_registry::{self, RegistryPlan};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// The name the adapters key on: a program's file name without a Windows
+/// launcher suffix, whichever separator the command was written with.
+///
+/// `apply` and the freshness inventory ([`native_files`], [`invocation_files`])
+/// must agree on it. A custom deps `run` may spell its program `uv.exe` or with
+/// a path; adapting that as uv while hashing npm's native files left an edited
+/// `uv.toml` looking fresh.
+fn adapter_program(program: &str) -> &str {
+    program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+}
+
 /// Resolve package sources for exec, shim and deps with the same native adapters.
 /// Returned text is evidence only, never execution material.
 pub async fn apply(
@@ -32,12 +48,7 @@ async fn apply_with_environment(
     env: &mut BTreeMap<String, String>,
     ambient: &impl Fn(&str) -> Option<String>,
 ) -> Result<String> {
-    let program = program
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(program)
-        .trim_end_matches(".exe")
-        .trim_end_matches(".cmd");
+    let program = adapter_program(program);
     if let Some(manager) = package_registry::manager_for_command(program, yarn_version) {
         let result = package_registry::plan(ctx, cwd, manager, program, args, |key| {
             env.get(key).cloned().or_else(|| ambient(key))
@@ -486,6 +497,7 @@ pub fn native_files(
     program: &str,
     getenv: &impl Fn(&str) -> Option<String>,
 ) -> Vec<std::path::PathBuf> {
+    let program = adapter_program(program);
     let names: &[&str] = match program {
         "uv" => &["uv.toml", "pyproject.toml"],
         "cargo" => &[".cargo/config", ".cargo/config.toml"],
@@ -600,6 +612,7 @@ pub fn native_files(
 /// Explicit invocation files supplement the broad fingerprint inventory. This
 /// does not assign precedence or parse their contents for execution.
 pub fn invocation_files(cwd: &Path, program: &str, args: &[String]) -> Vec<std::path::PathBuf> {
+    let program = adapter_program(program);
     let mut paths = Vec::new();
     let args = &args[..args
         .iter()
@@ -1081,6 +1094,41 @@ mod tests {
             first,
             fingerprint(temp.path(), "npm", "TOKEN=first-secret", &[]).unwrap()
         );
+    }
+    /// A custom `run` may spell its program with a path or a Windows launcher
+    /// suffix, and `apply` adapts `uv.exe sync` as uv. Freshness must then hash
+    /// uv's native files, not npm's, or an edited `uv.toml` leaves a run that
+    /// just injected a uv index looking fresh. Both separators are checked on
+    /// every platform: a `run` line is committed and read anywhere.
+    #[test]
+    fn fingerprint_inventory_uses_the_program_name_the_adapter_uses() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("uv.toml");
+        for program in ["uv", "uv.exe", "/opt/tools/uv", r"C:\tools\uv.exe"] {
+            let _ = std::fs::remove_file(&config);
+            let before = fingerprint(temp.path(), program, "sync", &[]).unwrap();
+            std::fs::write(&config, "index-url = \"https://index.example/simple\"\n").unwrap();
+            assert_ne!(
+                before,
+                fingerprint(temp.path(), program, "sync", &[]).unwrap(),
+                "{program}"
+            );
+        }
+        let args: Vec<String> = ["pip", "install", "-r", "requirements.txt"]
+            .map(String::from)
+            .to_vec();
+        let uv = invocation_files(temp.path(), "uv", &args);
+        assert!(
+            uv.iter().any(|path| path.ends_with("requirements.txt")),
+            "{uv:?}"
+        );
+        for program in ["uv.exe", "/opt/tools/uv", r"C:\tools\uv.exe"] {
+            assert_eq!(
+                invocation_files(temp.path(), program, &args),
+                uv,
+                "{program}"
+            );
+        }
     }
     #[test]
     fn managed_config_creation_and_changes_invalidate_freshness() {

@@ -257,6 +257,13 @@ contradicting the `selected` line above it. Planning only injects from a `defaul
 which needs no probe, so deciding again from the declared environment yields the
 same value.
 
+The adapter and the freshness inventory (`native_files`, `invocation_files`) must
+pick native files by the same program name, so they share `adapter_program`: the
+file name (either `/` or `\` as separator) without `.exe` / `.cmd`. Built-in plans
+already use bare names, so the difference only showed on a custom `run`:
+`run = "uv.exe sync"` was adapted as uv and got its index injected, while freshness
+hashed npm's native files, so an edited `uv.toml` still looked fresh.
+
 ## depends decides order, and a cycle is an error
 
 `order_by_depends` topologically sorts. A cycle is refused rather than resolved

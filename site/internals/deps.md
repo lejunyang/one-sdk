@@ -209,6 +209,12 @@ freshness 不需要另开分支。规划阶段注入的源写进计划的 `env`�
 `selected` 自相矛盾。规划注入只来自不需要探测的 `default`，所以从声明环境重新判定
 得到同一个值。
 
+适配器与 freshness 清单（`native_files`、`invocation_files`）必须按同一个程序名挑选
+原生文件，二者共用 `adapter_program`：取文件名（`/`、`\` 两种分隔符都认）、去掉
+`.exe` / `.cmd`。内置计划的程序名本来就是裸名，差异只出现在自定义 `run` 上——
+`run = "uv.exe sync"` 曾被当作 uv 注入索引，freshness 却哈希 npm 的原生文件，改了
+`uv.toml` 也仍显示 fresh。
+
 ## depends 决定顺序，环是错误
 
 `order_by_depends` 做拓扑排序。环报错而不是随便挑一个顺序：挑了就会让某一步在它的
