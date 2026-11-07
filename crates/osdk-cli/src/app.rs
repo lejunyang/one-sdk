@@ -75,6 +75,8 @@ pub struct App {
     pub source_override: Option<String>,
     pub refresh_sources: bool,
     config_overrides: GlobalOverrides,
+    /// Preserve a user-only context when native global installers reload config.
+    pub global_only: bool,
     /// Memoized dynamic-tool inventory scan for this process.
     ///
     /// Walking the installs tree is the most expensive read osdk makes, and the
@@ -202,6 +204,7 @@ impl App {
             source_override,
             refresh_sources,
             config_overrides: GlobalOverrides::default(),
+            global_only: false,
             dynamic_scan: std::cell::RefCell::new(None),
             shim_owners: std::cell::RefCell::new(None),
         }
@@ -416,6 +419,7 @@ impl App {
         };
 
         let app = App {
+            global_only: matches!(access, ProjectAccess::Excluded),
             config_overrides: overrides.clone(),
             ctx,
             registry,

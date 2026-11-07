@@ -3493,6 +3493,110 @@ fn version_alias_cycles_and_reserved_names_are_rejected() {
 }
 
 #[test]
+fn global_upgrade_ignores_project_and_preserves_global_constraints() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // Even invalid/untrusted project config must have no effect on a global upgrade.
+    std::fs::write(project.join("osdk.toml"), "[tools invalid project").unwrap();
+    std::fs::write(project.join(".node-version"), "999.0.0").unwrap();
+    std::fs::write(project.join("osdk.lock"), "project lock stays untouched").unwrap();
+    let user_config = temp.path().join("config/config.toml");
+    std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    let excluded_os = if cfg!(windows) { "linux" } else { "windows" };
+    let config = format!("[tools]\nnode = {{ version = \"1.0.0\", lazy = true }}\ngo = \"1.0.0\"\n\"github:excluded/tool\" = {{ version = \"latest\", when = {{ os = \"{excluded_os}\" }} }}\n");
+    std::fs::write(&user_config, &config).unwrap();
+    for tool in ["node", "go"] {
+        let root = temp.path().join("installs").join(tool).join("1.0.0");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+    }
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "upgrade", "-g"]);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&user_config).unwrap(), config);
+    assert_eq!(
+        std::fs::read_to_string(project.join("osdk.lock")).unwrap(),
+        "project lock stays untouched"
+    );
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(temp.path().join("config/osdk.lock")).unwrap())
+            .unwrap();
+    let tools = lock["platforms"][platform_key()]["tools"]
+        .as_table()
+        .unwrap();
+    assert_eq!(tools.len(), 2);
+    for tool in ["node", "go"] {
+        assert_eq!(tools[tool]["version"].as_str(), Some("1.0.0"));
+    }
+    std::fs::remove_file(temp.path().join("installs/go/1.0.0/.osdk-complete")).unwrap();
+    let subset = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "upgrade", "-g", "node"],
+    );
+    assert!(
+        subset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&subset.stderr)
+    );
+    assert!(!temp
+        .path()
+        .join("installs/go/1.0.0/.osdk-complete")
+        .exists());
+    let after: toml::Value =
+        toml::from_str(&std::fs::read_to_string(temp.path().join("config/osdk.lock")).unwrap())
+            .unwrap();
+    assert_eq!(
+        after["platforms"][platform_key()]["tools"]["go"],
+        tools["go"]
+    );
+}
+
+#[test]
+fn global_upgrade_help_and_option_conflicts_are_explicit() {
+    let temp = tempfile::tempdir().unwrap();
+    for (lang, expected) in [("en", "user-global"), ("zh", "全局约束")] {
+        let output = run_isolated(temp.path(), &["--lang", lang, "upgrade", "--help"]);
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            help.contains("--global") && help.contains(expected),
+            "{help}"
+        );
+    }
+    let output = run_isolated(temp.path(), &["upgrade", "-g", "node", "-o", "foo=bar"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn global_upgrade_requires_a_global_selection_and_keeps_constraints_explicit() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[tools]\nnode = \"20\"\n").unwrap();
+    for (operand, expected) in [
+        ("go", "not selected globally"),
+        ("node@latest", "osdk use -g"),
+    ] {
+        let output = run_isolated(temp.path(), &["--offline", "upgrade", "-g", operand]);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(!temp.path().join("config/osdk.lock").exists());
+    assert!(!temp.path().join("osdk.lock").exists());
+}
+
+#[test]
 fn upgrade_updates_lock_for_an_already_installed_exact_version() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

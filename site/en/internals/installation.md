@@ -82,6 +82,15 @@ alone does not block public packages; private/scoped policy still fails closed. 
 
 An artifact-cache hit during an actual pipeline run or reinstall still runs the applicable checksum or attestation verification; mere cache-file existence is not trusted. Offline reinstall can reuse a persisted checksum, but it never falls back to the network when the artifact cache is absent. Ordinary `osdk install` reuses an already complete installation before entering the pipeline and does not revalidate its receipt, checksum, or installed bytes.
 
+Download bars start with a hidden draw target while their style, label, and resume
+position are configured, then join the shared `MultiProgress`. These setters can
+draw immediately: starting on the default stderr target leaves a zero-progress
+line outside the shared area, followed by another line for the actual transfer.
+Only the shared area may draw, for known sizes, unknown sizes, and resumed
+transfers alike. Regression tests capture a real stderr pseudo-terminal as well
+as the shared area, with a standalone bar as a positive control so orphan output
+cannot escape observation.
+
 ## Failure semantics and caveats
 
 - Each source candidate must complete download, checksum/attestation,

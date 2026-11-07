@@ -193,8 +193,8 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
         .build()?;
     rt.block_on(async move {
         // Three cases, distinguished by what the command can do.
-        // `excludes_project_config` is about trust management, which must not
-        // read the project at all. Otherwise the command's scopes decide:
+        // Trust management and global upgrades must not read the project at all.
+        // `excludes_project_config` keeps them outside project discovery. Otherwise the command's scopes decide:
         // none means it acts on nothing (read-only), so the project is loaded
         // without the gate; the gate is enforced only for the scopes the
         // command actually reaches.
@@ -247,6 +247,7 @@ fn excludes_project_config(command: &Command) -> bool {
         command,
         Command::Trust { .. }
             | Command::Untrust { .. }
+            | Command::Upgrade { global: true, .. }
             | Command::Config {
                 command: crate::cli::ConfigCommand::Set { .. }
                     | crate::cli::ConfigCommand::Unset { .. }
@@ -355,7 +356,17 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         } => commands::install(app, tools, opts, force, include_lazy).await,
         Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
         Command::Outdated { tools } => commands::outdated(app, tools).await,
-        Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
+        Command::Upgrade {
+            tools,
+            opts,
+            global,
+        } => {
+            if global {
+                commands::upgrade_global(app, tools).await
+            } else {
+                commands::upgrade(app, tools, opts).await
+            }
+        }
         Command::Exec { tools, command, .. } => {
             return commands::exec_cmd(app, tools, command).await;
         }

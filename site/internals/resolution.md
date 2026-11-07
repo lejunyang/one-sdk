@@ -43,6 +43,14 @@ CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolv
 
 部分 backend 覆盖默认算法。例如 Node 处理目标架构与 npm range，Python 处理实现、变体、catalog 和预发布策略，Java 处理发行版及 JDK/JRE，Rust 则把 channel 或版本交给隔离的 rustup。Cargo Registry 工具获取配对的 metadata/index source 数据，排除 yanked release，再解析精确/latest/数字前缀 selector；Cargo Git selector 则按原文保留。Go command 工具通过已排序 Go proxy 解析精确/latest/数字前缀/伪版本，并绑定发现的 module root。入口分别见 [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs)、[`python.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/python.rs)、[`java.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/java.rs)、[`rust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/rust.rs)、[`cargo_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/cargo_package.rs) 与 [`go_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/go_package.rs)。
 
+## 安装复用与更新解析
+
+安装路径显式区分本地复用和更新解析。普通执行、裸 `use` 与锁重放保留动态 inventory
+快路径；显式带选择器的 `use` 和 `upgrade` 对浮动请求先调用 backend resolver，不能让
+本地最高版本替代远端解析。精确请求和 `=...` 逐字 pin 仍可直接复用。解析后按精确版本和完整动态身份
+再次匹配本地安装，因此查询更新不等于重新下载或重装。同版本的 runtime、scope、公开
+选项与 artifact 身份仍必须匹配；`--force` 则跳过复用。离线解析不提供远端新鲜度保证。
+
 ## Lockfile 快路径与边界
 
 无显式工具且无额外选项的 `osdk install` 会优先读取最近的 `osdk.lock`。[`locked_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs) 按当前平台恢复已保存版本字符串、公开 options 和锁定 artifact 信息；没有当前平台区段时才回退到常规项目解析。大多数 backend 保存精确版本；Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 则仍是 channel 名，后续 rustup 安装可能得到更新 toolchain。锁文件按平台保存独立结果，允许同一项目并存 Linux、macOS 和 Windows 解析。
@@ -52,6 +60,15 @@ CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolv
 写入失败时回滚 `[tools]` 编辑。显式 `install TOOL...` 不改变项目声明，因此也不写 lock。
 
 锁定的是解析结果和 artifact 身份，不是“已经可信”的声明。重新安装会重新执行当前可用或策略要求的 checksum/attestation 验证；若锁记录没有 digest/evidence 且 `require_checksums=false`，pipeline 仍可能在没有加密完整性验证的情况下安装。若显式传工具或 `-o`，不会使用 lockfile 读取快路径；后者在裸项目安装成功后仍会写入新结果。
+
+## 用户全局升级作用域
+
+`upgrade -g` 在初始化 App 前排除项目配置，并将 user-only 上下文传递给全局 npm 的
+重新加载路径。请求直接从用户工具声明构造，不使用当前目录的 active resolver；受管
+Node/Rust/Go 依赖也显式取全局声明，避免项目版本文件参与注入。普通工具共用更新解析
+策略，按 global scope upsert 用户 lock；npm/pnpm 走原有受控全局事务，但不重写选择
+元数据。命令保留用户约束与选项，拒绝全局模式的版本覆盖和 `-o`，由 `use -g` 负责修改。
+批量升级可部分成功：先成功发布的工具和 lock 不会因后续工具失败而整体回滚。
 
 ## 可验证的不变量
 

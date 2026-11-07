@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use once_cell::sync::Lazy;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use serde::{Deserialize, Serialize};
@@ -74,9 +74,11 @@ fn new_download_bar(
     label: &str,
     position: u64,
 ) -> ProgressBar {
+    // Setting the message or position can draw immediately. Keep construction
+    // hidden so a standalone zero-progress line cannot escape the shared area.
     let pb = match total {
         Some(total) => {
-            let pb = ProgressBar::new(total);
+            let pb = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::hidden());
             pb.set_style(
                 ProgressStyle::with_template(
                     "{msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})",
@@ -87,7 +89,7 @@ fn new_download_bar(
             pb
         }
         None => {
-            let pb = ProgressBar::new_spinner();
+            let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
             pb.set_style(
                 ProgressStyle::with_template("{spinner} {msg} {bytes} ({bytes_per_sec})")
                     .unwrap_or_else(|_| ProgressStyle::default_spinner()),
@@ -479,6 +481,134 @@ mod tests {
         for step in 1..=5u64 {
             for bar in bars {
                 bar.set_position(step * 10);
+            }
+        }
+    }
+
+    /// Capture the real stderr terminal too: the shared fake terminal cannot
+    /// see an orphan line drawn by a standalone bar before `multi.add`.
+    #[cfg(unix)]
+    #[test]
+    fn download_bar_never_draws_before_joining_the_shared_area() {
+        const CASE: &str = "OSDK_TEST_DOWNLOAD_BAR_CASE";
+        if let Ok(case) = std::env::var(CASE) {
+            if case == "probe" {
+                let bar = ProgressBar::new(100);
+                bar.set_message("standalone-probe");
+                bar.finish_and_clear();
+            } else {
+                let hidden =
+                    MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+                let (total, position) = match case.as_str() {
+                    "known" => (Some(100), 0),
+                    "resumed" => (Some(100), 40),
+                    "unknown" => (None, 0),
+                    _ => panic!("unknown fixture case"),
+                };
+                let bar = new_download_bar(&hidden, total, "managed-fixture", position);
+                assert_eq!(bar.length(), total);
+                assert_eq!(bar.position(), position);
+                bar.set_position(50);
+                bar.finish_and_clear();
+            }
+            return;
+        }
+        use std::fs::File;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::process::{Command, Stdio};
+        for case in ["probe", "known", "resumed", "unknown"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let mut master = -1;
+            let mut slave = -1;
+            let mut size = libc::winsize {
+                ws_row: 40,
+                ws_col: 160,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        // macOS requires mutable pointers; these also coerce to
+                        // the const pointers accepted by Linux.
+                        std::ptr::null_mut(),
+                        &raw mut size,
+                    )
+                },
+                0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            let mut terminal = unsafe { File::from_raw_fd(master) };
+            let slave = unsafe { File::from_raw_fd(slave) };
+            // Darwin discards unread PTY output when the last slave closes.
+            // Keep our slave alive until capture has drained, then use
+            // nonblocking reads so an empty capture does not wait for EOF.
+            let stdout = temporary.path().join("stdout");
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pipeline::download::tests::download_bar_never_draws_before_joining_the_shared_area", "--nocapture"])
+                .env_clear().env("TERM", "xterm").env(CASE, case)
+                .env("HOME", temporary.path()).current_dir(temporary.path())
+                .stdout(File::create(&stdout).unwrap()).stderr(Stdio::from(slave.try_clone().unwrap()))
+                .spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("terminal fixture timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            let flags = unsafe { libc::fcntl(terminal.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0, "{}", std::io::Error::last_os_error());
+            assert_eq!(
+                unsafe {
+                    libc::fcntl(
+                        terminal.as_raw_fd(),
+                        libc::F_SETFL,
+                        flags | libc::O_NONBLOCK,
+                    )
+                },
+                0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            let mut captured = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                match terminal.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(size) => captured.extend_from_slice(&chunk[..size]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                    Err(error) => panic!("terminal capture failed: {error}"),
+                }
+            }
+            drop(slave);
+            let output = String::from_utf8_lossy(&captured);
+            let harness = std::fs::read_to_string(stdout).unwrap();
+            assert!(
+                status.success() && harness.contains("1 passed"),
+                "{harness}\n{output}"
+            );
+            if case == "probe" {
+                assert!(
+                    output.contains("0/100"),
+                    "capture must detect standalone output: {output:?}"
+                );
+            } else {
+                assert!(
+                    captured.is_empty(),
+                    "{case} bar drew outside the shared area: {output:?}"
+                );
             }
         }
     }

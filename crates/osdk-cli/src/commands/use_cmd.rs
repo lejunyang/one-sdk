@@ -186,7 +186,11 @@ pub(crate) async fn use_legacy_cmd(
     if let Some(runtime) = runtime_override {
         install_input.push(runtime);
     }
-    let installed = install_requests(app, install_input, Vec::new(), false, false).await?;
+    let installed = if requested_spec.is_some() {
+        install_requests_fresh(app, install_input, Vec::new()).await?
+    } else {
+        install_requests(app, install_input, Vec::new(), false, false).await?
+    };
     let tv = installed
         .iter()
         .find_map(|(request, version)| (request.backend == req.backend).then_some(version.clone()))
