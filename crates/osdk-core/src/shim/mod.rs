@@ -850,6 +850,29 @@ pub fn selected_dynamic_install_identity(
     })
 }
 
+/// Whether a dynamic tool version has nothing at all on disk.
+///
+/// The line between "not installed" and "installed but broken": only an empty
+/// or absent `installs/<tool>/<version>` (and, for npm, its global twin) counts
+/// as absent. Anything inside -- an incomplete root, a second install with
+/// other options, a root whose evidence fails validation -- is state osdk
+/// wrote and can no longer vouch for, so it keeps failing loudly through
+/// [`validated_dynamic_install`] rather than being skipped with a warning.
+/// A directory that cannot be read is likewise not proof of absence.
+pub(crate) fn dynamic_install_absent(ctx: &Ctx, request: &ToolRequest, version: &str) -> bool {
+    let mut roots = vec![ctx.dirs.install_path(&request.backend, version)];
+    if let Some(package) = request.backend.strip_prefix("npm:") {
+        roots.push(
+            ctx.dirs
+                .install_path(&format!("npm-global:{package}"), version),
+        );
+    }
+    roots.iter().all(|root| match std::fs::read_dir(root) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    })
+}
+
 fn selected_dynamic_install_from_report(
     ctx: &Ctx,
     report: &ScanReport,
