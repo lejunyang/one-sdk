@@ -334,9 +334,11 @@ fn is_lazy_declaration(ctx: &Ctx, backend_id: &str) -> bool {
 /// dynamic-tool inventory aborts activation instead of producing a partial
 /// environment that could route around the configured tool.
 ///
-/// A pinned tool that is not installed is an error here: `osdk env`, `exec`
-/// and tasks run unattended, and must not quietly fall back to whatever else
-/// is on PATH. The prompt hook uses [`compute_env_delta_allowing_missing`].
+/// A pinned tool that is not installed is an error here, for callers that need
+/// every pin present. The CLI's consumers (the prompt hook, `osdk env`, a
+/// tool-less `exec`, tasks) use [`compute_env_delta_allowing_missing`] and warn,
+/// so they all see what an activated shell sees; a task additionally requires
+/// the tools it declares.
 pub fn compute_env_delta(
     ctx: &Ctx,
     registry: &Registry,
@@ -475,8 +477,17 @@ pub fn compute_env_delta_allowing_missing(
         // Exact configured dynamic requests are validated at their requested
         // root even when a backend omits legacy/missing inventories from its
         // installed list. This turns stale complete roots into explicit errors.
+        // A version with nothing on disk at all is not stale, just absent: it
+        // is missing like an uninstalled static pin, instead of an error that
+        // takes every other tool in the directory down with it.
         let version = match (&dynamic_request, &parsed) {
-            (Some(_), VersionSpec::Exact(version)) => Some(version.clone()),
+            (Some(request), VersionSpec::Exact(version)) => {
+                if crate::shim::dynamic_install_absent(ctx, request, version) {
+                    None
+                } else {
+                    Some(version.clone())
+                }
+            }
             _ => {
                 let installed = if dynamic_request.is_some() {
                     backend.list_installed(ctx)?
@@ -2292,6 +2303,62 @@ mod tests {
             Ok(_) => panic!("invalid dynamic install unexpectedly produced an activation delta"),
             Err(error) => error.to_string(),
         }
+    }
+
+    /// Regression: an exact dynamic pin (`"conda:lz4-c" = "1.9.4"`) skipped the
+    /// installed listing and went straight to install validation, whose
+    /// "no complete install" error failed the whole directory even in the
+    /// prompt hook's lenient mode. Nothing on disk is "not installed", the
+    /// same as an uninstalled static pin.
+    #[test]
+    fn an_uninstalled_exact_dynamic_tool_is_missing_not_an_error() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let ctx = test_ctx(temporary.path(), &[("conda:lz4-c", "1.9.4")]);
+
+        let (_, missing) = compute_env_delta_allowing_missing(&ctx, &Registry::new(), &project)
+            .expect("an absent dynamic tool must not fail lenient activation");
+        assert_eq!(
+            missing,
+            vec![MissingTool {
+                tool: "conda:lz4-c".into(),
+                spec: "1.9.4".into(),
+            }]
+        );
+
+        // Strict activation still refuses, with the ordinary "not installed"
+        // message rather than one that asks to repair an install.
+        let message = match compute_env_delta(&ctx, &Registry::new(), &project) {
+            Ok(_) => panic!("strict activation must refuse a missing pin"),
+            Err(error) => error.localized(),
+        };
+        assert!(message.contains("conda:lz4-c"), "{message}");
+        assert!(!message.contains("reinstall"), "{message}");
+    }
+
+    /// Only "nothing on disk" is missing: a half-written install that osdk
+    /// left behind is state it can no longer vouch for, and still fails
+    /// activation loudly instead of being skipped with a warning.
+    #[test]
+    fn a_partial_exact_dynamic_install_still_fails_lenient_activation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let ctx = test_ctx(temporary.path(), &[("conda:lz4-c", "1.9.4")]);
+        std::fs::create_dir_all(
+            ctx.dirs
+                .install_path("conda:lz4-c", "1.9.4")
+                .join("partial"),
+        )
+        .unwrap();
+
+        let error = match compute_env_delta_allowing_missing(&ctx, &Registry::new(), &project) {
+            Ok((_, missing)) => panic!("a partial install was skipped as missing: {missing:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("conda:lz4-c@1.9.4"), "{error}");
+        assert!(error.contains("reinstall"), "{error}");
     }
 
     #[test]

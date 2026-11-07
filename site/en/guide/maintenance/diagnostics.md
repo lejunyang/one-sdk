@@ -66,10 +66,17 @@ osdk doctor --verify
     osdk install --force node@20.11.1
 ```
 
-It reports four kinds of drift: contents changed, missing, file type changed
-(a file replaced by a link, or the reverse), and a link that now points
-somewhere else. Installs made before the manifest existed are reported as
-unverifiable rather than silently passing.
+It reports five kinds of drift: contents changed, missing, file type changed
+(a file replaced by a link, or the reverse), a link that now points somewhere
+else, and a zip symlink that was extracted as a plain file (`symlink extracted
+as a plain file`). The last one is an extraction bug in osdk 0.0.9 and earlier:
+on Linux the Android NDK's `clang` became a text file reading `clang-21`. The
+manifest recorded that broken file, so only the original archive in the
+download cache can reveal it; when the archive has been cleaned up there is
+nothing to compare with and nothing is reported. `osdk install` runs the same
+check before calling a version already installed, and reinstalls such an
+install with a notice, without `--force`. Installs made before the manifest
+existed are reported as unverifiable rather than silently passing.
 
 This reads every file, so it is opt-in. Plain `osdk doctor` stays a fast
 environment check, and nothing on the execution path hashes anything — running a

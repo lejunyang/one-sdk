@@ -719,7 +719,7 @@ fn task_path_drops_entries_an_outer_activation_added() {
 /// One pinned tool that is not installed (a fresh clone, a `.nvmrc` moved by a
 /// pull) used to leave the whole directory unactivated. The hook now activates
 /// the rest and names the missing tool -- once, not above every prompt -- while
-/// `osdk env`, which scripts consume unattended, still refuses.
+/// `osdk env` hands out the same environment and names it the same way.
 #[test]
 fn hook_activates_installed_tools_and_names_a_missing_one_once() {
     let temporary = tempfile::tempdir().unwrap();
@@ -765,9 +765,72 @@ fn hook_activates_installed_tools_and_names_a_missing_one_once() {
     assert!(String::from_utf8_lossy(&again.stdout).contains("1.22.5"));
 
     let env = run_isolated_in(temporary.path(), &project, &["env"]);
+    let stderr = String::from_utf8_lossy(&env.stderr);
+    assert!(env.status.success(), "{stderr}");
+    assert!(String::from_utf8_lossy(&env.stdout).contains("1.22.5"));
+    assert!(stderr.contains("node@99"), "{stderr}");
+}
+
+/// Regression: a task failed before running a line because some *other*
+/// declared tool -- here an exact conda pin and a static one -- was not
+/// installed, while the same command in an activated shell worked. Only the
+/// tools a task lists in `tools` are required.
+#[test]
+fn a_task_runs_past_declared_tools_it_does_not_use() {
+    let temporary = tempfile::tempdir().unwrap();
+    let go = temporary.path().join("installs/go/1.22.5");
+    std::fs::create_dir_all(go.join("bin")).unwrap();
+    std::fs::write(go.join(".osdk-complete"), b"").unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let (program, args, env) = print_variable_command("PATH");
+    let argv = std::iter::once(program)
+        .chain(args)
+        .map(|arg| format!("{arg:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[tools]\ngo = \"1.22\"\n\"conda:lz4-c\" = \"1.9.4\"\nnode = \"99\"\n\
+             [tasks.show]\nrun = [{{ argv = [{argv}] }}]\n\
+             [tasks.needs-node]\ntools = [\"node\"]\nrun = [{{ argv = [{argv}] }}]\n"
+        ),
+    )
+    .unwrap();
+    let trusted = project.to_string_lossy().into_owned();
+    let mut vars: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    vars.push(("OSDK_TRUSTED_CONFIG_PATHS", &trusted));
+
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["--offline", "run", "--no-deps", "show"],
+        &vars,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
     assert!(
-        !env.status.success(),
-        "osdk env must not hand out a partial environment"
+        stdout.contains("1.22.5"),
+        "the installed tool is active: {stdout}"
+    );
+    assert!(stderr.contains("conda:lz4-c@1.9.4"), "{stderr}");
+    assert!(stderr.contains("node@99"), "{stderr}");
+
+    // A tool the task does declare is still required: offline, it can be
+    // neither found nor installed, and the task does not run.
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["--offline", "run", "--no-deps", "needs-node"],
+        &vars,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(
+        !stdout.contains('['),
+        "the task must not have run: {stdout}"
     );
 }
 
@@ -9677,6 +9740,89 @@ fn doctor_verifies_all_dynamic_identity_roots() {
         "{report}"
     );
     assert!(report.contains("payload.py: contents changed"), "{report}");
+}
+
+/// An install extracted by osdk 0.0.9 holds each zip symlink as a plain file
+/// reading the target (the NDK's `clang` said `clang-21`). Its manifest hashed
+/// those stubs, so plain re-hashing called it intact; `--verify` now compares
+/// against the cached archive.
+#[test]
+fn doctor_verify_reports_zip_symlinks_an_older_osdk_wrote_as_files() {
+    use osdk_core::store::manifest::{FileEntry, Manifest};
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let dirs = osdk_core::dirs::Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_STORE_DIR" => Some(temp.path().join("store").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(temp.path().join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let file_name = "zig-0.13.0.zip";
+    let archive =
+        osdk_core::pipeline::artifact_cache_path(&dirs, "zig", "0.13.0", file_name).unwrap();
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+    let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+    zip.start_file("zig-0.13.0/zig", options).unwrap();
+    zip.write_all(b"real zig").unwrap();
+    zip.add_symlink("zig-0.13.0/zig-cc", "zig", options)
+        .unwrap();
+    zip.finish().unwrap();
+
+    let root = dirs.install_path("zig", "0.13.0");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("zig"), b"real zig").unwrap();
+    std::fs::write(root.join("zig-cc"), b"zig").unwrap();
+    let mut manifest = Manifest::new("zig", "0.13.0", "copy");
+    for name in ["zig", "zig-cc"] {
+        manifest.files.push(FileEntry {
+            path: name.into(),
+            hash: Some(osdk_core::store::hash_file(&root.join(name)).unwrap()),
+            mode: 0,
+            symlink: None,
+        });
+    }
+    manifest.save(&root).unwrap();
+    osdk_core::pipeline::write_artifact_receipt_at(
+        &root,
+        &osdk_core::pipeline::ArtifactReceipt {
+            url: format!("https://example.invalid/{file_name}"),
+            file_name: file_name.into(),
+            checksum: None,
+            evidence: Vec::new(),
+        },
+    )
+    .unwrap();
+    std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+
+    let verify = || {
+        let output = run_isolated(temp.path(), &["doctor", "--verify", "--tool", "zig"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let report = verify();
+    assert!(
+        report.contains("zig-cc: symlink extracted as a plain file"),
+        "{report}"
+    );
+    assert!(report.contains("1 changed"), "{report}");
+    assert!(
+        report.contains("osdk install --force zig@0.13.0"),
+        "{report}"
+    );
+
+    // Without the archive there is nothing to compare with, and an install
+    // is not condemned on a guess.
+    std::fs::remove_file(&archive).unwrap();
+    let report = verify();
+    assert!(report.contains("0 changed"), "{report}");
 }
 
 #[test]

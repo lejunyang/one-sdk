@@ -31,7 +31,7 @@ osdk env --format powershell | Out-String | Invoke-Expression
   无法写成 dotenv，命令报错并提示改用 json。
 - shell 格式不带钩子的 `OSDK_ORIG_*` / `OSDK_MANAGED_ENV` 簿记，适合执行一次；不随
   目录切换，不能代替 [`activate`](../activate/guide.md)。
-- 输出只描述当前目录；换项目要重新导出。已配置但未安装的工具会让命令失败，与激活
-  一致。
+- 输出只描述当前目录；换项目要重新导出。已配置但未安装的工具在 stderr 提示后被跳过，
+  其余照常导出，与激活一致。
 
 要直接在这个环境里运行命令，用不带 `--tool` 的 [`exec`](../exec/guide.md)。

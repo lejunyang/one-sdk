@@ -82,7 +82,7 @@ pub fn extract(archive: &Path, dest: &Path, kind: ArchiveKind, strip_root: bool)
             unpack_tar(dec, &scratch)?;
         }
         ArchiveKind::Zip => {
-            unpack_zip(archive, &scratch)?;
+            unpack_zip(archive, &scratch, strip_root)?;
         }
         #[cfg(feature = "install")]
         ArchiveKind::SevenZ => {
@@ -113,18 +113,57 @@ fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unpack_zip(archive: &Path, dest: &Path) -> Result<()> {
+/// Unpack a `.zip` into `dest`, restoring Unix symlink entries as symlinks.
+///
+/// A zip stores a symlink as an entry whose Unix mode says `S_IFLNK` and whose
+/// content is the link target. Written out as an ordinary file, `clang -> clang-21`
+/// in the Android NDK became an 8-byte text file `clang-21`, which a shell then
+/// ran as a script that looked `clang-21` up on PATH.
+///
+/// Links are created only after every regular entry is written, so no file is
+/// ever written *through* a link the archive planted (the zip-slip variant tar
+/// extractors guard against), and each target is validated by
+/// [`zip_link_target`] to resolve inside the archive. `strip_root` matters
+/// because a link that stays inside the scratch directory can still climb out
+/// of the single top-level directory the install keeps.
+fn unpack_zip(archive: &Path, dest: &Path, strip_root: bool) -> Result<()> {
     let f = File::open(archive).map_err(|e| Error::io(archive, e))?;
     let mut zip = zip::ZipArchive::new(BufReader::new(f))
         .map_err(|e| Error::other(format!("zip open: {e}")))?;
+    let mut links = Vec::new();
+    let mut top_level = std::collections::BTreeSet::new();
+    let mut nested = false;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| Error::other(format!("zip entry {i}: {e}")))?;
-        let out_path = match entry.enclosed_name() {
-            Some(p) => dest.join(p),
-            None => continue,
+        let Some(relative) = entry.enclosed_name() else {
+            continue;
         };
+        let mut components = relative.components();
+        if let Some(first) = components.next() {
+            top_level.insert(first.as_os_str().to_os_string());
+            nested |= components.next().is_some();
+        }
+        if entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            let mut target = String::new();
+            (&mut entry)
+                .take(MAX_LINK_TARGET_BYTES + 1)
+                .read_to_string(&mut target)
+                .map_err(|e| Error::other(format!("zip symlink `{}`: {e}", relative.display())))?;
+            if target.len() as u64 > MAX_LINK_TARGET_BYTES {
+                return Err(Error::other(format!(
+                    "zip symlink `{}` has an oversized target",
+                    relative.display()
+                )));
+            }
+            links.push((relative, target));
+            continue;
+        }
+        let out_path = dest.join(&relative);
         if entry.is_dir() {
             create_dir_all(&out_path)?;
         } else {
@@ -143,7 +182,209 @@ fn unpack_zip(archive: &Path, dest: &Path) -> Result<()> {
             }
         }
     }
+    // Mirrors `single_child_dir`: one top-level name with entries below it is
+    // the directory that `strip_root` keeps as the install root.
+    let kept_root = match top_level.first() {
+        Some(root) if strip_root && nested && top_level.len() == 1 => Some(PathBuf::from(root)),
+        _ => None,
+    };
+    let mut validated = Vec::with_capacity(links.len());
+    for (relative, target) in links {
+        let within = match &kept_root {
+            Some(root) => relative.strip_prefix(root).unwrap_or(&relative),
+            None => relative.as_path(),
+        };
+        let resolved = zip_link_target(within, &target).ok_or_else(|| {
+            Error::other(format!(
+                "zip symlink `{}` -> `{target}` points outside the archive",
+                relative.display()
+            ))
+        })?;
+        validated.push((dest.join(&relative), resolved));
+    }
+    restore_zip_links(dest, validated)
+}
+
+/// Longest symlink target accepted from a zip; real ones are a path or two.
+const MAX_LINK_TARGET_BYTES: u64 = 4096;
+
+/// Symlink entries of `archive` that `install_root` holds as a plain file whose
+/// content is the link target: what osdk 0.0.9 and earlier wrote for every zip
+/// symlink. Returned as `/`-separated paths relative to `install_root`.
+///
+/// The check needs nothing recorded at install time, which is the point: those
+/// installs predate any marker that could have said "links restored", and their
+/// CAS manifest hashed the stub files, so `doctor --verify` saw them as intact.
+/// A stub is recognized by content, not by file type, so a Windows install that
+/// now holds a *copy* of the target is not mistaken for one.
+///
+/// Each entry is looked for where `strip_root` would have put it and where it
+/// would be without stripping; the first that exists is the one compared.
+pub fn zip_link_stubs(install_root: &Path, archive: &Path) -> Result<Vec<String>> {
+    let f = File::open(archive).map_err(|e| Error::io(archive, e))?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(f))
+        .map_err(|e| Error::other(format!("zip open: {e}")))?;
+    let mut stubs = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| Error::other(format!("zip entry {i}: {e}")))?;
+        if !entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            continue;
+        }
+        let Some(relative) = entry.enclosed_name() else {
+            continue;
+        };
+        let mut target = Vec::new();
+        (&mut entry)
+            .take(MAX_LINK_TARGET_BYTES + 1)
+            .read_to_end(&mut target)
+            .map_err(|e| Error::other(format!("zip symlink `{}`: {e}", relative.display())))?;
+        if target.is_empty() || target.len() as u64 > MAX_LINK_TARGET_BYTES {
+            continue;
+        }
+        let stripped: PathBuf = relative.components().skip(1).collect();
+        for candidate in [relative.as_path(), stripped.as_path()] {
+            if candidate.as_os_str().is_empty() {
+                continue;
+            }
+            let path = install_root.join(candidate);
+            let Ok(metadata) = path.symlink_metadata() else {
+                continue;
+            };
+            if metadata.is_file()
+                && metadata.len() == target.len() as u64
+                && std::fs::read(&path).is_ok_and(|content| content == target)
+            {
+                stubs.push(candidate.to_string_lossy().replace('\\', "/"));
+            }
+            break;
+        }
+    }
+    Ok(stubs)
+}
+
+/// Validate the target of a zip symlink at `link` (relative to the directory
+/// the install keeps) and return it as a relative path, or `None` if it could
+/// resolve outside that directory.
+///
+/// Accepted: leading `..` that never climb above the link's own depth, then
+/// plain names. Refused: absolute targets, drive or `\` syntax (a separator on
+/// Windows, so it is refused everywhere rather than read differently per
+/// host), and any `..` after a name. The last rule is what keeps the check
+/// lexical: `a/b/..` is only `a/` if `b` is not itself a link, and once a name
+/// may be a link, climbing back out of it could leave the tree.
+fn zip_link_target(link: &Path, target: &str) -> Option<PathBuf> {
+    if target.is_empty() || target.starts_with('/') || target.contains(['\\', ':', '\0']) {
+        return None;
+    }
+    let depth = link.components().count().checked_sub(1)?;
+    let mut climbs = 0;
+    let mut named = false;
+    let mut resolved = PathBuf::new();
+    for component in target.split('/') {
+        match component {
+            "" | "." => continue,
+            ".." if named => return None,
+            ".." => {
+                climbs += 1;
+                if climbs > depth {
+                    return None;
+                }
+                resolved.push("..");
+            }
+            name => {
+                named = true;
+                resolved.push(name);
+            }
+        }
+    }
+    // Only `..`s or nothing: a link to one of its own ancestors, i.e. a loop.
+    if !named {
+        return None;
+    }
+    Some(resolved)
+}
+
+/// Create the validated links, after every regular entry exists.
+///
+/// Unix gets real symlinks. A link must not land below another link either:
+/// creating `a/l` through a planted `a -> ..` would put `l` wherever `a`
+/// points, so every ancestor between `dest` and the link has to be a real
+/// directory. A link whose path an ordinary entry already took fails on
+/// `EEXIST` instead of replacing it.
+#[cfg(unix)]
+fn restore_zip_links(dest: &Path, links: Vec<(PathBuf, PathBuf)>) -> Result<()> {
+    for (link, target) in links {
+        let parent = link.parent().unwrap_or(dest);
+        let mut ancestor = parent;
+        while ancestor != dest && ancestor.starts_with(dest) {
+            if ancestor
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+            {
+                return Err(Error::other(format!(
+                    "zip symlink `{}` is inside another symlink",
+                    link.display()
+                )));
+            }
+            ancestor = ancestor.parent().unwrap_or(dest);
+        }
+        create_dir_all(parent)?;
+        std::os::unix::fs::symlink(&target, &link).map_err(|e| Error::io(&link, e))?;
+    }
     Ok(())
+}
+
+/// Windows materializes each link as a copy of what it points to.
+///
+/// A symlink there needs `SeCreateSymbolicLinkPrivilege` (an elevated process
+/// or Developer Mode), so an ordinary install cannot count on one; the CAS
+/// falls back to copying for the same reason. For the executables these
+/// archives carry a copy runs exactly like the link, while the text stub
+/// written before was wrong on every platform. Links are copied in dependency
+/// order -- a link to a link waits for the first one -- and one whose target
+/// the archive does not contain is left out, as it would dangle on Unix too.
+#[cfg(not(unix))]
+fn restore_zip_links(_dest: &Path, mut links: Vec<(PathBuf, PathBuf)>) -> Result<()> {
+    loop {
+        let before = links.len();
+        let mut waiting = Vec::new();
+        for (link, target) in links {
+            let source = link.parent().unwrap_or(&link).join(&target);
+            if source.symlink_metadata().is_err() {
+                waiting.push((link, target));
+                continue;
+            }
+            if link.symlink_metadata().is_ok() {
+                return Err(Error::other(format!(
+                    "zip symlink `{}` collides with another entry",
+                    link.display()
+                )));
+            }
+            if let Some(parent) = link.parent() {
+                create_dir_all(parent)?;
+            }
+            copy_recursive(&source, &link)?;
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        if waiting.len() == before {
+            for (link, target) in &waiting {
+                tracing::debug!(
+                    link = %link.display(),
+                    target = %target.display(),
+                    "zip symlink target is not in the archive; skipped"
+                );
+            }
+            return Ok(());
+        }
+        links = waiting;
+    }
 }
 
 /// Unpack a `.7z` into `dest`.
@@ -275,6 +516,189 @@ fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a zip from `(name, Ok(contents) | Err(symlink target))` entries.
+    fn zip_fixture(path: &Path, entries: &[(&str, std::result::Result<&[u8], &str>)]) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        for (name, entry) in entries {
+            match entry {
+                Ok(contents) => {
+                    zip.start_file(*name, options).unwrap();
+                    zip.write_all(contents).unwrap();
+                }
+                Err(target) => zip.add_symlink(*name, *target, options).unwrap(),
+            }
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Regression: the NDK zip stores `bin/clang -> clang-21` as a symlink
+    /// entry, and it was written out as an 8-byte text file `clang-21`, which a
+    /// shell then ran as a script looking `clang-21` up on PATH.
+    #[test]
+    fn zip_symlink_entries_resolve_to_their_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("ndk.zip");
+        zip_fixture(
+            &archive,
+            &[
+                ("ndk-r29/bin/clang-21", Ok(b"real compiler")),
+                ("ndk-r29/bin/clang", Err("clang-21")),
+                ("ndk-r29/bin/clang++", Err("clang")),
+                ("ndk-r29/lib/clang-link", Err("../bin/clang-21")),
+                ("ndk-r29/dangling", Err("not-in-archive")),
+            ],
+        );
+        let dest = temp.path().join("installed");
+        extract(&archive, &dest, ArchiveKind::Zip, true).unwrap();
+
+        for link in ["bin/clang", "bin/clang++", "lib/clang-link"] {
+            assert_eq!(
+                std::fs::read(dest.join(link)).unwrap(),
+                b"real compiler",
+                "{link}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            for (link, target) in [
+                ("bin/clang", "clang-21"),
+                ("bin/clang++", "clang"),
+                ("lib/clang-link", "../bin/clang-21"),
+                ("dangling", "not-in-archive"),
+            ] {
+                let path = dest.join(link);
+                assert!(
+                    path.symlink_metadata().unwrap().file_type().is_symlink(),
+                    "{link}"
+                );
+                assert_eq!(std::fs::read_link(&path).unwrap(), Path::new(target));
+            }
+        }
+        // Windows copies what a link points to; a target the archive lacks
+        // leaves nothing rather than a stub file.
+        #[cfg(not(unix))]
+        assert!(dest.join("dangling").symlink_metadata().is_err());
+    }
+
+    /// Zip slip through a link: each of these would let an install point
+    /// outside the directory it keeps, the last one only once `strip_root` has
+    /// lifted the top-level directory.
+    #[test]
+    fn zip_symlinks_that_leave_the_install_are_refused() {
+        for (link, target) in [
+            ("pkg/bin/l", "../../../outside"),
+            ("pkg/bin/l", "/etc/passwd"),
+            ("pkg/bin/l", "..\\..\\outside"),
+            ("pkg/bin/l", "C:/Windows/System32/cmd.exe"),
+            ("pkg/bin/l", "sub/../../../outside"),
+            ("pkg/l", "../sibling"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let archive = temp.path().join("evil.zip");
+            zip_fixture(
+                &archive,
+                &[("pkg/bin/tool", Ok(b"tool")), (link, Err(target))],
+            );
+            let error = extract(&archive, &temp.path().join("out"), ArchiveKind::Zip, true)
+                .expect_err(target);
+            assert!(
+                error.to_string().contains("outside the archive"),
+                "{target}: {error}"
+            );
+        }
+    }
+
+    /// An install that 0.0.9 extracted holds each zip symlink as a file whose
+    /// content is the target; that is what the stub check must find, and an
+    /// install extracted now must not trip it on either platform.
+    #[test]
+    fn zip_link_stubs_find_links_an_older_osdk_wrote_as_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("ndk.zip");
+        zip_fixture(
+            &archive,
+            &[
+                ("ndk-r29/bin/clang-21", Ok(b"real compiler")),
+                ("ndk-r29/bin/clang", Err("clang-21")),
+                ("ndk-r29/bin/clang++", Err("clang")),
+            ],
+        );
+
+        let old = temp.path().join("old");
+        std::fs::create_dir_all(old.join("bin")).unwrap();
+        std::fs::write(old.join("bin/clang-21"), b"real compiler").unwrap();
+        std::fs::write(old.join("bin/clang"), b"clang-21").unwrap();
+        std::fs::write(old.join("bin/clang++"), b"clang").unwrap();
+        assert_eq!(
+            zip_link_stubs(&old, &archive).unwrap(),
+            vec!["bin/clang".to_string(), "bin/clang++".to_string()]
+        );
+
+        // Same layout without stripping the top-level directory.
+        let unstripped = temp.path().join("unstripped");
+        std::fs::create_dir_all(unstripped.join("ndk-r29/bin")).unwrap();
+        std::fs::write(unstripped.join("ndk-r29/bin/clang"), b"clang-21").unwrap();
+        assert_eq!(
+            zip_link_stubs(&unstripped, &archive).unwrap(),
+            vec!["ndk-r29/bin/clang".to_string()]
+        );
+
+        let fresh = temp.path().join("fresh");
+        extract(&archive, &fresh, ArchiveKind::Zip, true).unwrap();
+        assert!(zip_link_stubs(&fresh, &archive).unwrap().is_empty());
+    }
+
+    #[test]
+    fn zip_link_targets_stay_inside_the_kept_root() {
+        let link = Path::new("bin/sub/clang");
+        assert_eq!(
+            zip_link_target(link, "clang-21"),
+            Some(PathBuf::from("clang-21"))
+        );
+        assert_eq!(
+            zip_link_target(link, "./../../lib/./x"),
+            Some(["..", "..", "lib", "x"].iter().collect())
+        );
+        for refused in [
+            "",
+            ".",
+            "..",
+            "../../..",
+            "/abs",
+            "a\\b",
+            "c:x",
+            "a/../b",
+            "nul\0byte",
+        ] {
+            assert_eq!(zip_link_target(link, refused), None, "{refused:?}");
+        }
+        // A top-level link cannot climb at all.
+        assert_eq!(zip_link_target(Path::new("l"), "../x"), None);
+    }
+
+    /// A link may not be created through another link the archive planted,
+    /// whichever order the two entries come in.
+    #[cfg(unix)]
+    #[test]
+    fn zip_symlinks_are_never_created_inside_another_symlink() {
+        for entries in [
+            [("pkg/a", Err("sub")), ("pkg/a/l", Err("x"))],
+            [("pkg/a/l", Err("x")), ("pkg/a", Err("sub"))],
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let archive = temp.path().join("nested.zip");
+            let mut all = vec![("pkg/sub/x", Ok(&b"x"[..]))];
+            all.extend(entries);
+            zip_fixture(&archive, &all);
+            assert!(
+                extract(&archive, &temp.path().join("out"), ArchiveKind::Zip, true).is_err(),
+                "{entries:?}"
+            );
+        }
+    }
 
     #[test]
     fn kind_from_name() {

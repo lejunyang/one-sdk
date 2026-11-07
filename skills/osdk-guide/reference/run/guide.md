@@ -29,7 +29,8 @@ osdk run //packages/ui:build
 
 任务的 `tools` 列表引用 `[tools]` 键。运行前 osdk 会检查整个任务图，只安装尚未就绪的
 显式依赖，包括标记为 `lazy = true` 的工具；不会分析 shell 命令来猜依赖。未知或平台
-不匹配的工具会在任何安装和任务命令开始前报错。
+不匹配的工具会在任何安装和任务命令开始前报错。`tools` 里的工具安装后仍缺失则任务报错；
+其余已声明但未安装的工具只在 stderr 提示并被跳过，不阻止任务。
 
 任务正文可用 shell、argv、脚本文件或 Lua。字段全集见
 `reference/configuration/tasks.md`，runner 默认见

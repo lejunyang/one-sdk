@@ -50,5 +50,6 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 flate2.workspace = true
+zip.workspace = true
 tar.workspace = true
 libc.workspace = true

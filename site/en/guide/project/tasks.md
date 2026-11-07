@@ -723,7 +723,10 @@ So a task sees the tool versions the project declared **whatever directory or
 shell it was invoked from**, and without the user having run `osdk activate`.
 Tools already installed are selected without a network request. Missing tools
 are installed only when the task explicitly lists their `[tools]` keys; osdk
-does not parse commands or scripts to guess dependencies.
+does not parse commands or scripts to guess dependencies. A listed tool that is
+still missing after that fails the task; any other declared tool that is not
+installed is named once on stderr and left out, as in an activated shell, and
+does not stop the task.
 
 osdk also sets three variables:
 
