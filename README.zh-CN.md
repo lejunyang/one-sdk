@@ -133,6 +133,9 @@ node --version
 python --version
 ```
 
+每个 osdk 下载在带名称的同一行更新进度，并发下载各占一行；未知大小时显示已下载字节。
+使用 `--quiet` 可隐藏进度输出。
+
 Shell 激活也支持 zsh、fish 和 PowerShell。Fish 激活和撤销在可选保存变量已不存在时仍成功返回。已配置的工具若尚未安装，激活会提示一次并照常激活其余工具，
 不会静默回退到系统可执行文件。需要完整命令说明时，运行 `osdk --help` 或
 `osdk <command> --help`。
@@ -146,6 +149,25 @@ osdk env > .env                    # dotenv，给 IDE 或 `docker --env-file`
 osdk env --format json             # 另有 bash、zsh、fish、powershell
 osdk exec -- ./gradlew build       # 不带 --tool：使用当前目录自己的选择
 ```
+
+更新全局选择的工具时，显式指定 `@latest`：
+
+```bash
+osdk use -g github:lejunyang/ai-auto-desktop@latest
+```
+
+按已有全局约束升级指定工具或全部全局工具：
+
+```bash
+osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g                     # 全部全局选择
+```
+
+全局升级更新用户 lock，保留全局版本约束和选项，并忽略当前项目；修改约束继续用
+`use -g TOOL@VERSION`。
+
+显式浮动版本选择器会先解析当前符合约束的版本，再判断是否需要安装；目标精确版本已安装时
+直接复用。裸 `use` 可以复用本地版本；`install --force` 用于重装或修复指定版本。
 
 ## 场景：让项目工具链可复现
 

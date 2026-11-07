@@ -144,6 +144,9 @@ node --version
 python --version
 ```
 
+Each osdk download updates one labelled progress line; concurrent downloads have
+separate lines. Unknown sizes show downloaded bytes. Use `--quiet` to hide progress.
+
 Activation also supports zsh, fish, and PowerShell. Fish activation and
 deactivation return success when optional saved variables are already absent. If a configured tool is
 not installed, activation names it once and activates the other tools; it never
@@ -160,6 +163,26 @@ osdk env > .env                    # dotenv for an IDE or `docker --env-file`
 osdk env --format json             # also bash, zsh, fish, powershell
 osdk exec -- ./gradlew build       # without --tool: this directory's own selection
 ```
+
+To update a globally selected tool to the latest release, request `@latest` explicitly:
+
+```bash
+osdk use -g github:lejunyang/ai-auto-desktop@latest
+```
+
+Upgrade existing global selections within their configured constraints:
+
+```bash
+osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g                     # all global selections
+```
+
+Global upgrades update the user lock and preserve the global constraints and options.
+They ignore the current project. Use `use -g TOOL@VERSION` to change a constraint.
+
+An explicit floating selector resolves the current matching release before reusing an installation.
+If that exact target is already installed, osdk keeps it. A bare `use` can reuse a local
+version; `install --force` is for reinstalling or repairing a version.
 
 ## Scenario: make a project toolchain reproducible
 

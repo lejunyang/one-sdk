@@ -57,6 +57,12 @@ osdk metadata/source probe，并按 origin 约束；受管 npm/pnpm 子进程当
 
 在实际进入 pipeline 的安装或重装中，artifact cache 命中仍会执行适用的 checksum/attestation 逻辑，而不是把“文件存在”当作验证成功。离线重装可以使用先前持久化的 checksum；但没有缓存 artifact 时不会联网降级。普通 `osdk install` 若发现完整安装，会在 pipeline 之前复用它，不重新校验 receipt、checksum 或已安装字节。
 
+下载进度条先使用隐藏 draw target 配置样式、标签和续传位置，再加入共享
+`MultiProgress`。这些 setter 本身可以触发绘制；若先用默认 stderr target 初始化，
+就会在共享区域之外留下一条零进度行，真正传输又新开一行。加入共享区域之后才允许
+绘制，已知长度、未知长度和续传共用此规则。终端回归测试同时捕获真实 stderr 伪终端
+和共享进度区域；用独立进度条作阳性对照，避免只观察共享区域而漏掉外部残留。
+
 ## 失败语义与 caveat
 
 - 每个 source 候选都要完成下载、checksum/attestation、解包和必要目录验证后才会被接受；

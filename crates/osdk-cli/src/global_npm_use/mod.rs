@@ -402,6 +402,79 @@ mod tests {
     use std::collections::BTreeSet;
     use std::ffi::OsString;
 
+    #[tokio::test]
+    async fn global_upgrade_keeps_npm_scope_and_preserves_selection_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = osdk_core::dirs::Dirs {
+            data: temporary.path().join("data"),
+            cache: temporary.path().join("cache"),
+            config: temporary.path().join("config"),
+            store: temporary.path().join("store"),
+            installs: temporary.path().join("installs"),
+        };
+        dirs.ensure().unwrap();
+        let original = "[tools]\nnode = \"22.1.0\"\nnpm = \"11.0.0\"\n\"npm:fixture-cli\" = { version = \"1.0.0\", installer = \"npm\", lazy = true }\n";
+        std::fs::write(dirs.user_config_file(), original).unwrap();
+        let mut config = osdk_core::config::Config::load_user(&dirs.user_config_file()).unwrap();
+        config.settings.offline = true;
+        let ctx = osdk_core::backend::Ctx {
+            platform: osdk_core::platform::Platform::current(),
+            config,
+            client: osdk_core::http::client().unwrap(),
+            cas: std::sync::Arc::new(osdk_core::store::Cas::new(dirs.store.clone())),
+            show_progress: false,
+            dirs: dirs.clone(),
+        };
+        let registry = osdk_core::Registry::new();
+        for (id, version) in [("node", "22.1.0"), ("npm", "11.0.0")] {
+            let tool = ToolVersion::new(id, version);
+            let backend = registry.get(id).unwrap();
+            let root = dirs.install_path(id, version);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+            for bin in backend.bin_paths(&ctx, &tool).unwrap() {
+                std::fs::create_dir_all(&bin).unwrap();
+                for name in [id.to_string(), format!("{id}.exe"), format!("{id}.cmd")] {
+                    std::fs::write(bin.join(name), b"runtime fixture; must never execute").unwrap();
+                }
+            }
+        }
+        let backend = NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
+        let mut version = ToolVersion::new(backend.id(), "1.0.0");
+        version
+            .options
+            .insert(INSTALLER_OPTION.into(), "npm".into());
+        version
+            .options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "22.1.0".into());
+        let root = backend.global_install_root_for(&ctx, &version).unwrap();
+        write_valid_npm_global_install(&root, b"installed");
+        let mut app = App::from_parts(
+            ctx,
+            registry,
+            std::sync::Arc::new(crate::prompt::TerminalPrompt::new(false)),
+            None,
+            false,
+        );
+        app.global_only = true;
+        crate::commands::upgrade_global(&mut app, vec!["npm:fixture-cli".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dirs.user_config_file()).unwrap(),
+            original
+        );
+        let lock = crate::lockfile::load(&dirs.user_lock_file()).unwrap();
+        let tools = &lock.platforms[&app.ctx.platform.to_string()].tools;
+        assert!(matches!(
+            tools["npm:fixture-cli"].npm.as_ref().unwrap(),
+            crate::lockfile::LockedNpmGraph::Metadata(metadata)
+                if metadata.scope == crate::lockfile::LockScope::Global
+        ));
+        assert!(root.join(".osdk-complete").is_file());
+        assert!(refreshed_app(&app).unwrap().ctx.config.project.is_none());
+    }
+
     #[test]
     fn native_lock_identity_reads_all_supported_formats() {
         let temporary = tempfile::tempdir().unwrap();

@@ -4,11 +4,13 @@
 
 ```bash
 osdk upgrade [TOOL[@VERSION]...] [-o KEY=VALUE]...
+osdk upgrade -g|--global [TOOL...]
 ```
 
 | 参数 | 语义 |
 | --- | --- |
 | `[TOOLS]...` | 为空时升级项目工具；给出时限定请求 |
+| `-g, --global` | 只升级用户全局选择并 upsert 用户 lock，忽略项目；与 `-o` 互斥 |
 | `-o, --opt KEY=VALUE` | backend 选项，可重复 |
 
 ```bash
@@ -17,7 +19,26 @@ osdk upgrade
 osdk upgrade node@20
 ```
 
+浮动请求先通过 backend 重新解析，再按精确版本与动态安装身份复用本地产物；
+不会因为本地已有旧匹配版本而跳过解析，也不会强制重装已满足的精确目标。
+离线只能使用已有 metadata 或本地 catalog，不能确认上游最新。
+
 `upgrade` 会改变已安装内容和 lock；`lock` 只解析/写 lock，`install` 负责复现现有 lock。
 浮动 Rust channel 仍会随上游移动；严格复现应写明确版本或带日期 toolchain。
 
 相关配置：`[tools]`、`[sources]`、`[settings].prerelease`。
+
+## 全局升级
+
+```bash
+osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g npm:prettier
+osdk upgrade --global
+```
+
+全局模式只接受已配置工具名或别名；无参数升级全部适用选择（包括 lazy），排除不匹配
+平台的 `when` 条目。保留原约束、选项、`when`、`lazy`，精确 pin 不会越界升级；修改
+约束/选项用 `osdk use -g TOOL@VERSION -o KEY=VALUE`。不读取项目配置、版本文件或 lock，
+不要求信任当前项目。只更新 `config.toml` 旁的用户 `osdk.lock`，保留其他工具和平台。
+Go/Cargo/独立 JS manager 的受管 runtime 需有对应全局选择。`npm:` 继续使用受控
+全局 prefix、原安装器和原生 lock，不进入项目安装路径。批量操作允许部分成功。

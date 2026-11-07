@@ -143,6 +143,10 @@ pub enum Command {
     Upgrade {
         /// Optional tool requests; empty upgrades the current project config.
         tools: Vec<String>,
+        /// Upgrade user-global selections and their lock, ignoring the project.
+        /// Pass configured tool names; use `use -g TOOL@VERSION` to change constraints.
+        #[arg(short, long, conflicts_with = "opts")]
+        global: bool,
         /// Backend-specific option as key=value (repeatable).
         #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
         opts: Vec<String>,

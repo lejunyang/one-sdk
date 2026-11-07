@@ -5,8 +5,23 @@ use super::*;
 /// Install, globally select, lock, and expose one dynamic npm tool.
 pub async fn install(
     app: &mut App,
+    request: ToolRequest,
+    requested_spec: Option<String>,
+) -> Result<()> {
+    install_with_selection(app, request, requested_spec, true).await
+}
+
+/// Refresh a configured global package while retaining its selection metadata.
+pub async fn upgrade(app: &mut App, request: ToolRequest) -> Result<()> {
+    let spec = Some(request.spec.to_string());
+    install_with_selection(app, request, spec, false).await
+}
+
+async fn install_with_selection(
+    app: &mut App,
     mut request: ToolRequest,
     requested_spec: Option<String>,
+    update_selection: bool,
 ) -> Result<()> {
     if !request.backend.starts_with("npm:") {
         return Err(anyhow!(
@@ -269,7 +284,9 @@ pub async fn install(
         // A normal error still rolls every publication step back below.
         let publish_result = publish_then_activate(replacement.as_ref(), || {
             crate::commands::generate_shims_for(app, &backend, &version)?;
-            persist_global_config(app, &request, &persisted_spec, plan.installer)?;
+            if update_selection {
+                persist_global_config(app, &request, &persisted_spec, plan.installer)?;
+            }
             persist_global_lock(app, &request, &version, &runtime)?;
             let refreshed = refreshed_app(app)?;
             crate::commands::remove_stale_shims_without_other_owners(
@@ -313,14 +330,16 @@ pub async fn install(
         }
         Ok(())
     })?;
-    println!(
-        "{}",
-        osdk_core::t!(
-            "msg.pinned_global",
-            tool = request.backend,
-            ver = persisted_spec
-        )
-    );
+    if update_selection {
+        println!(
+            "{}",
+            osdk_core::t!(
+                "msg.pinned_global",
+                tool = request.backend,
+                ver = persisted_spec
+            )
+        );
+    }
 
     Ok(())
 }
@@ -347,18 +366,24 @@ pub(crate) fn refreshed_app(app: &App) -> Result<App> {
     let ctx = osdk_core::backend::Ctx {
         dirs: app.ctx.dirs.clone(),
         platform: app.ctx.platform,
-        config: osdk_core::config::Config::load(&app.ctx.dirs.user_config_file(), &cwd)?,
+        config: if app.global_only {
+            osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?
+        } else {
+            osdk_core::config::Config::load(&app.ctx.dirs.user_config_file(), &cwd)?
+        },
         client: app.ctx.client.clone(),
         cas: app.ctx.cas.clone(),
         show_progress: app.ctx.show_progress,
     };
-    Ok(App::from_parts(
+    let mut refreshed = App::from_parts(
         ctx,
         osdk_core::Registry::load(&app.ctx.dirs)?,
         app.prompt.clone(),
         app.source_override.clone(),
         app.refresh_sources,
-    ))
+    );
+    refreshed.global_only = app.global_only;
+    Ok(refreshed)
 }
 
 pub(crate) async fn ensure_managed_runtime(

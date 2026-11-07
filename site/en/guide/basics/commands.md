@@ -9,6 +9,7 @@ osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...] [--include-lazy]
 osdk lock [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk upgrade -g|--global [TOOL ...]
 ```
 
 | Command | Behavior |
@@ -48,6 +49,28 @@ See [Reproducible Lockfiles](../project/lockfiles) for the exact read/write matr
 Floating Rust channels such as `stable`, `beta`, and `nightly` are not frozen to
 a concrete release. Use an explicit or dated toolchain for immutable rebuilding.
 
+## Upgrade global tools
+
+```bash
+osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade --global
+```
+
+`-g/--global` reads only user tool selections, sources, and settings. It ignores
+the current project's configuration, version files, and lock, even when that
+configuration is invalid or untrusted. With no names it upgrades every applicable
+global selection, including lazy entries; names or configured aliases limit the
+upgrade to those tools and their managed runtimes. Incompatible `when` entries
+are excluded. Results update `osdk.lock` beside user `config.toml`, preserving
+unrelated tools and other platforms without changing project files.
+
+Global upgrades preserve version constraints, backend options, `when`, and `lazy`:
+`20` stays within 20.x and an exact pin keeps its version. Global mode accepts tool
+names, without `@VERSION` or `-o`. Change a constraint or option with
+`osdk use -g TOOL@VERSION -o KEY=VALUE`; add unselected tools with `use -g` first.
+`npm:` packages retain their controlled global npm/pnpm prefix and native lock
+rather than entering the isolated project install path.
+
 ## Set the current version and uninstall
 
 ```text
@@ -59,6 +82,14 @@ osdk uninstall|rm TOOL@VERSION
 the nearest project configuration, creating `osdk.toml` in the current directory
 if none exists. `--global` updates user `config.toml`. An explicit prefix or
 channel is preserved; a bare tool stores the exact resolved version.
+
+An explicit `use TOOL@latest` (including `-g`) resolves the newest matching release
+from the configured version source before checking local installations. It installs
+and selects a newer release, or reports the resolved target as up to date and reuses
+it. Other explicit prefixes or ranges also resolve first; bare `use TOOL` can reuse
+a local match. `upgrade` always resolves its constraints again; `install --force`
+reinstalls a version. Offline resolution uses cached metadata or a local catalog
+and cannot establish whether upstream has changed.
 
 `uninstall` normally expects an exact version, which must be installed (`17.0.10`
 also names the install `17.0.10+7`; anything else is an error rather than a

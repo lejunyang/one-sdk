@@ -20,6 +20,7 @@ All managers use the common lifecycle commands:
 osdk install MANAGER[@VERSION]... [-o|--opt KEY=VALUE ...]
 osdk lock [MANAGER[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk upgrade [MANAGER[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk upgrade -g|--global [MANAGER ...]
 osdk use|u MANAGER[@VERSION] [-g|--global] [-o|--opt KEY=VALUE ...]
 osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
 osdk list|ls [MANAGER]

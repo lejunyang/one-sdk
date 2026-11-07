@@ -9,6 +9,7 @@ osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...] [--include-lazy]
 osdk lock [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk upgrade -g|--global [TOOL ...]
 ```
 
 | 命令 | 行为 |
@@ -43,6 +44,24 @@ shell 激活、`osdk env` 与不带 `--tool` 的 `osdk exec` 会跳过它而不�
 Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 不会被锁成具体发行版本；需要
 不可变重建时应使用明确版本或带日期的 toolchain。
 
+## 升级全局工具
+
+```bash
+osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade --global
+```
+
+`-g/--global` 只读取用户配置中的工具选择、下载源与设置，忽略当前项目配置、版本文件
+和 lock；当前项目即使未受信任或内容无效也不会影响它。省略工具名时升级全部适用的
+全局选择（包括 lazy 条目），指定工具名或已配置别名时只升级这些工具及其受管 runtime。
+不兼容当前平台的 `when` 条目不会被纳入。结果写入用户 `config.toml` 旁的 `osdk.lock`，
+保留未升级工具的 lock 条目以及其他平台区段，不改项目文件。
+
+升级保留原全局约束、backend 选项、`when` 和 `lazy`：`20` 只升级 20.x，精确版本仍是
+原版本。全局模式只接受工具名，不接受 `@VERSION` 或 `-o`；要修改约束或选项，使用
+`osdk use -g TOOL@VERSION -o KEY=VALUE`。未全局选择的工具先用 `use -g` 添加。
+`npm:` 包继续使用受控全局 npm/pnpm prefix 与原生 lock，不会变成项目隔离安装。
+
 ## 设置当前版本与卸载
 
 ```text
@@ -53,6 +72,11 @@ osdk uninstall|rm TOOL@VERSION
 `use` 先安装并生成 shim，再写 pin：默认修改最近的项目配置；若不存在，则在当前
 目录创建 `osdk.toml`。`--global` 改写用户 `config.toml`。显式输入的版本前缀或通道
 会原样保存；裸工具名则保存刚解析出的精确版本。
+
+显式 `use TOOL@latest`（包括 `-g`）会先解析当前版本来源中的最新匹配版本；有新版本则
+安装并切换，目标版本已安装则提示已是最新并复用，不会强制重装。其他显式前缀或范围
+同样先解析；裸 `use TOOL` 可以复用本地匹配版本。`upgrade` 总是重新解析请求约束，
+而 `install --force` 用于重装。离线时只能解析已有缓存或本地 catalog，不能确认远端最新。
 
 `uninstall` 通常要求精确版本，且该版本必须已安装（`17.0.10` 也指代 `17.0.10+7` 这个安装；
 否则报错，而不是报告成功）；前缀优先选择名称恰好相同的已安装版本，否则选择前几段
