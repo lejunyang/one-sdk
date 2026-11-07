@@ -62,6 +62,12 @@ struct Resolved {
     choice: InstallerChoice,
     config: ProviderConfig,
     plan: RunPlan,
+    /// `plan.env` before package-source selection injected into it.
+    ///
+    /// Execution decides sources again from this, not from `plan.env`: the
+    /// planning-time injection is osdk's own, and re-reading it as an explicit
+    /// registry variable made `--explain` report "invocation priority" for it.
+    declared_env: BTreeMap<String, String>,
     decision: state::Decision,
     unit: Option<deps::workspace::WorkspaceUnit>,
     lock_path: PathBuf,
@@ -271,58 +277,58 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     .unwrap_or("no native lockfile")
             ));
         }
-        if config.run.is_none() {
-            let mut context = source_context(app, &config)?;
-            // Dry-run/freshness must not probe; explicit mappings still apply.
-            context.config.settings.offline = true;
-            let evidence = osdk_core::package_sources::apply(
-                &context,
-                &plan.cwd,
-                &plan.program,
-                resolved_tool_versions(app, &config)
-                    .get("yarn")
-                    .map(String::as_str),
-                &plan.args,
-                &mut plan.env,
-            )
-            .await?;
-            if options.explain {
-                println!("    sources: {evidence}");
-                let candidates: Vec<_> =
-                    osdk_core::package_sources::native_files(&plan.cwd, &plan.program, &|key| {
-                        plan.env
-                            .get(key)
-                            .cloned()
-                            .or_else(|| std::env::var(key).ok())
-                    })
-                    .into_iter()
-                    .filter(|path| path.is_file())
-                    .collect();
-                println!("    fingerprint inputs: {candidates:?}; not an effective discovery chain; native winner and interpolation delegated to manager");
-                if let Some(evidence) = tool_evidence.get(&rooted.0) {
-                    for (id, selection) in evidence {
-                        let pinned_installer = id == &plan.tool && choice.version.is_some();
-                        if !plan.frozen
-                            && !pinned_installer
-                            && osdk_core::execution::enabled(&context)
-                        {
-                            if let Ok(backend) = app.registry.get(id) {
-                                let actual = osdk_core::execution::resolve_without_probes(
-                                    &context,
-                                    backend.as_ref(),
-                                    &plan.cwd,
-                                )?;
-                                println!(
-                                    "    {id}: {}; verification deferred until execution",
-                                    serde_json::to_string(&actual.evidence)?
-                                );
-                                continue;
-                            }
+        // A custom `run` goes through the same adapter as a built-in plan: it
+        // decides from the program and this command's own arguments, so a
+        // filtered `pnpm install` gets the selected registry while explicit
+        // registry arguments, `deps.env` and process variables still pass
+        // through, and a program that is no package manager is left untouched.
+        let declared_env = plan.env.clone();
+        let mut context = source_context(app, &config)?;
+        // Dry-run/freshness must not probe; explicit mappings still apply.
+        context.config.settings.offline = true;
+        let evidence = osdk_core::package_sources::apply(
+            &context,
+            &plan.cwd,
+            &plan.program,
+            resolved_tool_versions(app, &config)
+                .get("yarn")
+                .map(String::as_str),
+            &plan.args,
+            &mut plan.env,
+        )
+        .await?;
+        if options.explain {
+            println!("    sources: {evidence}");
+            let candidates: Vec<_> =
+                osdk_core::package_sources::native_files(&plan.cwd, &plan.program, &|key| {
+                    plan.env
+                        .get(key)
+                        .cloned()
+                        .or_else(|| std::env::var(key).ok())
+                })
+                .into_iter()
+                .filter(|path| path.is_file())
+                .collect();
+            println!("    fingerprint inputs: {candidates:?}; not an effective discovery chain; native winner and interpolation delegated to manager");
+            if let Some(evidence) = tool_evidence.get(&rooted.0) {
+                for (id, selection) in evidence {
+                    let pinned_installer = id == &plan.tool && choice.version.is_some();
+                    if !plan.frozen && !pinned_installer && osdk_core::execution::enabled(&context)
+                    {
+                        if let Ok(backend) = app.registry.get(id) {
+                            let actual = osdk_core::execution::resolve_without_probes(
+                                &context,
+                                backend.as_ref(),
+                                &plan.cwd,
+                            )?;
+                            println!(
+                                "    {id}: {}; verification deferred until execution",
+                                serde_json::to_string(&actual.evidence)?
+                            );
+                            continue;
                         }
-                        println!(
-                            "    {id}: {selection}; managed authority for frozen/pinned plans"
-                        );
                     }
+                    println!("    {id}: {selection}; managed authority for frozen/pinned plans");
                 }
             }
         }
@@ -343,6 +349,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             choice,
             config,
             plan,
+            declared_env,
             decision,
             unit,
             lock_path,
@@ -460,27 +467,29 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             continue;
         }
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
-        let source_env = item.plan.env.clone();
-        if item.config.run.is_none() {
-            let context = source_context(app, &item.config)?;
-            let evidence = osdk_core::package_sources::apply(
-                &context,
-                &item.plan.cwd,
-                &item.plan.program,
-                tools
-                    .iter()
-                    .find(|tool| tool.id == "yarn")
-                    .map(|tool| tool.version.as_str()),
-                &item.plan.args,
-                &mut item.plan.env,
-            )
-            .await?;
-            if options.explain {
-                println!("    sources: {evidence}");
-            }
+        // Same adapter for custom `run` lines as for built-in plans; see planning.
+        // Planning was offline, so this decision may probe; it starts from the
+        // declared environment (see `Resolved::declared_env`).
+        let planned_env = std::mem::replace(&mut item.plan.env, item.declared_env.clone());
+        let context = source_context(app, &item.config)?;
+        let evidence = osdk_core::package_sources::apply(
+            &context,
+            &item.plan.cwd,
+            &item.plan.program,
+            tools
+                .iter()
+                .find(|tool| tool.id == "yarn")
+                .map(|tool| tool.version.as_str()),
+            &item.plan.args,
+            &mut item.plan.env,
+        )
+        .await?;
+        if options.explain {
+            println!("    sources: {evidence}");
         }
         run_plan(app, item, &tools)?;
-        item.plan.env = source_env;
+        // Record the material freshness was decided on.
+        item.plan.env = planned_env;
         record(app, item, &tools)?;
     }
     Ok(())
@@ -1543,6 +1552,7 @@ mod tests {
                 project,
                 choice,
                 config,
+                declared_env: plan.env.clone(),
                 plan,
                 decision: osdk_core::deps::state::Decision::Fresh,
                 unit: None,

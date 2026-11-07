@@ -215,6 +215,55 @@ of its own, so there are no install directories to search. The name goes to the 
 for a PATH lookup, and the PATH the child receives is "resolved tools first, then
 the inherited one", so whatever `depends` installed is found.
 
+## A custom `run` goes through the package-source adapter too
+
+The package-source adapter, `package_sources::apply`, decides from **the program
+and that command's own arguments**; exec and the shims call the same entry point.
+It has no need to know whether a plan is built-in or custom, so deps should not
+make that distinction for it. Both call sites used to sit inside
+`config.run.is_none()`, and the consequence was that
+`[deps.pnpm] run = "pnpm install --filter app"`, written only to add a `--filter`,
+silently lost `[registries.npm]` and `[settings.precedence] npm = "osdk"`.
+`osdk registry test pnpm` showed the configured registry as selected, while the
+pnpm that `osdk deps` actually started still read the mirror from the machine's
+`.npmrc`. Nothing reported an error; it surfaced only as an install failure when
+that mirror was missing a version.
+
+Removing the condition changes no rule. Every exception comes from the adapter's
+existing rules:
+
+- registry arguments, and arguments selecting another directory or native
+  configuration, pass through;
+- `deps.env` was already part of the plan's `env`, so together with the process
+  environment it forms the "explicit source variables", and a hit passes through;
+- a program the adapter does not recognise as a package manager returns
+  `native command; no package-source adapter` with the environment untouched, so
+  `run = "make deps"` behaves exactly as before.
+
+Freshness needs no special case. The registry injected while planning is written
+into the plan's `env`, and `freshness_command` hashes the whole plan. After the
+run and before recording, `env` is restored to the planning-time copy, so the
+decision and the record use the same material: a custom `run` becomes fresh after
+it succeeds, and stale again when the selection changes.
+
+Execution decides once more (planning runs offline without probes, so `urls`
+candidates can only be chosen here), but it starts from `Resolved::declared_env`,
+the plan's environment from **before** source injection, not from the copy
+planning already injected into. Otherwise the adapter read osdk's own
+`pnpm_config_registry` as an explicit source variable: the outcome was unchanged
+(pass through, keeping the planning value), but `--explain` printed a second line
+claiming `native environment pnpm_config_registry has invocation priority`,
+contradicting the `selected` line above it. Planning only injects from a `default`,
+which needs no probe, so deciding again from the declared environment yields the
+same value.
+
+The adapter and the freshness inventory (`native_files`, `invocation_files`) must
+pick native files by the same program name, so they share `adapter_program`: the
+file name (either `/` or `\` as separator) without `.exe` / `.cmd`. Built-in plans
+already use bare names, so the difference only showed on a custom `run`:
+`run = "uv.exe sync"` was adapted as uv and got its index injected, while freshness
+hashed npm's native files, so an edited `uv.toml` still looked fresh.
+
 ## depends decides order, and a cycle is an error
 
 `order_by_depends` topologically sorts. A cycle is refused rather than resolved
