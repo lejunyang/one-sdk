@@ -1510,6 +1510,210 @@ tools = ["node"]
         manifest.write_atomic(&root).unwrap();
     }
 
+    async fn github_update_fixture() -> (tempfile::TempDir, App, ToolRequest) {
+        let temporary = tempfile::tempdir().unwrap();
+        let config =
+            osdk_core::config::Config::load_user(&temporary.path().join("config/config.toml"))
+                .unwrap();
+        let mut app = app_with_config(&temporary, config);
+        app.ctx.config.settings.offline = true;
+        let payload = b"new release fixture";
+        let digest =
+            osdk_core::pipeline::verify::hash_bytes(payload, osdk_core::pipeline::HashAlgo::Sha256);
+        let catalog = serde_json::json!({
+            "schema": 1,
+            "releases": [{
+                "tag": "v2.0.0", "prerelease": false,
+                "assets": [{
+                    "name": "fixture.bin", "url": "https://example.test/fixture.bin",
+                    "checksum": format!("sha256:{digest}"),
+                    "os": app.ctx.platform.os.config_token(),
+                    "arch": app.ctx.platform.arch.config_token(),
+                }],
+            }],
+        });
+        let bytes = serde_json::to_vec(&catalog).unwrap();
+        let catalog_path = temporary.path().join("catalog.json");
+        std::fs::write(&catalog_path, &bytes).unwrap();
+        let mut request = ToolRequest::parse("github:example/tool@latest").unwrap();
+        request.options.extend(std::collections::BTreeMap::from([
+            ("catalog-url".into(), catalog_path.display().to_string()),
+            (
+                "catalog-sha256".into(),
+                osdk_core::pipeline::verify::hash_bytes(
+                    &bytes,
+                    osdk_core::pipeline::HashAlgo::Sha256,
+                ),
+            ),
+            ("rename".into(), "update-fixture".into()),
+        ]));
+        let backend = app.registry.get(&request.backend).unwrap();
+        let version = backend.resolve_version(&app.ctx, &request).await.unwrap();
+        let locator = osdk_core::backend::github::github_install_locator_for(
+            &app.ctx.dirs,
+            app.ctx.platform,
+            backend.id(),
+            &version,
+        )
+        .unwrap();
+        let archive = osdk_core::pipeline::dynamic_artifact_cache_path(
+            &app.ctx.dirs,
+            &locator,
+            "fixture.bin",
+        )
+        .unwrap();
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        std::fs::write(archive, payload).unwrap();
+        let options = osdk_core::tool::dynamic_identity_options(
+            &osdk_core::tool::ToolId::parse(backend.id()).unwrap(),
+            &request.options,
+        )
+        .unwrap()
+        .into_map();
+        write_dynamic_install(&app, backend.id(), "1.0.0", "update-fixture", &options);
+        (temporary, app, request)
+    }
+
+    #[tokio::test]
+    async fn dynamic_update_explicit_latest_use_resolves_before_reuse() {
+        let (_temporary, mut app, request) = github_update_fixture().await;
+        let opts: Vec<_> = request
+            .options
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        // A bare selection keeps the installed release, including offline.
+        use_cmd(&mut app, request.backend.clone(), true, opts.clone())
+            .await
+            .unwrap();
+        let before =
+            osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file()).unwrap();
+        assert_eq!(before.global_tools[&request.backend], "1.0.0");
+
+        use_cmd(
+            &mut app,
+            format!("{}@latest", request.backend),
+            true,
+            opts.clone(),
+        )
+        .await
+        .unwrap();
+        let after = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file()).unwrap();
+        assert_eq!(after.global_tools[&request.backend], "latest");
+        let report = osdk_core::inventory::scan_installs_for_tool(
+            &app.ctx.dirs.installs,
+            &request.backend,
+            &osdk_core::inventory::ScanOptions::default(),
+        )
+        .unwrap();
+        let new = report
+            .installs
+            .iter()
+            .find(|i| i.manifest.identity.version == "2.0.0")
+            .expect("explicit latest must install the catalog release, not reuse 1.0.0");
+        let marker = new.install_root.join("keep-on-repeat");
+        std::fs::write(&marker, b"keep").unwrap();
+        let manifest = std::fs::read(new.install_root.join(".osdk-install.json")).unwrap();
+        use_cmd(&mut app, format!("{}@latest", request.backend), true, opts)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(marker).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(new.install_root.join(".osdk-install.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(report.installs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn dynamic_update_reuses_only_the_resolved_artifact_identity() {
+        let (_temporary, mut app, request) = github_update_fixture().await;
+        let options = osdk_core::tool::dynamic_identity_options(
+            &osdk_core::tool::ToolId::parse(&request.backend).unwrap(),
+            &request.options,
+        )
+        .unwrap()
+        .into_map();
+        // Same version and public options, but a different artifact checksum.
+        write_dynamic_install(&app, &request.backend, "2.0.0", "update-fixture", &options);
+        let opts = request
+            .options
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        use_cmd(&mut app, format!("{}@latest", request.backend), true, opts)
+            .await
+            .unwrap();
+        let version = app
+            .registry
+            .get(&request.backend)
+            .unwrap()
+            .resolve_version(&app.ctx, &request)
+            .await
+            .unwrap();
+        let locator = osdk_core::backend::github::github_install_locator_for(
+            &app.ctx.dirs,
+            app.ctx.platform,
+            &request.backend,
+            &version,
+        )
+        .unwrap();
+        assert!(locator.install_root().join(".osdk-complete").is_file());
+        // Check the actual output as well as the inventory identity.
+        let manifest =
+            osdk_core::inventory::DynamicToolManifest::load(locator.install_root()).unwrap();
+        assert_eq!(manifest.bins.len(), 1);
+        assert_eq!(
+            std::fs::read(locator.install_root().join(&manifest.bins[0].path)).unwrap(),
+            b"new release fixture"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_update_exact_use_keeps_offline_reuse_but_latest_requires_metadata() {
+        let (_temporary, mut app, request) = github_update_fixture().await;
+        std::fs::remove_file(&request.options["catalog-url"]).unwrap();
+        let opts: Vec<_> = request
+            .options
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        use_cmd(
+            &mut app,
+            format!("{}@1.0.0", request.backend),
+            true,
+            opts.clone(),
+        )
+        .await
+        .unwrap();
+        let before = std::fs::read(app.ctx.dirs.user_config_file()).unwrap();
+        let error = use_cmd(&mut app, format!("{}@latest", request.backend), true, opts)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("catalog"), "{error:#}");
+        assert_eq!(
+            std::fs::read(app.ctx.dirs.user_config_file()).unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_update_upgrade_resolves_before_reuse() {
+        let (temporary, mut app, request) = github_update_fixture().await;
+        let opts = request
+            .options
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        // Direct the project lock into this fixture without changing process cwd.
+        app.ctx.config.project_config_path = Some(temporary.path().join("osdk.toml"));
+        upgrade(&mut app, vec![format!("{}@latest", request.backend)], opts)
+            .await
+            .unwrap();
+        let lock = std::fs::read_to_string(temporary.path().join("osdk.lock")).unwrap();
+        assert!(lock.contains("version = \"2.0.0\""), "{lock}");
+    }
+
     #[test]
     fn exec_dynamic_alias_uses_manifest_target_and_preserves_explicit_paths() {
         let temporary = tempfile::tempdir().unwrap();

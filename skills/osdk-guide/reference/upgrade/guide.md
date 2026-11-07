@@ -17,6 +17,10 @@ osdk upgrade
 osdk upgrade node@20
 ```
 
+浮动请求先通过 backend 重新解析，再按精确版本与动态安装身份复用本地产物；
+不会因为本地已有旧匹配版本而跳过解析，也不会强制重装已满足的精确目标。
+离线只能使用已有 metadata 或本地 catalog，不能确认上游最新。
+
 `upgrade` 会改变已安装内容和 lock；`lock` 只解析/写 lock，`install` 负责复现现有 lock。
 浮动 Rust channel 仍会随上游移动；严格复现应写明确版本或带日期 toolchain。
 

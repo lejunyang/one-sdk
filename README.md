@@ -161,6 +161,16 @@ osdk env --format json             # also bash, zsh, fish, powershell
 osdk exec -- ./gradlew build       # without --tool: this directory's own selection
 ```
 
+To update a globally selected tool to the latest release, request `@latest` explicitly:
+
+```bash
+osdk use -g github:lejunyang/ai-auto-desktop@latest
+```
+
+An explicit selector resolves the current matching release before reusing an installation.
+If that exact target is already installed, osdk keeps it. A bare `use` can reuse a local
+version; `install --force` is for reinstalling or repairing a version.
+
 ## Scenario: make a project toolchain reproducible
 
 Pin tools in the repository. A normal project `use` installs the tool and updates

@@ -60,6 +60,14 @@ the nearest project configuration, creating `osdk.toml` in the current directory
 if none exists. `--global` updates user `config.toml`. An explicit prefix or
 channel is preserved; a bare tool stores the exact resolved version.
 
+An explicit `use TOOL@latest` (including `-g`) resolves the newest matching release
+from the configured version source before checking local installations. It installs
+and selects a newer release, or reports the resolved target as up to date and reuses
+it. Other explicit prefixes or ranges also resolve first; bare `use TOOL` can reuse
+a local match. `upgrade` always resolves its constraints again; `install --force`
+reinstalls a version. Offline resolution uses cached metadata or a local catalog
+and cannot establish whether upstream has changed.
+
 `uninstall` normally expects an exact version, which must be installed (`17.0.10`
 also names the install `17.0.10+7`; anything else is an error rather than a
 reported success). A prefix selects an installed

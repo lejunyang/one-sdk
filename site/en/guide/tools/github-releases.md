@@ -10,6 +10,16 @@ osdk install github:cli/cli@2.62.0
 osdk list-remote github:sharkdp/fd
 ```
 
+To update a global GitHub tool, repeat an explicit `@latest` request:
+
+```bash
+osdk use -g github:lejunyang/ai-auto-desktop@latest
+```
+
+This resolves the newest stable release from the current source before installing
+or reusing that exact version. Drafts are excluded, and prereleases follow
+`--prerelease`. A configured static catalog remains authoritative.
+
 ## Asset selection options
 
 Pass every option through repeatable `-o|--opt KEY=VALUE`:

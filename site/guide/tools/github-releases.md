@@ -10,6 +10,15 @@ osdk install github:cli/cli@2.62.0
 osdk list-remote github:sharkdp/fd
 ```
 
+更新全局 GitHub 工具可重复执行显式 `@latest` 请求，例如：
+
+```bash
+osdk use -g github:lejunyang/ai-auto-desktop@latest
+```
+
+它先解析当前来源的最新稳定 Release，再安装或复用该精确版本。默认不会选择 draft
+或预发布；预发布由 `--prerelease` 策略控制。配置了静态 catalog 时仍以 catalog 为准。
+
 ## Asset 选择选项
 
 所有选项通过可重复的 `-o|--opt KEY=VALUE` 传入：

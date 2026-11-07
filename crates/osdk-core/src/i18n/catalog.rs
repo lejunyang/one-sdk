@@ -20,6 +20,10 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         "msg.already_installed",
         ("{tool} already installed", "{tool} 已安装"),
     );
+    m.insert(
+        "msg.up_to_date",
+        ("{tool} is up to date", "{tool} 已是最新"),
+    );
     m.insert("msg.uninstalled", ("uninstalled {tool}", "已卸载 {tool}"));
     m.insert(
         "msg.model_env_enabled",

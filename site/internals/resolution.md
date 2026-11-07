@@ -43,6 +43,14 @@ CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolv
 
 部分 backend 覆盖默认算法。例如 Node 处理目标架构与 npm range，Python 处理实现、变体、catalog 和预发布策略，Java 处理发行版及 JDK/JRE，Rust 则把 channel 或版本交给隔离的 rustup。Cargo Registry 工具获取配对的 metadata/index source 数据，排除 yanked release，再解析精确/latest/数字前缀 selector；Cargo Git selector 则按原文保留。Go command 工具通过已排序 Go proxy 解析精确/latest/数字前缀/伪版本，并绑定发现的 module root。入口分别见 [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs)、[`python.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/python.rs)、[`java.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/java.rs)、[`rust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/rust.rs)、[`cargo_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/cargo_package.rs) 与 [`go_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/go_package.rs)。
 
+## 安装复用与更新解析
+
+安装路径显式区分本地复用和更新解析。普通执行、裸 `use` 与锁重放保留动态 inventory
+快路径；显式带选择器的 `use` 和 `upgrade` 对浮动请求先调用 backend resolver，不能让
+本地最高版本替代远端解析。精确请求仍可直接复用。解析后按精确版本和完整动态身份
+再次匹配本地安装，因此查询更新不等于重新下载或重装。同版本的 runtime、scope、公开
+选项与 artifact 身份仍必须匹配；`--force` 则跳过复用。离线解析不提供远端新鲜度保证。
+
 ## Lockfile 快路径与边界
 
 无显式工具且无额外选项的 `osdk install` 会优先读取最近的 `osdk.lock`。[`locked_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs) 按当前平台恢复已保存版本字符串、公开 options 和锁定 artifact 信息；没有当前平台区段时才回退到常规项目解析。大多数 backend 保存精确版本；Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 则仍是 channel 名，后续 rustup 安装可能得到更新 toolchain。锁文件按平台保存独立结果，允许同一项目并存 Linux、macOS 和 Windows 解析。

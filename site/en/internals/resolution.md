@@ -47,6 +47,18 @@ After applying version aliases and one-shot backend options, the CLI calls [`Bac
 
 Some backends override the default. Node handles target architecture and npm ranges; Python handles implementations, variants, catalogs, and prerelease policy; Java handles distributions and JDK/JRE; Rust passes channels or versions to its isolated rustup. Cargo registry tools fetch paired metadata/index source data, remove yanked releases, and resolve exact/latest/numeric-prefix selectors, while Cargo Git selectors are retained verbatim. Go command tools resolve exact/latest/numeric-prefix/pseudo-version selectors through ranked Go proxies and bind the discovered module root. See [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs), [`python.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/python.rs), [`java.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/java.rs), [`rust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/rust.rs), [`cargo_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/cargo_package.rs), and [`go_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/go_package.rs).
 
+## Installation reuse and update resolution
+
+Installation distinguishes local reuse from update resolution. Ordinary execution,
+bare `use`, and lock replay retain the dynamic inventory fast path. An explicitly
+selected `use` or `upgrade` resolves floating requests through the backend first;
+the highest installed version must not substitute for remote resolution. Exact
+requests can still reuse local installations directly. After resolution, the exact
+version and full dynamic identity are matched again, so checking for updates does
+not force another download or installation. Runtime, scope, public options, and
+artifact identity must still match. `--force` skips reuse, while offline resolution
+cannot guarantee upstream freshness.
+
 ## Lockfile fast path and boundary
 
 `osdk install` with neither explicit tools nor extra options first reads the nearest `osdk.lock`. [`locked_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs) restores saved version strings, public options, and locked artifact data for the current platform; normal project resolution is used when that platform section is absent. Most backends save an exact version. Floating Rust values such as `stable`, `beta`, and `nightly` remain channel names, so a later rustup install may obtain a newer toolchain. Platform-specific sections let Linux, macOS, and Windows resolutions coexist.

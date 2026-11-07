@@ -18,6 +18,15 @@ osdk use -g python@3.12
 osdk use npm:prettier@3 -o installer=pnpm
 ```
 
+显式 `TOOL@latest`、前缀或范围先解析当前来源中的匹配版本，再检查该精确目标是否已
+安装；已安装则复用并提示已是最新，不把本地最高版本当成远端最新。裸 `TOOL` 可以
+复用本地匹配版本。离线仅使用缓存或本地 catalog，不能确认远端最新；固定 GitHub
+catalog 的权威性不变。更新全局 GitHub 工具：
+
+```bash
+osdk use -g github:lejunyang/ai-auto-desktop@latest
+```
+
 项目级选择写入最近的 `osdk.toml [tools]`，并把实际安装的精确工具及受管 runtime 依赖
 写入同目录的当前平台 `osdk.lock`。配置与 lock 作为一个元数据事务发布：lock 更新失败时
 恢复原配置。已有结构化工具若被 `when` 排除在当前平台之外，`use TOOL@VERSION` 只更新其

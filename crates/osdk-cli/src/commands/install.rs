@@ -406,7 +406,7 @@ pub(crate) fn outdated_current(spec: &VersionSpec, installed: &[String]) -> Stri
 pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
     let explicit = !tools.is_empty();
     let requests = gather_requests(app, tools)?;
-    let resolved = install_requests(app, requests, opts, false, false).await?;
+    let resolved = install_requests_fresh(app, requests, opts).await?;
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     // Upgrading installs every configured tool, global pins included -- that is
@@ -856,17 +856,63 @@ pub(crate) async fn install_requests(
     install_requests_with_inheritance(app, requests, opts, trusted_replay, force, false).await
 }
 
+#[derive(Clone, Copy, Default)]
+struct InstallPolicy {
+    trusted_replay: bool,
+    force: bool,
+    inherit_cross_platform: bool,
+    resolve_remote: bool,
+}
+
+/// Update requests without allowing a local floating match to skip resolution.
+pub(crate) async fn install_requests_fresh(
+    app: &mut App,
+    requests: Vec<ToolRequest>,
+    opts: Vec<String>,
+) -> Result<Vec<(ToolRequest, ToolVersion)>> {
+    install_requests_with_policy(
+        app,
+        requests,
+        opts,
+        InstallPolicy {
+            resolve_remote: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
 pub(crate) async fn install_requests_with_inheritance(
     app: &mut App,
-    mut requests: Vec<ToolRequest>,
+    requests: Vec<ToolRequest>,
     opts: Vec<String>,
     trusted_replay: bool,
     force: bool,
     inherit_cross_platform: bool,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
+    install_requests_with_policy(
+        app,
+        requests,
+        opts,
+        InstallPolicy {
+            trusted_replay,
+            force,
+            inherit_cross_platform,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn install_requests_with_policy(
+    app: &mut App,
+    mut requests: Vec<ToolRequest>,
+    opts: Vec<String>,
+    policy: InstallPolicy,
+) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
     for request in &mut requests {
-        if !trusted_replay {
+        if !policy.trusted_replay {
             reject_public_internal_options(&request.options)?;
         }
         for (key, value) in &parsed_opts {
@@ -874,7 +920,7 @@ pub(crate) async fn install_requests_with_inheritance(
         }
     }
     let mut requests = inject_managed_dependencies(app, requests)?;
-    let inherited_specs = if inherit_cross_platform {
+    let inherited_specs = if policy.inherit_cross_platform {
         inherit_versions_from_other_platforms(app, &mut requests)?
     } else {
         Default::default()
@@ -925,21 +971,24 @@ pub(crate) async fn install_requests_with_inheritance(
     }
     let mut resolved = Vec::new();
     for request in node_requests {
-        let (backend, version) = install_one_without_shims(app, &request, force).await?;
+        let (backend, version) =
+            install_one_with_resolution(app, &request, policy.force, policy.resolve_remote).await?;
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     let (rust_requests, remaining_requests) =
         partition_runtime_dependency(remaining_requests, "rust", "cargo:");
     for request in rust_requests {
-        let (backend, version) = install_one_without_shims(app, &request, force).await?;
+        let (backend, version) =
+            install_one_with_resolution(app, &request, policy.force, policy.resolve_remote).await?;
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     let (go_requests, remaining_requests) =
         partition_runtime_dependency(remaining_requests, "go", "go:");
     for request in go_requests {
-        let (backend, version) = install_one_without_shims(app, &request, force).await?;
+        let (backend, version) =
+            install_one_with_resolution(app, &request, policy.force, policy.resolve_remote).await?;
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
@@ -953,7 +1002,8 @@ pub(crate) async fn install_requests_with_inheritance(
     let (uv_requests, mut remaining_requests) =
         partition_runtime_dependency(remaining_requests, "pypi:uv", "pypi:");
     for request in uv_requests {
-        let (backend, version) = install_one_without_shims(app, &request, force).await?;
+        let (backend, version) =
+            install_one_with_resolution(app, &request, policy.force, policy.resolve_remote).await?;
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
@@ -964,7 +1014,9 @@ pub(crate) async fn install_requests_with_inheritance(
     let installed = stream::iter(remaining_requests.into_iter().map(|req| {
         let app_ref: &App = app;
         async move {
-            let installed = install_one_without_shims(app_ref, &req, force).await?;
+            let installed =
+                install_one_with_resolution(app_ref, &req, policy.force, policy.resolve_remote)
+                    .await?;
             Ok::<_, anyhow::Error>((req, installed))
         }
     }))
@@ -1557,7 +1609,9 @@ pub(crate) fn installed_dynamic_match(
         let identity = &install.manifest.identity;
         identity.version == selected
             && expected.as_ref().is_none_or(|expected| {
-                identity.scope == expected.scope && identity.dependencies == expected.dependencies
+                identity.scope == expected.scope
+                    && identity.dependencies == expected.dependencies
+                    && (expected.materials.is_empty() || identity.materials == expected.materials)
             })
     })?;
     // The scan happened a moment ago; confirm the directory and manifest are
@@ -1572,6 +1626,15 @@ pub(crate) async fn install_one_without_shims(
     req: &ToolRequest,
     force: bool,
 ) -> Result<(std::sync::Arc<dyn Backend>, ToolVersion)> {
+    install_one_with_resolution(app, req, force, false).await
+}
+
+async fn install_one_with_resolution(
+    app: &App,
+    req: &ToolRequest,
+    force: bool,
+    resolve_remote: bool,
+) -> Result<(std::sync::Arc<dyn Backend>, ToolVersion)> {
     if app.refresh_sources {
         let backend = app.registry.get(&req.backend)?;
         select::refresh(&app.ctx, backend.as_ref()).await?;
@@ -1581,7 +1644,10 @@ pub(crate) async fn install_one_without_shims(
     // Answer from disk before resolving. `resolve_version` goes to the network,
     // so checking after it would still pay the round-trip -- and would still
     // fail with no network, for a tool that is already installed.
-    if !force && !app.refresh_sources {
+    if !force
+        && !app.refresh_sources
+        && (!resolve_remote || matches!(effective.spec, VersionSpec::Exact(_)))
+    {
         if let Some(installed) = installed_dynamic_match(app, backend.as_ref(), &effective) {
             backend.ensure_post_install(&app.ctx, &installed)?;
             println!("{}", t!("msg.already_installed", tool = installed));
@@ -1593,12 +1659,24 @@ pub(crate) async fn install_one_without_shims(
         .await
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
     bind_dynamic_request_options(&effective, &mut tv);
+    // Once the target is known, reuse only that exact installation and identity.
+    // Checking a floating spec here would pick an older local version again.
+    if resolve_remote && !force {
+        let mut exact = effective.clone();
+        exact.spec = VersionSpec::Exact(tv.version.clone());
+        exact.options = tv.options.clone();
+        if let Some(installed) = installed_dynamic_match(app, backend.as_ref(), &exact) {
+            backend.ensure_post_install(&app.ctx, &installed)?;
+            println!("{}", t!("msg.up_to_date", tool = installed));
+            return Ok((backend, installed));
+        }
+    }
 
     // The `:` exclusion stays: `is_installed` looks under `<tool>/<version>`,
     // which is the parent of a dynamic install root, so for a dynamic tool it
     // would report "installed" from a directory that holds no completion
-    // marker at all. Dynamic tools take the disk fast path above instead; what
-    // reaches here is `--force` or `--refresh`, which must reinstall anyway.
+    // marker at all. Dynamic tools take the identity-aware checks above, or
+    // validate their exact installation inside the backend.
     let installed = !force
         && osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
         && !backend.id().contains(':');
@@ -1623,7 +1701,12 @@ pub(crate) async fn install_one_without_shims(
     };
     if installed && link_stubs.is_empty() {
         backend.ensure_post_install(&app.ctx, &tv)?;
-        println!("{}", t!("msg.already_installed", tool = tv));
+        let message = if resolve_remote {
+            "msg.up_to_date"
+        } else {
+            "msg.already_installed"
+        };
+        println!("{}", t!(message, tool = tv));
     } else {
         if !link_stubs.is_empty() {
             println!(
