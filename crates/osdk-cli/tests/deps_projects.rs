@@ -154,6 +154,90 @@ auto=false",
     assert!(String::from_utf8_lossy(&output.stderr).contains("identical provider options"));
 }
 #[test]
+fn a_member_lockfile_kept_for_a_separate_npm_deployment_does_not_block_the_pnpm_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "osdk.toml",
+        "[tools]
+pnpm = \"11\"
+
+[deps.pnpm]
+",
+    );
+    write(
+        root,
+        "package.json",
+        r#"{"name":"dev-flow","private":true}"#,
+    );
+    write(
+        root,
+        "pnpm-workspace.yaml",
+        "packages:
+  - packages/*
+",
+    );
+    write(
+        root,
+        "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'
+
+importers:
+
+  .: {}
+
+  packages/dev-flow: {}
+
+  packages/figma-service: {}
+",
+    );
+    write(
+        root,
+        "packages/dev-flow/package.json",
+        r#"{"name":"dev-flow-app"}"#,
+    );
+    write(
+        root,
+        "packages/figma-service/package.json",
+        r#"{"name":"figma-service"}"#,
+    );
+    let npm_lock = r#"{"name":"figma-service","lockfileVersion":3,"packages":{}}"#;
+    write(root, "packages/figma-service/package-lock.json", npm_lock);
+
+    for cwd in [root.to_path_buf(), root.join("packages/figma-service")] {
+        let output = run(root, &cwd, &["deps", "--dry-run"]);
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(text.matches("would run in").count(), 1, "{text}");
+        assert!(
+            text.contains("pnpm install --frozen-lockfile --ignore-scripts"),
+            "{text}"
+        );
+        let planned = text
+            .lines()
+            .find(|line| line.starts_with("would run in"))
+            .unwrap();
+        assert!(
+            !planned.contains("figma-service"),
+            "planned at the root: {text}"
+        );
+    }
+
+    let output = run(root, root, &["deps", "--list", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("note: ")
+            && text.contains("package-lock.json belongs to `npm` and is ignored"),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("packages/figma-service/package-lock.json")).unwrap(),
+        npm_lock
+    );
+}
+#[test]
 fn uv_workspace_plan_uses_all_packages_and_records_member_manifests() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

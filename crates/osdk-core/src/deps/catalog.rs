@@ -12,6 +12,35 @@ pub struct ProjectEntry {
     pub project: DetectedProject,
     pub config: ProviderConfig,
     pub unit: Option<super::workspace::WorkspaceUnit>,
+    /// Lockfiles of other installers inside this workspace member, set aside
+    /// because the shared installation owns the member. Reported, never used.
+    pub ignored_locks: Vec<IgnoredLock>,
+}
+
+/// A lockfile found in a native workspace member that belongs to a different
+/// installer than the workspace's own, such as a `package-lock.json` kept for a
+/// separate npm deployment of one pnpm member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredLock {
+    pub provider: String,
+    pub ecosystem: Ecosystem,
+    pub path: PathBuf,
+}
+impl IgnoredLock {
+    pub fn note(&self, workspace: &str) -> String {
+        format!(
+            "{} belongs to `{}` and is ignored: the shared {workspace} workspace installation owns this member",
+            self.path.display(),
+            self.provider
+        )
+    }
+}
+
+/// What a directory's manifests and lockfiles decide.
+#[derive(Debug, Default)]
+pub struct Ownership {
+    pub projects: Vec<DetectedProject>,
+    pub ignored_locks: Vec<IgnoredLock>,
 }
 impl ProjectEntry {
     pub fn id(&self) -> String {
@@ -313,7 +342,15 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                 Ok((id.clone(), config))
             })
             .collect::<Result<_>>()?;
-        let mut projects = owned_in(&directory, &configs, &disabled)?;
+        let workspaces: Vec<&str> = units
+            .iter()
+            .filter(|unit| unit.members.contains(&directory))
+            .map(|unit| unit.provider.as_str())
+            .collect();
+        let Ownership {
+            mut projects,
+            ignored_locks,
+        } = owned_in(&directory, &configs, &disabled, &workspaces)?;
         for unit in units
             .iter()
             .filter(|unit| unit.root == directory && unit.provider == "pnpm")
@@ -364,12 +401,18 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
             let config = configs.get(&*project.provider).unwrap().clone();
             let choice = select_installer(&project, &[])?;
             let _ = choice; // Validate even when CLI filters omit this project.
+            let ignored_locks = ignored_locks
+                .iter()
+                .filter(|lock| unit.is_some() && lock.ecosystem == project.ecosystem)
+                .cloned()
+                .collect();
             result.push(ProjectEntry {
                 relative: relative.clone(),
                 source: source.clone(),
                 project,
                 config,
                 unit,
+                ignored_locks,
             });
         }
         for (id, config) in &configs {
@@ -388,6 +431,7 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                     ),
                     config: config.clone(),
                     unit: None,
+                    ignored_locks: Vec::new(),
                 });
             }
         }
@@ -448,12 +492,35 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
 
 /// Lock and manifest ownership must be determined using all known providers,
 /// including disabled ones. A filter must never hide a contradictory lockfile.
+///
+/// `workspaces` names the providers of the native workspaces this directory is
+/// a member of. The workspace's installation runs at its root and never reads a
+/// member's lockfile of another installer (pnpm ignores a member's
+/// `package-lock.json`), so such a lockfile does not decide who owns the
+/// member: it is set aside and reported instead. A standalone project, and a
+/// workspace root itself, keep the strict rule that two lockfiles conflict.
 pub fn owned_in(
     directory: &Path,
     configs: &BTreeMap<String, ProviderConfig>,
     disabled: &[String],
-) -> Result<Vec<DetectedProject>> {
-    let all = discover(directory, Some(directory), PROVIDERS)?;
+    workspaces: &[&str],
+) -> Result<Ownership> {
+    let mut all = discover(directory, Some(directory), PROVIDERS)?;
+    let mut ignored_locks = Vec::new();
+    for project in &mut all {
+        let shared = workspaces.iter().find(|workspace| {
+            provider_schema(workspace).is_some_and(|schema| schema.ecosystem == project.ecosystem)
+        });
+        if shared.is_some_and(|shared| *shared != project.provider) {
+            if let Some(path) = project.native_lock.take() {
+                ignored_locks.push(IgnoredLock {
+                    provider: project.provider.to_string(),
+                    ecosystem: project.ecosystem,
+                    path,
+                });
+            }
+        }
+    }
     let mut result = Vec::new();
     for ecosystem in [
         Ecosystem::Node,
@@ -517,7 +584,10 @@ pub fn owned_in(
             result.push((***project).clone());
         }
     }
-    Ok(result)
+    Ok(Ownership {
+        projects: result,
+        ignored_locks,
+    })
 }
 
 #[cfg(test)]
@@ -633,6 +703,133 @@ mod tests {
         write(root, "apps/a/package-lock.json", "{}");
         assert!(catalog(root, &root.join("osdk.toml"), &config).is_err());
     }
+    fn pnpm_workspace_with_npm_locked_member(root: &Path) -> DepsConfig {
+        write(root, "osdk.toml", "");
+        write(
+            root,
+            "package.json",
+            r#"{"name":"dev-flow","private":true}"#,
+        );
+        write(
+            root,
+            "pnpm-lock.yaml",
+            "lockfileVersion: '9.0'
+",
+        );
+        write(
+            root,
+            "pnpm-workspace.yaml",
+            "packages: ['packages/*']
+",
+        );
+        write(root, "packages/app/package.json", r#"{"name":"app"}"#);
+        write(
+            root,
+            "packages/figma-service/package.json",
+            r#"{"name":"figma-service"}"#,
+        );
+        write(root, "packages/figma-service/package-lock.json", "{}");
+        toml::from_str(
+            "[pnpm]
+",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_workspace_member_lockfile_of_another_installer_does_not_decide_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let config = pnpm_workspace_with_npm_locked_member(root);
+        let found = catalog(root, &root.join("osdk.toml"), &config).unwrap();
+        assert_eq!(
+            found.iter().map(ProjectEntry::id).collect::<Vec<_>>(),
+            [
+                "//:pnpm",
+                "//packages/app:pnpm",
+                "//packages/figma-service:pnpm"
+            ]
+        );
+        let member = &found[2];
+        assert!(member.unit.is_some());
+        assert_eq!(member.project.native_lock, None);
+        let lock = root
+            .canonicalize()
+            .unwrap()
+            .join("packages/figma-service/package-lock.json");
+        assert_eq!(
+            member.ignored_locks,
+            [IgnoredLock {
+                provider: "npm".into(),
+                ecosystem: Ecosystem::Node,
+                path: lock,
+            }]
+        );
+        assert!(found[0].ignored_locks.is_empty() && found[1].ignored_locks.is_empty());
+    }
+
+    #[test]
+    fn workspace_lock_exemption_keeps_every_other_conflict_strict() {
+        // The member's own declaration still wins over the workspace.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let config = pnpm_workspace_with_npm_locked_member(root);
+        write(
+            root,
+            "packages/figma-service/package.json",
+            r#"{"packageManager":"npm@11.0.0"}"#,
+        );
+        let error = catalog(root, &root.join("osdk.toml"), &config).unwrap_err();
+        assert!(error.to_string().contains("declares package manager `npm`"));
+
+        // A lockfile of the workspace's own installer is still independent.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let config = pnpm_workspace_with_npm_locked_member(root);
+        write(
+            root,
+            "packages/app/pnpm-lock.yaml",
+            "lockfileVersion: '9.0'
+",
+        );
+        let error = catalog(root, &root.join("osdk.toml"), &config).unwrap_err();
+        assert!(
+            error.to_string().contains("independent lockfile"),
+            "{error}"
+        );
+
+        // The workspace root itself is not a member: two lockfiles conflict.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let config = pnpm_workspace_with_npm_locked_member(root);
+        write(root, "package-lock.json", "{}");
+        let error = catalog(root, &root.join("osdk.toml"), &config).unwrap_err();
+        assert!(
+            error.to_string().contains("conflicting lockfiles"),
+            "{error}"
+        );
+
+        // The same directory outside any workspace keeps its npm ownership.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let config = pnpm_workspace_with_npm_locked_member(root);
+        write(
+            root,
+            "pnpm-workspace.yaml",
+            "packages: ['packages/app']
+",
+        );
+        let config = DepsConfig {
+            roots: vec!["packages/figma-service".into()],
+            ..config
+        };
+        let error = catalog(root, &root.join("osdk.toml"), &config).unwrap_err();
+        assert!(
+            error.to_string().contains("enable `[deps.npm]` instead"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn overrides_keep_false_and_empty_and_merge_env() {
         let config: DepsConfig=toml::from_str("[uv]\nenv={A='1',B='1'}\n[projects.'api'.uv]\nauto=false\nsources=[]\noutputs=[]\nenv={B='2'}\n").unwrap();
