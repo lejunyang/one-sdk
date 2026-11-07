@@ -499,6 +499,11 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
 /// `package-lock.json`), so such a lockfile does not decide who owns the
 /// member: it is set aside and reported instead. A standalone project, and a
 /// workspace root itself, keep the strict rule that two lockfiles conflict.
+///
+/// For the same reason a member with neither a declaration nor a lockfile
+/// belongs to its workspace's installer even when other providers of the
+/// ecosystem are enabled: a shared workspace requires every member to be owned
+/// by that installer, so any other choice would be refused later anyway.
 pub fn owned_in(
     directory: &Path,
     configs: &BTreeMap<String, ProviderConfig>,
@@ -507,11 +512,13 @@ pub fn owned_in(
 ) -> Result<Ownership> {
     let mut all = discover(directory, Some(directory), PROVIDERS)?;
     let mut ignored_locks = Vec::new();
+    let shared_in = |ecosystem: Ecosystem| {
+        workspaces.iter().copied().find(|workspace| {
+            provider_schema(workspace).is_some_and(|schema| schema.ecosystem == ecosystem)
+        })
+    };
     for project in &mut all {
-        let shared = workspaces.iter().find(|workspace| {
-            provider_schema(workspace).is_some_and(|schema| schema.ecosystem == project.ecosystem)
-        });
-        if shared.is_some_and(|shared| *shared != project.provider) {
+        if shared_in(project.ecosystem).is_some_and(|shared| shared != project.provider) {
             if let Some(path) = project.native_lock.take() {
                 ignored_locks.push(IgnoredLock {
                     provider: project.provider.to_string(),
@@ -560,13 +567,18 @@ pub fn owned_in(
         if owner.is_some_and(|owner| disabled.iter().any(|id| id == owner)) {
             continue;
         }
-        let eligible: Vec<_> = peers
+        let mut eligible: Vec<_> = peers
             .iter()
             .filter(|p| {
                 configs.contains_key(&*p.provider)
                     && owner.is_none_or(|owner| owner == &*p.provider)
             })
             .collect();
+        if let Some(shared) = shared_in(ecosystem) {
+            if owner.is_none() && eligible.iter().any(|p| p.provider == shared) {
+                eligible.retain(|p| p.provider == shared);
+            }
+        }
         if eligible.is_empty() {
             if let Some(owner) = owner {
                 if let Some(rival) = peers
@@ -826,6 +838,67 @@ mod tests {
         let error = catalog(root, &root.join("osdk.toml"), &config).unwrap_err();
         assert!(
             error.to_string().contains("enable `[deps.npm]` instead"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_member_defaults_to_the_workspace_installer_among_enabled_providers() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        pnpm_workspace_with_npm_locked_member(root);
+        write(root, "tools/deploy/package.json", r#"{"name":"deploy"}"#);
+        write(root, "tools/deploy/package-lock.json", "{}");
+        let config: DepsConfig = toml::from_str(
+            "roots=['tools/deploy']
+[pnpm]
+[npm]
+",
+        )
+        .unwrap();
+        let found = catalog(root, &root.join("osdk.toml"), &config).unwrap();
+        assert_eq!(
+            found.iter().map(ProjectEntry::id).collect::<Vec<_>>(),
+            [
+                "//:pnpm",
+                "//packages/app:pnpm",
+                "//packages/figma-service:pnpm",
+                "//tools/deploy:npm"
+            ]
+        );
+        assert_eq!(found[2].ignored_locks.len(), 1);
+        assert!(found[3].unit.is_none());
+
+        // Outside a workspace nothing breaks the tie.
+        write(root, "tools/plain/package.json", r#"{"name":"plain"}"#);
+        let config: DepsConfig = toml::from_str(
+            "roots=['tools/plain']
+[pnpm]
+[npm]
+",
+        )
+        .unwrap();
+        let error = catalog(root, &root.join("osdk.toml"), &config).unwrap_err();
+        assert!(
+            error.to_string().contains("ambiguous node providers"),
+            "{error}"
+        );
+
+        // A member's own declaration still outranks its workspace.
+        let config: DepsConfig = toml::from_str(
+            "[pnpm]
+[npm]
+",
+        )
+        .unwrap();
+        write(
+            root,
+            "packages/app/package.json",
+            r#"{"packageManager":"npm@11.0.0"}"#,
+        );
+        let error = catalog(root, &root.join("osdk.toml"), &config).unwrap_err();
+        assert!(
+            error.to_string().contains("conflicting package manager"),
             "{error}"
         );
     }

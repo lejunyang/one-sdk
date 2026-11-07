@@ -236,6 +236,46 @@ importers:
         std::fs::read_to_string(root.join("packages/figma-service/package-lock.json")).unwrap(),
         npm_lock
     );
+
+    // Enabling npm for a separate project does not make the members ambiguous:
+    // they stay with the shared pnpm installation.
+    write(
+        root,
+        "osdk.toml",
+        "[tools]
+pnpm = \"11\"
+
+[deps]
+roots = [\"tools/deploy\"]
+
+[deps.pnpm]
+
+[deps.npm]
+",
+    );
+    write(root, "tools/deploy/package.json", r#"{"name":"deploy"}"#);
+    write(root, "tools/deploy/package-lock.json", npm_lock);
+    let output = run(root, root, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let planned: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with("would run in"))
+        .collect();
+    assert_eq!(planned.len(), 2, "{text}");
+    assert!(
+        planned
+            .iter()
+            .any(|line| line.contains("pnpm install --frozen-lockfile")
+                && !line.contains("packages")),
+        "{text}"
+    );
+    assert!(
+        planned
+            .iter()
+            .any(|line| line.contains("deploy") && line.contains("npm ci")),
+        "{text}"
+    );
 }
 #[test]
 fn uv_workspace_plan_uses_all_packages_and_records_member_manifests() {
