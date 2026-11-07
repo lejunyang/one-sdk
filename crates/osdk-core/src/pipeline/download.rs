@@ -520,7 +520,7 @@ mod tests {
             let temporary = tempfile::tempdir().unwrap();
             let mut master = -1;
             let mut slave = -1;
-            let size = libc::winsize {
+            let mut size = libc::winsize {
                 ws_row: 40,
                 ws_col: 160,
                 ws_xpixel: 0,
@@ -532,8 +532,10 @@ mod tests {
                         &mut master,
                         &mut slave,
                         std::ptr::null_mut(),
-                        std::ptr::null(),
-                        &size,
+                        // macOS requires mutable pointers; these also coerce to
+                        // the const pointers accepted by Linux.
+                        std::ptr::null_mut(),
+                        &raw mut size,
                     )
                 },
                 0,
