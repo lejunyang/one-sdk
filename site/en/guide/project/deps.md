@@ -365,6 +365,27 @@ source changed, not because anything executes. Achieving the same thing through
 `env` (for instance `NPM_CONFIG_REGISTRY`) requires approval too: a gate one
 spelling walks around is not a gate.
 
+A provider with a custom `run` gets its registry the same way. For example, to
+install only one app and win over the mirror in the machine's `.npmrc`:
+
+```toml
+[settings.precedence]
+npm = "osdk"
+
+[registries.npm]
+default = "https://registry.example/"
+
+[deps.pnpm]
+run = "pnpm install --frozen-lockfile --filter app"
+```
+
+osdk decides from that command's own program and arguments and injects the
+selected registry into pnpm. If the command passes `--registry`, or
+`[deps.pnpm].env` sets a registry variable such as `npm_config_registry`, what
+you wrote wins and osdk does not override it. A `run` whose program is not a
+package manager (a script, `make`, ...) is unaffected. The `sources:` line of
+`osdk deps --dry-run --explain` states the decision.
+
 ## Full configuration
 
 ```toml
@@ -458,7 +479,7 @@ Undeclared `sources`, or declared sources that match no files at all, never coun
 as fresh: a predicate that matches nothing is vacuously true, which would dress
 up "nothing was checked" as "nothing changed".
 
-`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. Legacy source fields have been removed; see migration below.
+`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts; an override that invokes a package manager still gets its registry from `registries` (see [Changing the registry](#changing-the-registry)). `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. Legacy source fields have been removed; see migration below.
 
 ### Per-project dependencies
 
@@ -511,13 +532,14 @@ proxy = "https://proxy.golang.org,direct"
 ```
 
 - Invocation CLI source options and explicit process source variables win; `deps.env` supplies that process environment. `packages` orders explicit osdk settings against native files, never authentication.
+- A custom `deps.<provider>.run` goes through the same adapters: the decision comes from that command's program (`npm`, `pnpm`, `yarn`, `bun`, `deno`, `uv`, `go mod`, ...) and its own arguments, under the same rules as built-in commands. Registry arguments (such as `--registry`), arguments selecting another directory or native configuration (such as `--dir`, `--config`), and explicit source variables in `deps.env` or the process environment pass through without injection. A program that is not a package manager (a script, `make`, ...) gets no source variables.
 - `packages = "native"` preserves native registries, scopes, credentials, proxies and TLS configuration. `"osdk"` overrides only declared default/index settings; scopes and authentication stay native. Missing overrides preserve native behavior. Automatic mirrors never replace explicit native configuration. Complex uv native tables are conservatively preserved as a group, without rewriting named indexes or package bindings.
 - npm, pnpm, Yarn Classic, Yarn Berry and Bun use their own variables: `npm_config_registry`, `npm_config_registry` + `pnpm_config_registry` (pnpm 10/11), `YARN_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`, `BUN_CONFIG_REGISTRY`. Yarn's major must be known; a Node version is never interpreted as Yarn's major. pnpm resolves workspace configuration itself.
 - Both Python deps providers use uv. `default` is the lowest-priority default index; `indexes` supplies explicitly ordered additional indexes with `first-index` safety. These are not failure fallback mirrors. Keep named indexes, package bindings and credential interpolation in native configuration.
 - `urls` remains an anonymous mirror candidate list for the default source only. All-source failure stops before the manager starts. Installation failures never trigger automatic lifecycle-script retries. Offline mode skips probes; native offline flags constrain installation.
 - `default = ""` clears an inherited osdk default override and disables automatic mirrors for that item; `indexes = []` clears osdk additional indexes. Neither deletes native settings. `urls = []` retains its built-in-candidate meaning.
 - Project `registries` replaces the user section. Explicit `extends` merges fields and replaces arrays. `[deps.<provider>.registries]` uses the same schema as a whole-section local replacement. Cargo, Deno and custom deps reject this local field; use native configuration or `env`. Go preserves GOPROXY comma/pipe behavior rather than inventing URL retries.
-- `osdk current` displays tool candidates and policy; `osdk deps --dry-run --explain` reports package decisions, discovered native candidate files and tool selection. The native manager resolves its effective configuration; unknown attribution is stated rather than invented. Native files, source environment and configuration participate in opaque freshness hashes. Credentials are excluded from displayed commands and osdk.lock; custom command arguments/environment are hidden entirely. Native subprocesses remain responsible for redacting their own output.
+- `osdk current` displays tool candidates and policy; `osdk deps --dry-run --explain` reports package decisions (a custom `run` gets its `sources:` line too), discovered native candidate files and tool selection. The native manager resolves its effective configuration; unknown attribution is stated rather than invented. Native files, source environment and configuration participate in opaque freshness hashes. Credentials are excluded from displayed commands and osdk.lock; custom command arguments/environment are hidden entirely. Native subprocesses remain responsible for redacting their own output.
 
 ### Migration
 

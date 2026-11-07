@@ -32,7 +32,7 @@ allow_build_from_source = false
 支持的 provider 包括 `npm`、`pnpm`、`yarn`、`bun`、`deno`、`go`、`cargo`、`uv`、
 `pip-requirements`。普通 requirements 文件不是完整 lock，不能与 `--frozen` 组合。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧 `index` / `extra_index` 已移除。请使用 `registries`；规则见 configuration/registries.md。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。覆盖命令调用包管理器时（如 `run = "pnpm install --frozen-lockfile --filter app"`）仍按 `registries` 与 `[settings.precedence]` 选源并注入，例外与内置命令相同：命令里的显式源参数（如 `--registry`）、`deps.env` 或进程环境中显式的源变量优先，osdk 不覆盖；程序不是包管理器时不注入。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧 `index` / `extra_index` 已移除。请使用 `registries`；规则见 configuration/registries.md。
 
 ### 按项目声明依赖
 

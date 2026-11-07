@@ -8559,6 +8559,238 @@ fn a_custom_provider_runs_and_tracks_its_own_freshness() {
     assert!(stdout.contains("generated"), "{stdout}");
 }
 
+/// Stand-in for the program a custom `run` names, found through PATH.
+///
+/// It appends the npm-family registry variables it actually received to
+/// `seen.txt` in its working directory, so assertions read what reached the
+/// child process rather than what osdk said it would do.
+fn write_registry_recorder(bin: &Path, name: &str) {
+    std::fs::create_dir_all(bin).unwrap();
+    #[cfg(windows)]
+    std::fs::write(
+        bin.join(format!("{name}.cmd")),
+        "@echo off\r\n\
+         set \"N=unset\"\r\n\
+         if defined npm_config_registry set \"N=%npm_config_registry%\"\r\n\
+         set \"P=unset\"\r\n\
+         if defined pnpm_config_registry set \"P=%pnpm_config_registry%\"\r\n\
+         >>seen.txt echo npm=%N%\r\n\
+         >>seen.txt echo pnpm=%P%\r\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    write_executable(&bin.join(name), REGISTRY_RECORDER_SH);
+}
+
+/// The POSIX form of [`write_registry_recorder`], also used as a managed
+/// pnpm fixture.
+#[cfg(unix)]
+const REGISTRY_RECORDER_SH: &str = "#!/bin/sh\nprintf 'npm=%s\\npnpm=%s\\n' \"${npm_config_registry-unset}\" \"${pnpm_config_registry-unset}\" >> seen.txt\n";
+
+/// The selected default in the fixtures below. Never a real mirror.
+const CUSTOM_RUN_REGISTRY: &str = "https://registry.example/";
+
+/// A project shaped like the one that motivated custom-run source selection:
+/// the machine's npmrc names a mirror, and the project asks osdk to win over it
+/// with `npm = "osdk"` and a default.
+fn write_custom_run_project(root: &Path, project: &Path, default: &str, deps: &str) {
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::write(
+        root.join("home/.npmrc"),
+        "registry=https://machine-mirror.example/\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[settings.precedence]\nnpm = \"osdk\"\n\n[registries.npm]\ndefault = \"{default}\"\n\n{deps}"
+        ),
+    )
+    .unwrap();
+}
+
+/// A custom `run` that invokes a package manager gets the same package-source
+/// selection as a built-in plan, decided from that command's own arguments and
+/// environment.
+///
+/// Each exception is checked on the recorded child environment, not on osdk's
+/// output. The non-package-manager command is the control: the adapter is keyed
+/// on the program, so a `run` line that is not a package manager stays untouched.
+#[test]
+fn custom_run_applies_package_source_selection_by_its_program() {
+    let explicit = "https://explicit.registry.example/";
+    let cases = [
+        (
+            "pnpm",
+            "run = \"pnpm install --frozen-lockfile --filter app --config.confirmModulesPurge=false\"\n"
+                .to_string(),
+            (CUSTOM_RUN_REGISTRY, CUSTOM_RUN_REGISTRY),
+            "registries.npm selected via pnpm",
+        ),
+        (
+            "pnpm",
+            format!(
+                "run = \"pnpm install --frozen-lockfile\"\nenv = {{ npm_config_registry = \"{explicit}\" }}\n"
+            ),
+            (explicit, "unset"),
+            "native environment npm_config_registry has invocation priority",
+        ),
+        (
+            "pnpm",
+            format!("run = \"pnpm install --registry {explicit}\"\n"),
+            ("unset", "unset"),
+            "the command has an explicit registry",
+        ),
+        (
+            "fixture-tool",
+            "run = \"fixture-tool install\"\n".to_string(),
+            ("unset", "unset"),
+            "native command; no package-source adapter",
+        ),
+    ];
+    for (program, run, (npm, pnpm), evidence) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("project");
+        let bin = root.join("bin");
+        write_registry_recorder(&bin, program);
+        write_custom_run_project(
+            root,
+            &project,
+            CUSTOM_RUN_REGISTRY,
+            &format!("[deps.web]\n{run}"),
+        );
+        let config = project.join("osdk.toml").display().to_string();
+        let path = bin.display().to_string();
+        let env = [
+            ("OSDK_TRUSTED_CONFIG_PATHS", config.as_str()),
+            ("PATH", path.as_str()),
+        ];
+
+        let output = run_isolated_in_with_env(root, &project, &["deps", "--explain"], &env);
+        assert!(output.status.success(), "{run}: {output:?}");
+        assert_eq!(
+            std::fs::read_to_string(project.join("seen.txt"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [format!("npm={npm}"), format!("pnpm={pnpm}")],
+            "{run}"
+        );
+        // One line from planning, one from execution, and both must state the
+        // same decision: osdk's own planning-time injection is not an explicit
+        // variable that "has invocation priority".
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let decisions: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("sources: "))
+            .collect();
+        assert_eq!(decisions.len(), 2, "{run}: {stdout}");
+        assert!(
+            decisions.iter().all(|line| line.starts_with(evidence)),
+            "{run}: {stdout}"
+        );
+    }
+}
+
+/// `--dry-run --explain` reports a custom run's package-source decision without
+/// running it or printing the URL, and the selection is part of what freshness
+/// tracks.
+///
+/// Fresh-after-run guards the implementation: the registry is chosen while
+/// planning and must be the same material when the run is recorded, or a custom
+/// run would never become fresh. Stale-after-change is the other direction.
+#[test]
+fn custom_run_source_selection_is_explained_and_tracked_by_freshness() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    let bin = root.join("bin");
+    write_registry_recorder(&bin, "pnpm");
+    let deps = "[deps.web]\nsources = [\"package.json\"]\nrun = \"pnpm install --filter app\"\n";
+    write_custom_run_project(root, &project, CUSTOM_RUN_REGISTRY, deps);
+    std::fs::write(project.join("package.json"), r#"{"name":"p"}"#).unwrap();
+    let config = project.join("osdk.toml").display().to_string();
+    let path = bin.display().to_string();
+    let env = [
+        ("OSDK_TRUSTED_CONFIG_PATHS", config.as_str()),
+        ("PATH", path.as_str()),
+    ];
+    let seen = project.join("seen.txt");
+
+    let output =
+        run_isolated_in_with_env(root, &project, &["deps", "--dry-run", "--explain"], &env);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("sources: registries.npm selected via pnpm"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains(CUSTOM_RUN_REGISTRY), "{stdout}");
+    assert!(!seen.exists(), "a dry run must not execute the command");
+
+    let output = run_isolated_in_with_env(root, &project, &["deps"], &env);
+    assert!(output.status.success(), "{output:?}");
+    assert!(std::fs::read_to_string(&seen)
+        .unwrap()
+        .contains(&format!("pnpm={CUSTOM_RUN_REGISTRY}")));
+    let output = run_isolated_in_with_env(root, &project, &["deps", "--list"], &env);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("fresh"),
+        "{output:?}"
+    );
+
+    let changed = "https://changed.registry.example/";
+    write_custom_run_project(root, &project, changed, deps);
+    let output = run_isolated_in_with_env(root, &project, &["deps", "--list"], &env);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("stale"),
+        "{output:?}"
+    );
+    let output = run_isolated_in_with_env(root, &project, &["deps"], &env);
+    assert!(output.status.success(), "{output:?}");
+    assert!(std::fs::read_to_string(&seen)
+        .unwrap()
+        .contains(&format!("pnpm={changed}")));
+}
+
+/// The reported shape exactly: a built-in `[deps.pnpm]` whose `run` filters the
+/// install. Its managed pnpm is a fixture, so only the injected environment is
+/// under test.
+#[cfg(unix)]
+#[test]
+fn builtin_provider_with_custom_run_gets_the_selected_registry() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    write_fake_registry_manager(root, "pnpm", "10.0.0", "pnpm", REGISTRY_RECORDER_SH);
+    write_custom_run_project(
+        root,
+        &project,
+        CUSTOM_RUN_REGISTRY,
+        "[tools]\nnode = \"20.0.0\"\npnpm = \"10.0.0\"\n\n[deps.pnpm]\nrun = \"pnpm install --frozen-lockfile --filter app --config.confirmModulesPurge=false\"\n",
+    );
+    std::fs::write(project.join("package.json"), r#"{"name":"p"}"#).unwrap();
+    let config = project.join("osdk.toml").display().to_string();
+    let output = run_isolated_in_with_env(
+        root,
+        &project,
+        &["deps"],
+        &[
+            ("OSDK_TRUSTED_CONFIG_PATHS", config.as_str()),
+            ("PATH", "/usr/bin:/bin"),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(project.join("seen.txt")).unwrap(),
+        format!("npm={CUSTOM_RUN_REGISTRY}\npnpm={CUSTOM_RUN_REGISTRY}\n")
+    );
+}
+
 /// `depends` decides the order, and a cycle is refused rather than resolved
 /// arbitrarily.
 ///
