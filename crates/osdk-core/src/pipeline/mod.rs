@@ -558,6 +558,39 @@ pub fn is_installed(dirs: &Dirs, tool: &str, version: &str) -> bool {
         .exists()
 }
 
+/// Zip symlinks that an install extracted before osdk restored them, as
+/// [`extract::zip_link_stubs`] finds them.
+///
+/// Empty when the install did not come from a zip, or when its archive is no
+/// longer in the download cache: without the archive there is no way to tell a
+/// stub from a file that really holds that text, and guessing would send every
+/// old zip install into a reinstall.
+pub fn zip_link_stubs_in(
+    dirs: &Dirs,
+    install_root: &Path,
+    locator: Option<&InstallLocator>,
+    tool: &str,
+    version: &str,
+) -> Result<Vec<String>> {
+    let Some(receipt) = artifact_receipt_at(install_root) else {
+        return Ok(Vec::new());
+    };
+    if !matches!(
+        ArchiveKind::from_name(&receipt.file_name),
+        Ok(ArchiveKind::Zip)
+    ) {
+        return Ok(Vec::new());
+    }
+    let archive = match locator {
+        Some(locator) => artifact_cache_path_for_locator(dirs, locator, &receipt.file_name)?,
+        None => artifact_cache_path(dirs, tool, version, &receipt.file_name)?,
+    };
+    if !archive.is_file() {
+        return Ok(Vec::new());
+    }
+    extract::zip_link_stubs(install_root, &archive)
+}
+
 pub fn artifact_receipt(dirs: &Dirs, tool: &str, version: &str) -> Option<ArtifactReceipt> {
     artifact_receipt_at(&dirs.install_path(tool, version))
 }

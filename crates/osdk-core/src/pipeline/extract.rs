@@ -208,6 +208,65 @@ fn unpack_zip(archive: &Path, dest: &Path, strip_root: bool) -> Result<()> {
 /// Longest symlink target accepted from a zip; real ones are a path or two.
 const MAX_LINK_TARGET_BYTES: u64 = 4096;
 
+/// Symlink entries of `archive` that `install_root` holds as a plain file whose
+/// content is the link target: what osdk 0.0.9 and earlier wrote for every zip
+/// symlink. Returned as `/`-separated paths relative to `install_root`.
+///
+/// The check needs nothing recorded at install time, which is the point: those
+/// installs predate any marker that could have said "links restored", and their
+/// CAS manifest hashed the stub files, so `doctor --verify` saw them as intact.
+/// A stub is recognized by content, not by file type, so a Windows install that
+/// now holds a *copy* of the target is not mistaken for one.
+///
+/// Each entry is looked for where `strip_root` would have put it and where it
+/// would be without stripping; the first that exists is the one compared.
+pub fn zip_link_stubs(install_root: &Path, archive: &Path) -> Result<Vec<String>> {
+    let f = File::open(archive).map_err(|e| Error::io(archive, e))?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(f))
+        .map_err(|e| Error::other(format!("zip open: {e}")))?;
+    let mut stubs = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| Error::other(format!("zip entry {i}: {e}")))?;
+        if !entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            continue;
+        }
+        let Some(relative) = entry.enclosed_name() else {
+            continue;
+        };
+        let mut target = Vec::new();
+        (&mut entry)
+            .take(MAX_LINK_TARGET_BYTES + 1)
+            .read_to_end(&mut target)
+            .map_err(|e| Error::other(format!("zip symlink `{}`: {e}", relative.display())))?;
+        if target.is_empty() || target.len() as u64 > MAX_LINK_TARGET_BYTES {
+            continue;
+        }
+        let stripped: PathBuf = relative.components().skip(1).collect();
+        for candidate in [relative.as_path(), stripped.as_path()] {
+            if candidate.as_os_str().is_empty() {
+                continue;
+            }
+            let path = install_root.join(candidate);
+            let Ok(metadata) = path.symlink_metadata() else {
+                continue;
+            };
+            if metadata.is_file()
+                && metadata.len() == target.len() as u64
+                && std::fs::read(&path).is_ok_and(|content| content == target)
+            {
+                stubs.push(candidate.to_string_lossy().replace('\\', "/"));
+            }
+            break;
+        }
+    }
+    Ok(stubs)
+}
+
 /// Validate the target of a zip symlink at `link` (relative to the directory
 /// the install keeps) and return it as a relative path, or `None` if it could
 /// resolve outside that directory.
@@ -550,6 +609,46 @@ mod tests {
                 "{target}: {error}"
             );
         }
+    }
+
+    /// An install that 0.0.9 extracted holds each zip symlink as a file whose
+    /// content is the target; that is what the stub check must find, and an
+    /// install extracted now must not trip it on either platform.
+    #[test]
+    fn zip_link_stubs_find_links_an_older_osdk_wrote_as_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("ndk.zip");
+        zip_fixture(
+            &archive,
+            &[
+                ("ndk-r29/bin/clang-21", Ok(b"real compiler")),
+                ("ndk-r29/bin/clang", Err("clang-21")),
+                ("ndk-r29/bin/clang++", Err("clang")),
+            ],
+        );
+
+        let old = temp.path().join("old");
+        std::fs::create_dir_all(old.join("bin")).unwrap();
+        std::fs::write(old.join("bin/clang-21"), b"real compiler").unwrap();
+        std::fs::write(old.join("bin/clang"), b"clang-21").unwrap();
+        std::fs::write(old.join("bin/clang++"), b"clang").unwrap();
+        assert_eq!(
+            zip_link_stubs(&old, &archive).unwrap(),
+            vec!["bin/clang".to_string(), "bin/clang++".to_string()]
+        );
+
+        // Same layout without stripping the top-level directory.
+        let unstripped = temp.path().join("unstripped");
+        std::fs::create_dir_all(unstripped.join("ndk-r29/bin")).unwrap();
+        std::fs::write(unstripped.join("ndk-r29/bin/clang"), b"clang-21").unwrap();
+        assert_eq!(
+            zip_link_stubs(&unstripped, &archive).unwrap(),
+            vec!["ndk-r29/bin/clang".to_string()]
+        );
+
+        let fresh = temp.path().join("fresh");
+        extract(&archive, &fresh, ArchiveKind::Zip, true).unwrap();
+        assert!(zip_link_stubs(&fresh, &archive).unwrap().is_empty());
     }
 
     #[test]

@@ -1741,6 +1741,7 @@ pub(crate) fn doctor_verify(app: &App, only: Option<&str>) -> Result<()> {
                     Ok((
                         install.manifest.identity.version.clone(),
                         install.install_root.clone(),
+                        Some(install.manifest.identity.clone()),
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -1750,11 +1751,11 @@ pub(crate) fn doctor_verify(app: &App, only: Option<&str>) -> Result<()> {
                 .into_iter()
                 .map(|version| {
                     let root = app.ctx.dirs.install_path(backend.id(), &version);
-                    (version, root)
+                    (version, root, None)
                 })
                 .collect()
         };
-        for (version, root) in roots {
+        for (version, root, identity) in roots {
             let label = format!("{}@{}", backend.id(), version);
             // An install predating the manifest, or one whose manifest was
             // itself removed, cannot be checked. Say so instead of passing it.
@@ -1770,7 +1771,25 @@ pub(crate) fn doctor_verify(app: &App, only: Option<&str>) -> Result<()> {
             // reading it rather than leaving the terminal silent for minutes.
             print!("    {label} ... ");
             let _ = std::io::Write::flush(&mut std::io::stdout());
-            let drift = manifest.verify(&root)?;
+            let mut drift = manifest.verify(&root)?;
+            // The manifest hashed what was extracted, so a zip symlink that an
+            // older osdk wrote out as a plain file matches it. Only the
+            // archive can tell.
+            let locator = identity
+                .map(|identity| osdk_core::dirs::InstallLocator::new(&app.ctx.dirs, identity))
+                .transpose()?;
+            for path in osdk_core::pipeline::zip_link_stubs_in(
+                &app.ctx.dirs,
+                &root,
+                locator.as_ref(),
+                backend.id(),
+                &version,
+            )? {
+                drift.push(osdk_core::store::manifest::Drift {
+                    path,
+                    kind: osdk_core::store::manifest::DriftKind::LinkExtractedAsFile,
+                });
+            }
             println!(
                 "{}",
                 if drift.is_empty() {

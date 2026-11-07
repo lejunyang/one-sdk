@@ -9510,6 +9510,89 @@ fn doctor_verifies_all_dynamic_identity_roots() {
     assert!(report.contains("payload.py: contents changed"), "{report}");
 }
 
+/// An install extracted by osdk 0.0.9 holds each zip symlink as a plain file
+/// reading the target (the NDK's `clang` said `clang-21`). Its manifest hashed
+/// those stubs, so plain re-hashing called it intact; `--verify` now compares
+/// against the cached archive.
+#[test]
+fn doctor_verify_reports_zip_symlinks_an_older_osdk_wrote_as_files() {
+    use osdk_core::store::manifest::{FileEntry, Manifest};
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let dirs = osdk_core::dirs::Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_STORE_DIR" => Some(temp.path().join("store").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(temp.path().join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let file_name = "zig-0.13.0.zip";
+    let archive =
+        osdk_core::pipeline::artifact_cache_path(&dirs, "zig", "0.13.0", file_name).unwrap();
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+    let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+    zip.start_file("zig-0.13.0/zig", options).unwrap();
+    zip.write_all(b"real zig").unwrap();
+    zip.add_symlink("zig-0.13.0/zig-cc", "zig", options)
+        .unwrap();
+    zip.finish().unwrap();
+
+    let root = dirs.install_path("zig", "0.13.0");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("zig"), b"real zig").unwrap();
+    std::fs::write(root.join("zig-cc"), b"zig").unwrap();
+    let mut manifest = Manifest::new("zig", "0.13.0", "copy");
+    for name in ["zig", "zig-cc"] {
+        manifest.files.push(FileEntry {
+            path: name.into(),
+            hash: Some(osdk_core::store::hash_file(&root.join(name)).unwrap()),
+            mode: 0,
+            symlink: None,
+        });
+    }
+    manifest.save(&root).unwrap();
+    osdk_core::pipeline::write_artifact_receipt_at(
+        &root,
+        &osdk_core::pipeline::ArtifactReceipt {
+            url: format!("https://example.invalid/{file_name}"),
+            file_name: file_name.into(),
+            checksum: None,
+            evidence: Vec::new(),
+        },
+    )
+    .unwrap();
+    std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+
+    let verify = || {
+        let output = run_isolated(temp.path(), &["doctor", "--verify", "--tool", "zig"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let report = verify();
+    assert!(
+        report.contains("zig-cc: symlink extracted as a plain file"),
+        "{report}"
+    );
+    assert!(report.contains("1 changed"), "{report}");
+    assert!(
+        report.contains("osdk install --force zig@0.13.0"),
+        "{report}"
+    );
+
+    // Without the archive there is nothing to compare with, and an install
+    // is not condemned on a guess.
+    std::fs::remove_file(&archive).unwrap();
+    let report = verify();
+    assert!(report.contains("0 changed"), "{report}");
+}
+
 #[test]
 fn download_cache_policy_cli_config_and_dry_run_preserve_legacy_files() {
     let temp = tempfile::tempdir().unwrap();

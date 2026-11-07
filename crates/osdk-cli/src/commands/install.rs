@@ -1599,14 +1599,43 @@ pub(crate) async fn install_one_without_shims(
     // would report "installed" from a directory that holds no completion
     // marker at all. Dynamic tools take the disk fast path above instead; what
     // reaches here is `--force` or `--refresh`, which must reinstall anyway.
-    if !force
+    let installed = !force
         && osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
-        && !backend.id().contains(':')
-    {
+        && !backend.id().contains(':');
+    // An install extracted before zip symlinks were restored is complete by
+    // every marker osdk keeps, and broken: `clang` is a text file reading
+    // `clang-21`. Reinstall it rather than reporting it as done. Only checked
+    // against the cached archive, which a reinstall reuses anyway.
+    let link_stubs = if installed {
+        osdk_core::pipeline::zip_link_stubs_in(
+            &app.ctx.dirs,
+            &app.ctx.dirs.install_path(backend.id(), &tv.version),
+            None,
+            backend.id(),
+            &tv.version,
+        )
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "could not compare the install with its zip archive");
+            Vec::new()
+        })
+    } else {
+        Vec::new()
+    };
+    if installed && link_stubs.is_empty() {
         backend.ensure_post_install(&app.ctx, &tv)?;
         println!("{}", t!("msg.already_installed", tool = tv));
     } else {
-        if force {
+        if !link_stubs.is_empty() {
+            println!(
+                "{}",
+                t!(
+                    "msg.repairing_zip_links",
+                    tool = tv,
+                    count = link_stubs.len()
+                )
+            );
+        }
+        if force || !link_stubs.is_empty() {
             // The marker is what every install path trusts instead of
             // looking at the bytes, so clearing it is what turns this
             // into a real reinstall rather than a no-op that prints
