@@ -8615,9 +8615,17 @@ fn custom_run_applies_package_source_selection_by_its_program() {
             [format!("npm={npm}"), format!("pnpm={pnpm}")],
             "{run}"
         );
+        // One line from planning, one from execution, and both must state the
+        // same decision: osdk's own planning-time injection is not an explicit
+        // variable that "has invocation priority".
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let decisions: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("sources: "))
+            .collect();
+        assert_eq!(decisions.len(), 2, "{run}: {stdout}");
         assert!(
-            stdout.contains(&format!("sources: {evidence}")),
+            decisions.iter().all(|line| line.starts_with(evidence)),
             "{run}: {stdout}"
         );
     }

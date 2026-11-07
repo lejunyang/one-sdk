@@ -201,6 +201,14 @@ freshness 不需要另开分支。规划阶段注入的源写进计划的 `env`�
 哈希的就是整个计划；执行后、记录前把 `env` 恢复成规划时那份，判定与记录用的是同一份
 材料，所以自定义 `run` 跑完能变成 fresh，源一变又会变 stale。
 
+执行阶段要再判定一次（规划时离线、不探测，`urls` 候选只能在这里选），但它从
+`Resolved::declared_env`——源选择注入**之前**的计划环境——开始，而不是从规划注入过的
+那份开始。否则适配器会把 osdk 自己注入的 `pnpm_config_registry` 当成「显式源变量」，
+结果不变（直通，保留规划时的值），`--explain` 却在第二行声称
+`native environment pnpm_config_registry has invocation priority`，与第一行的
+`selected` 自相矛盾。规划注入只来自不需要探测的 `default`，所以从声明环境重新判定
+得到同一个值。
+
 ## depends 决定顺序，环是错误
 
 `order_by_depends` 做拓扑排序。环报错而不是随便挑一个顺序：挑了就会让某一步在它的

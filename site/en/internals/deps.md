@@ -246,6 +246,17 @@ run and before recording, `env` is restored to the planning-time copy, so the
 decision and the record use the same material: a custom `run` becomes fresh after
 it succeeds, and stale again when the selection changes.
 
+Execution decides once more (planning runs offline without probes, so `urls`
+candidates can only be chosen here), but it starts from `Resolved::declared_env`,
+the plan's environment from **before** source injection, not from the copy
+planning already injected into. Otherwise the adapter read osdk's own
+`pnpm_config_registry` as an explicit source variable: the outcome was unchanged
+(pass through, keeping the planning value), but `--explain` printed a second line
+claiming `native environment pnpm_config_registry has invocation priority`,
+contradicting the `selected` line above it. Planning only injects from a `default`,
+which needs no probe, so deciding again from the declared environment yields the
+same value.
+
 ## depends decides order, and a cycle is an error
 
 `order_by_depends` topologically sorts. A cycle is refused rather than resolved

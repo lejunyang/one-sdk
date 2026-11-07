@@ -62,6 +62,12 @@ struct Resolved {
     choice: InstallerChoice,
     config: ProviderConfig,
     plan: RunPlan,
+    /// `plan.env` before package-source selection injected into it.
+    ///
+    /// Execution decides sources again from this, not from `plan.env`: the
+    /// planning-time injection is osdk's own, and re-reading it as an explicit
+    /// registry variable made `--explain` report "invocation priority" for it.
+    declared_env: BTreeMap<String, String>,
     decision: state::Decision,
     unit: Option<deps::workspace::WorkspaceUnit>,
     lock_path: PathBuf,
@@ -276,6 +282,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         // filtered `pnpm install` gets the selected registry while explicit
         // registry arguments, `deps.env` and process variables still pass
         // through, and a program that is no package manager is left untouched.
+        let declared_env = plan.env.clone();
         let mut context = source_context(app, &config)?;
         // Dry-run/freshness must not probe; explicit mappings still apply.
         context.config.settings.offline = true;
@@ -342,6 +349,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             choice,
             config,
             plan,
+            declared_env,
             decision,
             unit,
             lock_path,
@@ -459,8 +467,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             continue;
         }
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
-        let source_env = item.plan.env.clone();
         // Same adapter for custom `run` lines as for built-in plans; see planning.
+        // Planning was offline, so this decision may probe; it starts from the
+        // declared environment (see `Resolved::declared_env`).
+        let planned_env = std::mem::replace(&mut item.plan.env, item.declared_env.clone());
         let context = source_context(app, &item.config)?;
         let evidence = osdk_core::package_sources::apply(
             &context,
@@ -478,7 +488,8 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             println!("    sources: {evidence}");
         }
         run_plan(app, item, &tools)?;
-        item.plan.env = source_env;
+        // Record the material freshness was decided on.
+        item.plan.env = planned_env;
         record(app, item, &tools)?;
     }
     Ok(())
@@ -1541,6 +1552,7 @@ mod tests {
                 project,
                 choice,
                 config,
+                declared_env: plan.env.clone(),
                 plan,
                 decision: osdk_core::deps::state::Decision::Fresh,
                 unit: None,
