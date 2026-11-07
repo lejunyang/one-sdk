@@ -21,7 +21,8 @@ osdk exec -- ./gradlew build
 
 **不带 `--tool`** 时，命令以激活的 shell 在当前目录下会有的环境运行（与 `hook-env`
 同一份计算：backend 环境、下游缓存、模型 adapter、PATH），**不安装任何东西**：选中但
-未安装的工具会像激活的 shell 一样报错，先 `osdk install`。PATH 以外层激活之前的那份
+未安装的工具会像激活的 shell 一样在 stderr 提示后被跳过；命令需要它时先 `osdk install`
+或用 `--tool` 声明。PATH 以外层激活之前的那份
 为基础；外层激活设置而当前目录不设置的变量恢复为激活前的值。该形式不需要 install
 信任范围，`--no-deps` 时不需要任何信任。只需要导出环境而不运行命令时用
 [`env`](../env/guide.md)。

@@ -51,9 +51,9 @@ GitHub TSA bundle 没有 Rekor entry，走独立路径：先从已签名 DSSE st
 
 ## 归档与路径安全
 
-[`extract.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/extract.rs) 支持 `tar.gz`、`tar.xz`、`tar.zst` 和 ZIP。归档先展开到缓存 scratch 目录，再选择性剥离唯一顶层目录。ZIP 使用 `enclosed_name()`，无法安全包含在目标目录中的条目会被跳过；tar 使用 `tar::Archive::unpack(dest)` 的目标目录约束。目录型 `subdir` 还必须是仅含普通组件的相对路径，拒绝绝对路径、`.`、`..` 和前缀组件。模型文件路径应用同样的 lexical 约束，见 [`safe_relative_path`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs)。
+[`extract.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/extract.rs) 支持 `tar.gz`、`tar.xz`、`tar.zst` 和 ZIP。归档先展开到缓存 scratch 目录，再选择性剥离唯一顶层目录。ZIP 使用 `enclosed_name()`，无法安全包含在目标目录中的条目会被跳过；Unix symlink 条目（模式为 `S_IFLNK`，内容是链接目标）还原为符号链接，而不是写成内容为目标路径的普通文件：目标只能是若干前导 `..` 加普通名称，不得越过链接自身所在深度（剥离顶层目录时按保留下来的那一层计），拒绝绝对路径、`\`、盘符以及名称之后的 `..`，越界即整包失败；链接在所有普通条目写完之后才创建，且不得位于另一个链接之下，因此不会经由归档植入的链接写到别处。Windows 上创建符号链接需要特权，所以改为复制链接指向的内容（与 CAS 的回退一致），目标不在归档内的链接被略过。tar 使用 `tar::Archive::unpack(dest)` 的目标目录约束。目录型 `subdir` 还必须是仅含普通组件的相对路径，拒绝绝对路径、`.`、`..` 和前缀组件。模型文件路径应用同样的 lexical 约束，见 [`safe_relative_path`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs)。
 
-边界需要明确：代码没有设置解压大小、文件数或压缩比上限，因此不防御归档炸弹；tar 链接由归档库处理，后续 CAS 会原样重建提取出的符号链接，并未显式拒绝绝对或越界 link target。ZIP 的不安全名称是跳过而非整包失败。对发布者不完全信任的制品，应在额外沙箱中安装；认证摘要或 attestation 只能证明 bytes/provenance，不能使恶意归档结构变得安全。
+边界需要明确：代码没有设置解压大小、文件数或压缩比上限，因此不防御归档炸弹；tar 链接由归档库处理，后续 CAS 会原样重建提取出的符号链接，tar 一侧并未显式拒绝绝对或越界 link target（ZIP 一侧见上）。ZIP 的不安全名称是跳过而非整包失败。对发布者不完全信任的制品，应在额外沙箱中安装；认证摘要或 attestation 只能证明 bytes/provenance，不能使恶意归档结构变得安全。
 
 ## 关键测试
 

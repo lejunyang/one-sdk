@@ -129,6 +129,10 @@ pub enum DriftKind {
     KindChanged,
     /// The recorded symlink now points elsewhere.
     TargetChanged { expected: String, actual: String },
+    /// A symlink in the source zip that an older osdk wrote out as a plain
+    /// file holding the target path. The manifest recorded that file, so it is
+    /// found by comparing against the archive instead.
+    LinkExtractedAsFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +148,9 @@ impl std::fmt::Display for Drift {
             DriftKind::Missing => write!(f, "{}: missing", self.path),
             DriftKind::Modified { .. } => write!(f, "{}: contents changed", self.path),
             DriftKind::KindChanged => write!(f, "{}: file type changed", self.path),
+            DriftKind::LinkExtractedAsFile => {
+                write!(f, "{}: symlink extracted as a plain file", self.path)
+            }
             DriftKind::TargetChanged { expected, actual } => {
                 write!(
                     f,

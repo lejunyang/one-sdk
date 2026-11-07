@@ -328,6 +328,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.repairing_zip_links",
+        (
+            "{tool}: {count} symlinks were extracted as plain files by an older osdk; reinstalling to restore them",
+            "{tool}：旧版 osdk 把 {count} 个符号链接解压成了普通文件；正在重新安装以还原",
+        ),
+    );
+    m.insert(
         "warn.activation_missing_tools",
         (
             "osdk: {dir}: not installed: {tools}; the other tools are active. Run `osdk install` to install them",

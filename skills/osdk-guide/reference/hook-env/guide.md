@@ -8,7 +8,7 @@ osdk hook-env --shell <SHELL>
 
 `--shell` 默认 `bash`。命令计算当前目录的环境差量并输出 shell 代码；激活脚本负责执行。
 已配置的工具若尚未安装，不会静默回退到系统 PATH 上的同名命令：其余已安装工具照常激活，
-缺失的工具在 stderr 提示一次（按目录与缺失集合记在 `OSDK_MISSING_WARNED`）。`env`、`exec` 仍会报错。
+缺失的工具在 stderr 提示一次（按目录与缺失集合记在 `OSDK_MISSING_WARNED`）。`env`、不带 `--tool` 的 `exec` 和任务同样跳过并提示（任务自己 `tools` 里的工具除外）。
 在 `OSDK_TASK_ROOT`（任务所属项目根）之内检测到 `OSDK_TASK` 时会避让，防止任务内部再次激活并覆盖 task 环境；
 离开该目录后清掉 `OSDK_TASK*` 照常激活，避免任务启动的编辑器 / 交互 shell 永久不激活。
 

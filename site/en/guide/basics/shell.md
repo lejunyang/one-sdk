@@ -89,8 +89,9 @@ osdk exec -- cargo build           # without --tool, run under that environment
   `eval "$(osdk env --format bash)"`. Do not put one in an rc file in place of
   `activate`: it does not follow directory changes.
 - **`osdk exec -- <command>`** without `--tool` installs nothing; a selected tool
-  that is not installed fails (an activated shell only warns and activates the
-  rest), so run `osdk install` first. Called from an activated shell, a variable the outer
+  that is not installed is named on stderr and left out, as an activated shell
+  does, and the rest are available. When the command needs it, run
+  `osdk install` first or name it with `--tool`. Called from an activated shell, a variable the outer
   activation set and this directory does not goes back to its pre-activation
   value. With `--tool` the behavior is unchanged.
 
