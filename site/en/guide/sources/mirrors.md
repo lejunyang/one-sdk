@@ -2,6 +2,11 @@
 
 SDK/model download sources and project dependency registries are separate control planes. This page covers the former: the source commands, mirrors set in the environment, the effective source list, and probing, ranking, and failover. See [Package Managers](../tools/package-managers#registry-preflight) for npm-compatible registries.
 
+Each osdk download has one labelled progress line, with its name and download state
+ready when it first appears. Concurrent downloads use separate lines. Known sizes
+show a bar and downloaded/total bytes; unknown sizes show downloaded bytes. Resumed
+downloads start at the existing byte count. `--quiet` hides osdk progress output.
+
 ## Source command reference
 
 ```text

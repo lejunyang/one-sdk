@@ -144,6 +144,9 @@ node --version
 python --version
 ```
 
+Each osdk download updates one labelled progress line; concurrent downloads have
+separate lines. Unknown sizes show downloaded bytes. Use `--quiet` to hide progress.
+
 Activation also supports zsh, fish, and PowerShell. Fish activation and
 deactivation return success when optional saved variables are already absent. If a configured tool is
 not installed, activation names it once and activates the other tools; it never
