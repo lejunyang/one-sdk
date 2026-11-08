@@ -59,7 +59,7 @@ outputs = []
 
 `auto = false` 仍可显式执行 `osdk deps`；`disable` 从执行计划移除 provider。列表替换默认值，空列表有效；env 按键合并。先根据清单/锁文件判断归属，再应用筛选；冲突锁或多个候选安装器报错。重叠 roots 按规范项目路径/provider 去重，从子目录调用也不会重复。重叠项目配置不一致时报错。`--filter .` 可选择根，其余过滤会排除根；`--list --all --explain` 展示选择来源、有效选项及命令。`[task].roots` 单独负责任务聚合。
 
-pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式与排除规则决定成员范围，不自动合并无关嵌套项目。选择成员会明确说明扩大为一次共享根安装。uv workspace 使用 `uv sync --all-packages`，普通根 sync 不代表覆盖所有成员。共享选项（含 auto/disable、命令、索引）必须一致；冲突及成员独立锁文件报错。freshness 包含 workspace 定义、成员路径与清单、共享锁、有效配置和已安装工具版本。成功的原生安装覆盖范围记录在缓存 deps 状态中；自定义覆盖命令的范围无法验证。同一 osdk 缓存内按项目串行安装和记录状态。原生递归模式需要目录前缀（`packages/**`），拒绝裸 `**`。
+pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式与排除规则决定成员范围，不自动合并无关嵌套项目。选择成员会明确说明扩大为一次共享根安装。uv workspace 使用 `uv sync --all-packages`，普通根 sync 不代表覆盖所有成员。共享选项（含 auto/disable、命令、索引）必须一致；冲突及成员独立锁文件（与 workspace 同一安装器，如成员里的 `pnpm-lock.yaml`）报错。成员里**其他安装器**的锁文件（如为单独 npm 部署保留的 `package-lock.json`）不参与归属判断：共享安装在根执行，pnpm 自身也会忽略它；osdk 不读不改该文件，只在 `--list --explain` 中以 `note:` 列出。成员既无 `packageManager` 声明、也无 workspace 安装器的锁文件时，即使同生态还启用了其他 provider（例如为仓库里另一个独立项目启用的 `[deps.npm]`），也归 workspace 安装器所有，不报歧义；workspace 之外的目录仍按原规则报歧义。成员自己的 `packageManager` 声明仍然生效，workspace 根与独立项目同目录双锁仍报错。freshness 包含 workspace 定义、成员路径与清单、共享锁、有效配置和已安装工具版本。成功的原生安装覆盖范围记录在缓存 deps 状态中；自定义覆盖命令的范围无法验证。同一 osdk 缓存内按项目串行安装和记录状态。原生递归模式需要目录前缀（`packages/**`），拒绝裸 `**`。
 
 deps 命令自己注入所需工具的受管包缓存变量（如 pnpm 的 store、npm cache），默认保留用户已设的值，不依赖 shell 是否已激活；在 IDE、CI 或未激活的 shell 里运行结果与激活后一致。
 

@@ -71,6 +71,9 @@ struct Resolved {
     decision: state::Decision,
     unit: Option<deps::workspace::WorkspaceUnit>,
     lock_path: PathBuf,
+    /// Lockfiles of other installers inside the shared workspace's members,
+    /// which the shared installation ignores. Shown under `--explain`.
+    notes: Vec<String>,
 }
 
 pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
@@ -241,6 +244,17 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             }
         }
         let config = entry.config.clone();
+        // Every member's set-aside lockfiles, not only the selected one's: the
+        // installation covers the whole workspace.
+        let notes: Vec<String> = match &unit {
+            Some(unit) => entries
+                .iter()
+                .filter(|other| other.unit.as_ref() == Some(unit))
+                .flat_map(|other| &other.ignored_locks)
+                .map(|lock| lock.note(&unit.provider))
+                .collect(),
+            None => Vec::new(),
+        };
         let schema = deps::provider_schema(&project.provider);
         let mut choice = deps::select_installer(&project, &[])?;
         if let Some(version) = config.project_tools.get(&*project.provider) {
@@ -353,6 +367,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             decision,
             unit,
             lock_path,
+            notes,
         });
     }
     if resolved.is_empty() {
@@ -397,6 +412,9 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     effective_sources(item.schema, &item.config),
                     effective_outputs(item.schema, &item.config)
                 );
+                for note in &item.notes {
+                    println!("    note: {note}");
+                }
                 if let Some(unit) = &item.unit {
                     println!(
                         "    coverage: {} {:?}",
@@ -429,6 +447,9 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         if options.explain {
             if let Some(reason) = item.decision.reason() {
                 println!("{}: {reason}", item.project.provider);
+            }
+            for note in &item.notes {
+                println!("note: {note}");
             }
         }
         if options.dry_run {
@@ -1557,6 +1578,7 @@ mod tests {
                 decision: osdk_core::deps::state::Decision::Fresh,
                 unit: None,
                 lock_path: std::env::temp_dir().join("test-osdk.lock"),
+                notes: Vec::new(),
             }
         }
         let tmp = tempfile::tempdir().unwrap();
