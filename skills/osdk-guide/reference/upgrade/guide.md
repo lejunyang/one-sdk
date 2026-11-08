@@ -32,11 +32,18 @@ osdk upgrade node@20
 
 ```bash
 osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g aad  # 唯一归属于已安装全局选择的命令
 osdk upgrade -g npm:prettier
 osdk upgrade --global
 ```
 
-全局模式只接受已配置工具名或别名；无参数升级全部适用选择（包括 lazy），排除不匹配
+工具名和已配置别名优先匹配；否则接受已安装全局选择实际导出、且归属唯一的命令名。
+例如 `aad` 可定位 `github:lejunyang/ai-auto-desktop`，不会按其他包的名字或后缀猜测。
+多个选择导出同一命令时拒绝操作，列出候选，要求完整 ID 或配置别名。遵守 shim 的
+包含/排除设置；不匹配非全局选择、过期安装版本或 PATH 上的外部程序，也不会执行探针。
+命令名同样不能带 `@VERSION` 或选项；仅 `-g/--global` 模式支持命令名回查。
+
+无参数升级全部适用选择（包括 lazy），排除不匹配
 平台的 `when` 条目。保留原约束、选项、`when`、`lazy`，精确 pin 不会越界升级；修改
 约束/选项用 `osdk use -g TOOL@VERSION -o KEY=VALUE`。不读取项目配置、版本文件或 lock，
 不要求信任当前项目。只更新 `config.toml` 旁的用户 `osdk.lock`，保留其他工具和平台。

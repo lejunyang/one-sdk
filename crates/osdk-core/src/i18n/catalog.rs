@@ -2465,8 +2465,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.upgrade.flag.global",
         (
-            "Upgrade user-global selections and their lock, ignoring the project; pass tool names, and use `use -g TOOL@VERSION` to change constraints",
-            "按用户全局约束升级并更新用户 lock，忽略项目；传工具名，修改约束请用 `use -g TOOL@VERSION`",
+            "Upgrade user-global selections and their lock, ignoring the project; pass tool names, configured aliases or unique managed commands; use `use -g TOOL@VERSION` to change constraints",
+            "按用户全局约束升级并更新用户 lock，忽略项目；传工具名、配置别名或归属唯一的受管命令，修改约束请用 `use -g TOOL@VERSION`",
         ),
     );
     m.insert(

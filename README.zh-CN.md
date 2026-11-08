@@ -162,11 +162,13 @@ osdk use -g github:lejunyang/ai-auto-desktop@latest
 
 ```bash
 osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g aad                 # 归属唯一的受管命令
 osdk upgrade -g                     # 全部全局选择
 ```
 
-全局升级更新用户 lock，保留全局版本约束和选项，并忽略当前项目；修改约束继续用
-`use -g TOOL@VERSION`。
+全局升级更新用户 lock，保留全局版本约束和选项，并忽略当前项目。也可以传已安装全局工具
+提供且归属唯一的命令，如 `aad`；多个工具提供同名命令时报错并列出候选。工具名与配置别名
+优先；修改约束继续用 `use -g TOOL@VERSION`。
 
 显式浮动版本选择器会先解析当前符合约束的版本，再判断是否需要安装；目标精确版本已安装时
 直接复用。裸 `use` 可以复用本地版本；`install --force` 用于重装或修复指定版本。

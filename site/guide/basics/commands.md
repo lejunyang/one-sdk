@@ -48,6 +48,7 @@ Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 不会被锁成具体�
 
 ```bash
 osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g aad  # 已安装全局工具提供、归属唯一的命令
 osdk upgrade --global
 ```
 
@@ -57,8 +58,13 @@ osdk upgrade --global
 不兼容当前平台的 `when` 条目不会被纳入。结果写入用户 `config.toml` 旁的 `osdk.lock`，
 保留未升级工具的 lock 条目以及其他平台区段，不改项目文件。
 
+工具名和已配置别名优先匹配；否则可传已安装全局选择导出的命令，如 `aad`。只在当前
+全局选择实际发布的命令中查找，遵守 shim 的包含/排除设置；不按包名后缀猜测，也不读取
+或执行 PATH 上的外部程序。多个选择提供同名命令时报错并列出候选，须传完整工具 ID 或
+配置别名。过期版本、不再选择的安装、依赖包默认不拥有的命令不参与匹配。
+
 升级保留原全局约束、backend 选项、`when` 和 `lazy`：`20` 只升级 20.x，精确版本仍是
-原版本。全局模式只接受工具名，不接受 `@VERSION` 或 `-o`；要修改约束或选项，使用
+原版本。全局模式的工具名、别名和命令名都不接受 `@VERSION` 或 `-o`；要修改约束或选项，使用
 `osdk use -g TOOL@VERSION -o KEY=VALUE`。未全局选择的工具先用 `use -g` 添加。
 `npm:` 包继续使用受控全局 npm/pnpm prefix 与原生 lock，不会变成项目隔离安装。
 

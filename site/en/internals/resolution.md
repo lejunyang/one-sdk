@@ -85,6 +85,16 @@ belong to `use -g`, so global upgrade rejects selector overrides and `-o`.
 Batch upgrades can partially succeed: a later failure does not roll back tools
 and locks that were already published successfully.
 
+Tool IDs and configured aliases take priority. Only otherwise-unrecognized names
+are looked up among commands of the currently selected global installs. Lookup
+selects installed versions and uses the same dynamic identity validation and bin
+filtering as shims, without guessing package-name suffixes, searching PATH, or
+executing program probes. npm candidates are restricted to global scope and retain
+the selected Node/installer identity. A unique match returns the original configured
+request. Multiple selections fail before installation and list their keys and full
+IDs. Older installed versions do not create extra owners, but separate aliases of
+one backend can have different constraints and must not be silently merged.
+
 ## Verifiable invariants
 
 - Precedence, ancestor walking, structured files, and invalid package-manager values are covered by the [`resolver` unit tests](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs).

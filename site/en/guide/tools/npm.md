@@ -17,7 +17,10 @@ Upgrade an existing global package with `osdk upgrade -g npm:prettier`, or use
 `osdk upgrade -g` for all applicable global selections. This preserves user version
 constraints, installer options, `when`, and `lazy`, and updates the user lock.
 Change constraints with `osdk use -g npm:prettier@latest`. The current project does
-not participate in this global upgrade path.
+not participate in this global upgrade path. A unique installed global command
+also works, for example `osdk upgrade -g prettier`. Multiple owners require a full
+tool ID or configured alias; project installs and external PATH commands cannot
+become global upgrade targets.
 
 
 ## How `use` chooses the scope

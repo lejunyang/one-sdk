@@ -21,7 +21,9 @@ osdk use -g github:lejunyang/ai-auto-desktop@latest
 
 已经通过 `use -g` 选择的工具，也可运行
 `osdk upgrade -g github:lejunyang/ai-auto-desktop`，或用 `osdk upgrade -g` 升级全部
-全局选择。它遵守原约束、保留工具选项，只更新用户 lock；修改约束仍用 `use -g`。
+全局选择。已安装工具提供的命令归属唯一时，也可简写成 `osdk upgrade -g aad`；
+若多个全局工具提供 `aad`，会报歧义并要求完整 ID 或配置别名。它遵守原约束、
+保留工具选项，只更新用户 lock；修改约束仍用 `use -g`。
 
 ## Asset 选择选项
 

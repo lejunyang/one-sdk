@@ -141,10 +141,12 @@ pub enum Command {
 
     /// Install the latest versions matching project or explicit requests.
     Upgrade {
-        /// Optional tool requests; empty upgrades the current project config.
+        /// Optional tool requests; with --global, unique installed command names also work.
+        /// Empty upgrades the current project config (or global selections with --global).
         tools: Vec<String>,
         /// Upgrade user-global selections and their lock, ignoring the project.
-        /// Pass configured tool names; use `use -g TOOL@VERSION` to change constraints.
+        /// Pass tool names, configured aliases or unique managed commands.
+        /// Use `use -g TOOL@VERSION` to change constraints.
         #[arg(short, long, conflicts_with = "opts")]
         global: bool,
         /// Backend-specific option as key=value (repeatable).

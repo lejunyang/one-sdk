@@ -1673,6 +1673,15 @@ tools = ["node"]
 
     #[tokio::test]
     async fn global_upgrade_resolves_an_alias_and_preserves_its_config() {
+        assert_global_upgrade_preserves_config("desktop").await;
+    }
+
+    #[tokio::test]
+    async fn global_upgrade_resolves_a_command_and_preserves_its_config() {
+        assert_global_upgrade_preserves_config("update-fixture").await;
+    }
+
+    async fn assert_global_upgrade_preserves_config(operand: &str) {
         let (_temporary, mut app, request) = github_update_fixture().await;
         let mut entry = request
             .options
@@ -1697,7 +1706,7 @@ tools = ["node"]
             osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file()).unwrap();
         app.ctx.config.settings.offline = true;
         app.global_only = true;
-        upgrade_global(&mut app, vec!["desktop".into()])
+        upgrade_global(&mut app, vec![operand.into()])
             .await
             .unwrap();
         assert_eq!(
@@ -1709,6 +1718,147 @@ tools = ["node"]
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[&request.backend].version, "2.0.0");
         assert_eq!(tools[&request.backend].request, "latest");
+    }
+
+    fn global_command_upgrade_fixture(tools: &[(&str, &str)]) -> (tempfile::TempDir, App) {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = osdk_core::config::Config::default();
+        config.settings.offline = true;
+        for (id, _) in tools {
+            config.global_tool_configs.insert(
+                (*id).into(),
+                osdk_core::config::ToolConfigEntry::Legacy("latest".into()),
+            );
+            config.global_tools.insert((*id).into(), "latest".into());
+        }
+        config.tools = config.global_tools.clone();
+        config.tool_configs = config.global_tool_configs.clone();
+        let app = app_with_config(&temporary, config);
+        for (id, command) in tools {
+            write_dynamic_install(&app, id, "1.0.0", command, &Default::default());
+        }
+        (temporary, app)
+    }
+
+    #[test]
+    fn global_upgrade_command_does_not_guess_a_package_with_the_same_name() {
+        let (_temporary, app) = global_command_upgrade_fixture(&[
+            ("github:example/desktop", "aad"),
+            ("github:example/aad", "different-command"),
+        ]);
+        // Deduplicate by tool even when both its id and command are requested.
+        let requests =
+            global_upgrade_requests(&app, &["aad".into(), "github:example/desktop".into()])
+                .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].backend, "github:example/desktop");
+        assert_eq!(requests[0].spec, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn global_upgrade_command_rejects_multiple_owners_before_installation() {
+        let (_temporary, app) = global_command_upgrade_fixture(&[
+            ("github:example/desktop", "aad"),
+            ("github:other/desktop", "aad"),
+        ]);
+        let error = global_upgrade_requests(&app, &["aad".into()]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("ambiguous"), "{error:#}");
+        for id in ["github:example/desktop", "github:other/desktop"] {
+            assert!(message.contains(id), "{error:#}");
+        }
+        assert!(!app.ctx.dirs.user_lock_file().exists());
+    }
+
+    #[test]
+    fn global_upgrade_command_requires_an_installed_global_selection() {
+        let (_temporary, app) = global_command_upgrade_fixture(&[]);
+        write_dynamic_install(
+            &app,
+            "github:example/desktop",
+            "1.0.0",
+            "aad",
+            &Default::default(),
+        );
+        let error = global_upgrade_requests(&app, &["aad".into()]).unwrap_err();
+        assert!(
+            error.to_string().contains("not selected globally"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn global_upgrade_command_ignores_inactive_versions_and_unselected_installs() {
+        let (_temporary, app) = global_command_upgrade_fixture(&[
+            ("github:example/desktop", "aad"),
+            ("github:other/desktop", "new-command"),
+        ]);
+        for id in [
+            "github:example/desktop",
+            "github:other/desktop",
+            "github:unselected/desktop",
+        ] {
+            write_dynamic_install(&app, id, "0.9.0", "aad", &Default::default());
+        }
+        let requests = global_upgrade_requests(&app, &["aad".into()]).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].backend, "github:example/desktop");
+    }
+
+    #[test]
+    fn global_upgrade_command_keeps_configured_alias_precedence() {
+        let (_temporary, mut app) = global_command_upgrade_fixture(&[
+            ("github:example/desktop", "aad"),
+            ("github:other/desktop", "other-command"),
+        ]);
+        app.ctx.config.global_tool_configs.insert(
+            "aad".into(),
+            osdk_core::config::ToolConfigEntry::Legacy("github:other/desktop@latest".into()),
+        );
+        app.ctx
+            .config
+            .global_tools
+            .insert("aad".into(), "github:other/desktop@latest".into());
+        let requests = global_upgrade_requests(&app, &["aad".into()]).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].backend, "github:other/desktop");
+    }
+
+    #[test]
+    fn global_upgrade_command_respects_shim_exclusions_and_constraint_overrides() {
+        let (_temporary, mut app) =
+            global_command_upgrade_fixture(&[("github:example/desktop", "aad")]);
+        app.ctx.config.settings.shims.exclude.push("aad".into());
+        let error = global_upgrade_requests(&app, &["aad".into()]).unwrap_err();
+        assert!(
+            error.to_string().contains("not selected globally"),
+            "{error:#}"
+        );
+        app.ctx.config.settings.shims.exclude.clear();
+        for operand in ["aad@latest", "aad@1"] {
+            let error = global_upgrade_requests(&app, &[operand.into()]).unwrap_err();
+            assert!(error.to_string().contains("osdk use -g"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn global_upgrade_command_does_not_claim_dependency_bins() {
+        let (_temporary, mut app) =
+            global_command_upgrade_fixture(&[("github:example/desktop", "aad")]);
+        let report = dynamic_scan_report(&app).unwrap();
+        let root = &report.installs[0].install_root;
+        let mut manifest = osdk_core::inventory::DynamicToolManifest::load(root).unwrap();
+        manifest.bins[0].owned = false;
+        manifest.write_atomic(root).unwrap();
+        app.invalidate_dynamic_scan();
+        let error = global_upgrade_requests(&app, &["aad".into()]).unwrap_err();
+        assert!(
+            error.to_string().contains("not selected globally"),
+            "{error:#}"
+        );
+        app.ctx.config.settings.shims.expose.push("aad".into());
+        let requests = global_upgrade_requests(&app, &["aad".into()]).unwrap();
+        assert_eq!(requests[0].backend, "github:example/desktop");
     }
 
     #[tokio::test]

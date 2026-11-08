@@ -53,6 +53,7 @@ a concrete release. Use an explicit or dated toolchain for immutable rebuilding.
 
 ```bash
 osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g aad  # a unique command of an installed global tool
 osdk upgrade --global
 ```
 
@@ -64,9 +65,17 @@ upgrade to those tools and their managed runtimes. Incompatible `when` entries
 are excluded. Results update `osdk.lock` beside user `config.toml`, preserving
 unrelated tools and other platforms without changing project files.
 
+Tool names and configured aliases take priority. Otherwise, a command exported by
+an installed global selection, such as `aad`, can identify the tool. Lookup follows
+shim include/exclude settings and never guesses package-name suffixes, searches
+PATH, or executes external programs. Multiple selections exporting the command
+produce an error listing the candidates; pass the full tool ID or a configured
+alias. Inactive versions, unselected installs, and commands withheld as dependency
+bins do not participate.
+
 Global upgrades preserve version constraints, backend options, `when`, and `lazy`:
 `20` stays within 20.x and an exact pin keeps its version. Global mode accepts tool
-names, without `@VERSION` or `-o`. Change a constraint or option with
+names, configured aliases, or unique managed commands, without `@VERSION` or `-o`. Change a constraint or option with
 `osdk use -g TOOL@VERSION -o KEY=VALUE`; add unselected tools with `use -g` first.
 `npm:` packages retain their controlled global npm/pnpm prefix and native lock
 rather than entering the isolated project install path.

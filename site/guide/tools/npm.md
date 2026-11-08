@@ -14,6 +14,8 @@ Prettier 包。若要选择 Registry 中名字就叫 `npm` 的包，请写 `npm:
 升级已有全局包用 `osdk upgrade -g npm:prettier`；省略包名的 `osdk upgrade -g` 升级
 全部适用全局选择。它遵守用户原版本约束与安装器选项，保留 `when`、`lazy`，并更新用户
 lock；改变约束用 `osdk use -g npm:prettier@latest`。当前项目不参与这条全局升级路径。
+已安装全局包的命令归属唯一时，也可写 `osdk upgrade -g prettier`；存在多个拥有者时
+必须改用完整工具 ID 或配置别名，项目安装和外部 PATH 命令不会成为全局升级目标。
 
 
 ## `use` 如何选择作用域

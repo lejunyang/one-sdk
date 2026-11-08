@@ -177,11 +177,14 @@ Upgrade existing global selections within their configured constraints:
 
 ```bash
 osdk upgrade -g github:lejunyang/ai-auto-desktop
+osdk upgrade -g aad                 # its unique managed command
 osdk upgrade -g                     # all global selections
 ```
 
 Global upgrades update the user lock and preserve the global constraints and options.
-They ignore the current project. Use `use -g TOOL@VERSION` to change a constraint.
+They ignore the current project. A unique command exported by an installed global
+tool also works, such as `aad`; multiple owners produce an error listing the tools.
+Tool names and configured aliases take priority. Use `use -g TOOL@VERSION` to change a constraint.
 
 An explicit floating selector resolves the current matching release before reusing an installation.
 If that exact target is already installed, osdk keeps it. A bare `use` can reuse a local

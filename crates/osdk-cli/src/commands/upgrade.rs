@@ -57,7 +57,7 @@ pub async fn upgrade_global(app: &mut App, tools: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn global_upgrade_requests(app: &App, tools: &[String]) -> Result<Vec<ToolRequest>> {
+pub(crate) fn global_upgrade_requests(app: &App, tools: &[String]) -> Result<Vec<ToolRequest>> {
     let mut configured = Vec::new();
     for (key, entry) in &app.ctx.config.global_tool_configs {
         if app.ctx.config.excluded_tools.contains_key(key) {
@@ -109,15 +109,89 @@ fn global_upgrade_requests(app: &App, tools: &[String]) -> Result<Vec<ToolReques
                 })
                 .collect(),
         };
-        match matching.as_slice() {
-            [request] => {
-                if !requests.iter().any(|r: &ToolRequest| r.backend == request.backend) {
-                    requests.push((*request).clone());
-                }
-            }
+        let request = match matching.as_slice() {
+            [request] => (*request).clone(),
+            // An explicit backend id or configured alias keeps its meaning.
+            // Only otherwise-unrecognized names may denote published commands.
+            [] if canonical.is_none() => global_upgrade_command_request(app, &configured, tool)?
+                .ok_or_else(|| anyhow!("{tool} is not selected globally on this platform and is not a command of an installed global selection; run `osdk use -g TOOL@VERSION` first"))?,
             [] => anyhow::bail!("{tool} is not selected globally on this platform; run `osdk use -g {tool}@latest` first"),
             _ => anyhow::bail!("multiple global selections name {tool}; pass the configured alias"),
+        };
+        if !requests
+            .iter()
+            .any(|r: &ToolRequest| r.backend == request.backend)
+        {
+            requests.push(request);
         }
     }
     Ok(requests)
+}
+
+fn global_upgrade_command_request(
+    app: &App,
+    configured: &[(&String, ToolRequest)],
+    command: &str,
+) -> Result<Option<ToolRequest>> {
+    // Never interpret a path, namespace or package-name suffix as a command.
+    if command.contains(['/', '\\', ':']) {
+        return Ok(None);
+    }
+    let report = dynamic_scan_report(app)?;
+    let mut matching = Vec::new();
+    for (key, request) in configured {
+        let backend = app.registry.get(&request.backend)?;
+        let versions = if let Some(npm) =
+            osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
+        {
+            // Project npm installs and native `npm i -g` bins must not name an
+            // osdk global package. Keep the selected runtime/installer identity.
+            if npm
+                .list_installed_for(&app.ctx, &npm_scope_hint(request, true))?
+                .is_empty()
+            {
+                continue;
+            }
+            vec![select_global_npm_version(app, request, false)?]
+        } else {
+            let installed = backend.list_installed(&app.ctx)?;
+            let expanded = app
+                .ctx
+                .config
+                .expand_alias(backend.id(), &request.spec.to_string())?;
+            let spec = request_spec_after_alias(&request.spec, &expanded);
+            let mut versions = Vec::new();
+            for candidate in &installed {
+                if request_selects_version_from_candidates(backend.id(), &spec, candidate, || {
+                    Ok(installed.clone())
+                })? {
+                    let mut version = ToolVersion::new(backend.id(), candidate);
+                    version.options = request.options.clone();
+                    versions.push(version);
+                }
+            }
+            versions
+        };
+        for version in versions {
+            if routed_bin_names_for_version(&app.ctx, &report, backend.as_ref(), &version)?
+                .iter()
+                .any(|name| name == command)
+            {
+                matching.push((*key, request));
+                break;
+            }
+        }
+    }
+    match matching.as_slice() {
+        [] => Ok(None),
+        [(_, request)] => Ok(Some((*request).clone())),
+        _ => {
+            let candidates = matching
+                .iter()
+                .map(|(key, request)| format!("{key} ({})", request.backend))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!("ambiguous global command `{command}`: {candidates}; pass the full tool id or a configured alias");
+        }
+    }
 }

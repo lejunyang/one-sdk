@@ -3751,23 +3751,94 @@ fn global_upgrade_ignores_project_and_preserves_global_constraints() {
         after["platforms"][platform_key()]["tools"]["go"],
         tools["go"]
     );
+    let node = temp.path().join("installs/node/1.0.0");
+    let bin = if cfg!(windows) {
+        node
+    } else {
+        node.join("bin")
+    };
+    std::fs::create_dir_all(&bin).unwrap();
+    let executable = bin.join(format!("fixture-node{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&executable, b"owned command; must never execute").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let by_command = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "upgrade", "-g", "fixture-node"],
+    );
+    assert!(
+        by_command.status.success(),
+        "{}",
+        String::from_utf8_lossy(&by_command.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&user_config).unwrap(), config);
+    assert_eq!(
+        std::fs::read_to_string(project.join("osdk.lock")).unwrap(),
+        "project lock stays untouched"
+    );
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(temp.path().join("config/osdk.lock")).unwrap())
+            .unwrap();
+    assert_eq!(
+        lock["platforms"][platform_key()]["tools"],
+        after["platforms"][platform_key()]["tools"]
+    );
 }
 
 #[test]
 fn global_upgrade_help_and_option_conflicts_are_explicit() {
     let temp = tempfile::tempdir().unwrap();
-    for (lang, expected) in [("en", "user-global"), ("zh", "全局约束")] {
+    for (lang, expected, commands) in [
+        ("en", "user-global", "unique managed commands"),
+        ("zh", "全局约束", "归属唯一的受管命令"),
+    ] {
         let output = run_isolated(temp.path(), &["--lang", lang, "upgrade", "--help"]);
         assert!(output.status.success());
         let help = String::from_utf8_lossy(&output.stdout);
         assert!(
-            help.contains("--global") && help.contains(expected),
+            help.contains("--global") && help.contains(expected) && help.contains(commands),
             "{help}"
         );
     }
     let output = run_isolated(temp.path(), &["upgrade", "-g", "node", "-o", "foo=bar"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}
+
+#[cfg(unix)]
+#[test]
+fn global_upgrade_does_not_resolve_or_execute_unmanaged_path_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let external = temp.path().join("external");
+    let marker = temp.path().join("was-executed");
+    write_executable(
+        &external.join("aad"),
+        &format!("#!/bin/sh\n: > '{}'\n", marker.display()),
+    );
+    let probe = Command::new(external.join("aad"))
+        .env_clear()
+        .env("PATH", &external)
+        .status()
+        .unwrap();
+    assert!(
+        probe.success() && marker.exists(),
+        "the external-command probe must be observable"
+    );
+    std::fs::remove_file(&marker).unwrap();
+    let output = run_isolated_in_with_env(
+        temp.path(),
+        temp.path(),
+        &["--offline", "upgrade", "-g", "aad"],
+        &[("PATH", external.to_str().unwrap())],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not selected globally"));
+    assert!(!marker.exists());
+    assert!(!temp.path().join("config/osdk.lock").exists());
 }
 
 #[test]

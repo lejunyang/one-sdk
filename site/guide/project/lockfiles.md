@@ -29,7 +29,7 @@ osdk model sync [NAME]
 | `use --global TOOL...` | 否 | 不写项目 lock；全局 npm/Go 工具按各自语义维护用户 lock |
 | `lock` | 仅为保留其他平台/模型而载入旧文件 | 是，重建目标平台的工具表（仅项目自己声明的工具，见下） |
 | `outdated` | 否；重新解析配置或显式请求 | 否 |
-| `upgrade -g [TOOL...]` | 不读取项目 lock | 更新用户 lock，保留全局约束和未升级条目 |
+| `upgrade -g [TOOL...]` | 不读取项目 lock | 更新用户 lock，保留全局约束和未升级条目；TOOL 也可为归属唯一的已安装全局命令 |
 | `upgrade` | 否；重新解析配置或显式请求 | 是，重建 host 平台工具表（同样只记项目工具） |
 | `exec` | 否 | 否 |
 | `model use` | 否 | 写项目声明；本身不写 lock |

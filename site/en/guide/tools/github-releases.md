@@ -23,7 +23,9 @@ or reusing that exact version. Drafts are excluded, and prereleases follow
 For tools already selected with `use -g`, run
 `osdk upgrade -g github:lejunyang/ai-auto-desktop`, or `osdk upgrade -g` for all
 global selections. It follows existing constraints, preserves tool options, and
-updates the user lock. Use `use -g` to change constraints.
+updates the user lock. If its installed command has a unique owner,
+`osdk upgrade -g aad` is equivalent. Multiple global owners of `aad` produce an
+ambiguity error requiring a full ID or configured alias. Use `use -g` to change constraints.
 
 ## Asset selection options
 

@@ -404,6 +404,15 @@ mod tests {
 
     #[tokio::test]
     async fn global_upgrade_keeps_npm_scope_and_preserves_selection_metadata() {
+        assert_global_upgrade_keeps_npm_scope("npm:fixture-cli").await;
+    }
+
+    #[tokio::test]
+    async fn global_upgrade_by_command_keeps_npm_scope_and_preserves_selection_metadata() {
+        assert_global_upgrade_keeps_npm_scope("fixture-cli").await;
+    }
+
+    async fn assert_global_upgrade_keeps_npm_scope(operand: &str) {
         let temporary = tempfile::tempdir().unwrap();
         let dirs = osdk_core::dirs::Dirs {
             data: temporary.path().join("data"),
@@ -435,7 +444,14 @@ mod tests {
             for bin in backend.bin_paths(&ctx, &tool).unwrap() {
                 std::fs::create_dir_all(&bin).unwrap();
                 for name in [id.to_string(), format!("{id}.exe"), format!("{id}.cmd")] {
-                    std::fs::write(bin.join(name), b"runtime fixture; must never execute").unwrap();
+                    let path = bin.join(name);
+                    std::fs::write(&path, b"runtime fixture; must never execute").unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                            .unwrap();
+                    }
                 }
             }
         }
@@ -457,7 +473,7 @@ mod tests {
             false,
         );
         app.global_only = true;
-        crate::commands::upgrade_global(&mut app, vec!["npm:fixture-cli".into()])
+        crate::commands::upgrade_global(&mut app, vec![operand.into()])
             .await
             .unwrap();
         assert_eq!(
