@@ -94,6 +94,20 @@ bins = ["bin/acme", "bin/acmectl"]
 所有公开 HTTP 选项都属于安装身份。修改摘要、制品类型、所选子树、binary 或重命名
 会产生另一个隔离安装，不会静默复用不兼容的现有安装。
 
+## 维护全局选择
+
+用户 `config.toml` 中采用相同结构声明的 HTTP 工具，可以按已有选择维护：
+
+```bash
+osdk upgrade -g acme
+osdk upgrade -g 'http:https://downloads.example.com/acme-{version}.tar.gz'
+```
+
+命令名 `acme` 必须唯一归属于该全局安装。全局配置中的精确版本、`sha256` 与其他
+选项会一起用于校验和更新请求，命令行无需重复这些选项；配置别名也遵守同一规则。
+HTTP 不提供版本发现，`upgrade` 保留精确 pin，不会猜测新版本或新摘要。更新制品
+版本时，须一起修改版本与对应 SHA-256。
+
 ## 锁定与离线重放
 
 项目中可以采用以下流程：

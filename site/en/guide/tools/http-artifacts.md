@@ -107,6 +107,23 @@ digest, artifact kind, selected subtree, selected binaries, or rename produces
 a different isolated installation instead of silently reusing an incompatible
 one.
 
+## Maintain a global selection
+
+An HTTP tool declared with the same structure in user `config.toml` can be
+maintained through its existing selection:
+
+```bash
+osdk upgrade -g acme
+osdk upgrade -g 'http:https://downloads.example.com/acme-{version}.tar.gz'
+```
+
+The command `acme` must uniquely belong to that global install. Its configured
+exact version, `sha256`, and other options are validated together when constructing
+the update request, so they do not need repeating on the command line. Configured
+aliases follow the same rule. HTTP has no version discovery: `upgrade` preserves
+the exact pin rather than guessing a newer version or digest. Change the version
+and its SHA-256 together when selecting a newer artifact.
+
 ## Lock and replay offline
 
 A practical project workflow is:

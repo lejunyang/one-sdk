@@ -77,6 +77,12 @@ Node/Rust/Go 依赖也显式取全局声明，避免项目版本文件参与注�
 在安装前报歧义并列出配置 key 和完整 ID。多个旧版本不算多个拥有者，但同一 backend
 的不同配置别名仍可能有不同约束，不能任意合并成一个选择。
 
+构造全局请求时，先绑定配置选择器和选项，再做 namespace 校验；HTTP 的精确版本
+与必填 `sha256` 不能在解析工具名之后才补。显式传入的全局升级参数只按名称解析，
+不把裸 HTTP ID 当成缺选项的新安装请求。测试覆盖全部静态注册项和声明式 backend，
+以及七类动态 backend；Cargo/Go 使用生产生命周期发布带 seal 的 fixture，PyPI、
+Conda、HTTP 分别验证解释器和制品记录，并检查损坏状态及跨 backend 同名冲突。
+
 ## 可验证的不变量
 
 - 解析优先级、父目录继承、结构化文件和非法 package-manager 值由 [`resolver` 单元测试](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs) 覆盖。

@@ -95,6 +95,15 @@ request. Multiple selections fail before installation and list their keys and fu
 IDs. Older installed versions do not create extra owners, but separate aliases of
 one backend can have different constraints and must not be silently merged.
 
+Global requests bind configured selectors and options before namespace validation.
+HTTP requires both its exact selector and `sha256` during parsing. Explicit global
+upgrade arguments are parsed as names, so a bare HTTP ID is not mistaken for a new
+installation missing its options. Tests cover every static registry entry,
+declarative backends, and all seven dynamic namespaces. Cargo/Go fixtures are
+published through the production lifecycle with metadata seals; PyPI, Conda, and
+HTTP fixtures validate interpreters or artifact records. Damaged state and
+command collisions across backend namespaces are covered as well.
+
 ## Verifiable invariants
 
 - Precedence, ancestor walking, structured files, and invalid package-manager values are covered by the [`resolver` unit tests](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs).

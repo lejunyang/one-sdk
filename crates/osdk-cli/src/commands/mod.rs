@@ -103,7 +103,7 @@ mod command_flow_tests {
         (temporary, config)
     }
 
-    fn app_with_config(
+    pub(super) fn app_with_config(
         temporary: &tempfile::TempDir,
         config: osdk_core::config::Config,
     ) -> crate::app::App {

@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "upgrade_tests.rs"]
+mod backend_tests;
+
 pub async fn upgrade_global(app: &mut App, tools: Vec<String>) -> Result<()> {
     let requests = global_upgrade_requests(app, &tools)?;
     if requests.is_empty() {
@@ -63,20 +67,23 @@ pub(crate) fn global_upgrade_requests(app: &App, tools: &[String]) -> Result<Vec
         if app.ctx.config.excluded_tools.contains_key(key) {
             continue;
         }
-        let (mut request, indirect) = resolve_explicit_request_target(
-            app,
-            key,
-            &app.ctx.config.global_tool_configs,
-            &app.ctx.config.global_tools,
-        )?;
-        if indirect.is_none() {
-            request.spec = VersionSpec::parse(entry.version());
-        }
+        let indirect = app.registry.get(key).is_err();
+        let operand = if indirect {
+            entry.version().to_string()
+        } else {
+            format!("{key}@{}", entry.version())
+        };
+        // HTTP and other namespaces with required options must receive their
+        // configured options before parsing, including through named aliases.
+        let bound = bind_explicit_operand_options(&operand, &entry.to_cli_option_strings())?;
+        let mut request = ToolRequest::parse(&bound)?;
         request.backend = app.registry.get(&request.backend)?.id().to_string();
-        if indirect.is_some() && request.backend.starts_with("npm:") {
+        if indirect && request.backend.starts_with("npm:") {
             anyhow::bail!("global npm package aliases are not supported; use the canonical npm:<package> request");
         }
-        request.options = entry.to_request_options();
+        if !osdk_core::tool::ToolId::parse(&request.backend)?.is_dynamic() {
+            request.options = entry.to_request_options();
+        }
         reject_public_internal_options(&request.options)?;
         configured.push((key, request));
     }
@@ -94,8 +101,11 @@ pub(crate) fn global_upgrade_requests(app: &App, tools: &[String]) -> Result<Vec
     }
     let mut requests = Vec::new();
     for tool in tools {
-        let parsed = ToolRequest::parse(tool)?;
-        if requested_spec_literal(tool).is_some() || !parsed.options.is_empty() {
+        // Only a name is accepted here: validating a complete request would
+        // incorrectly demand HTTP options that already live in user config.
+        let parsed = osdk_core::tool::ToolSpecParts::parse(tool)?;
+        osdk_core::tool::ToolId::parse(&parsed.id)?;
+        if parsed.selector.is_some() || !parsed.options.is_empty() {
             anyhow::bail!("global upgrade follows configured constraints; use `osdk use -g {tool}` to change the selection or options");
         }
         let canonical = app.registry.get(tool).ok().map(|b| b.id().to_string());
