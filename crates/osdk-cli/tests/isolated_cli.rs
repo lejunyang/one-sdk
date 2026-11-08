@@ -3260,6 +3260,202 @@ fn self_upgrade_offline_reports_the_blocker_without_touching_the_binaries() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn self_upgrade_has_no_orphan_progress_line_in_a_real_terminal() {
+    use std::fs::File;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let install = root.join("bin");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let asset =
+        osdk_core::self_update::asset_name(osdk_core::platform::Platform::current()).unwrap();
+    let payload = b"new release fixture";
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+    let mut archive = tar::Builder::new(encoder);
+    for name in ["osdk", "osdk-shim"] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, format!("release/{name}"), &payload[..])
+            .unwrap();
+    }
+    let archive = archive.into_inner().unwrap().finish().unwrap();
+    let checksum =
+        osdk_core::pipeline::verify::hash_bytes(&archive, osdk_core::pipeline::HashAlgo::Sha256);
+    let checksums = format!("{checksum}  {asset}\n");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        format!(
+            "[sources.self]\npin = \"fixture\"\ndisable = [\"github\", \"ghproxy\"]\n\
+             [[sources.self.custom]]\nid = \"fixture\"\nkind = \"custom\"\n\
+             download_url = \"http://{}/\"\n",
+            listener.local_addr().unwrap()
+        ),
+    )
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..4 {
+            let mut stream = accept_fixture_connection(&listener, "self upgrade");
+            stream
+                .set_read_timeout(Some(FIXTURE_SERVER_TIMEOUT))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let body = if request.contains("/SHA256SUMS ") {
+                checksums.as_bytes()
+            } else {
+                assert!(request.contains(&format!("/v9.9.9/{asset} ")), "{request}");
+                &archive
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            for chunk in body.chunks(1024) {
+                stream.write_all(chunk).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    });
+
+    for quiet in [false, true] {
+        // Self upgrade replaces its own executable: never run it in the real
+        // installation or Cargo's build output directory.
+        std::fs::copy(osdk(), install.join("osdk")).unwrap();
+        std::fs::write(install.join("osdk-shim"), b"old shim").unwrap();
+        let mut master = -1;
+        let mut slave = -1;
+        let mut size = libc::winsize {
+            ws_row: 40,
+            ws_col: 160,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &raw mut size,
+                )
+            },
+            0
+        );
+        let mut terminal = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let flags = unsafe { libc::fcntl(terminal.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe {
+                libc::fcntl(
+                    terminal.as_raw_fd(),
+                    libc::F_SETFL,
+                    flags | libc::O_NONBLOCK,
+                )
+            },
+            0
+        );
+        let stdout = root.join("stdout");
+        let mut command = Command::new(install.join("osdk"));
+        command.args(["self", "upgrade", "--version", "9.9.9"]);
+        if quiet {
+            command.arg("--quiet");
+        }
+        let mut child = command
+            .current_dir(root)
+            .env_clear()
+            .env("HOME", root.join("home"))
+            .env("PATH", "")
+            .env("TERM", "xterm")
+            .env("OSDK_DATA_DIR", root.join("data"))
+            .env("OSDK_CONFIG_DIR", root.join("config"))
+            .env("OSDK_CACHE_DIR", root.join("cache"))
+            .env("OSDK_STORE_DIR", root.join("store"))
+            .env("OSDK_INSTALL_DIR", root.join("installs"))
+            .stdout(File::create(&stdout).unwrap())
+            .stderr(Stdio::from(slave.try_clone().unwrap()))
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + ISOLATED_COMMAND_TIMEOUT;
+        let mut captured = Vec::new();
+        let status = loop {
+            // Drain while the child is running too, so terminal backpressure
+            // cannot stall it. Retain the last slave until capture is complete
+            // because macOS otherwise discards unread PTY output.
+            let mut buffer = [0; 8192];
+            loop {
+                match terminal.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => captured.extend_from_slice(&buffer[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => panic!("terminal read: {e}"),
+                }
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("self upgrade timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // The exit can race the final read; drain once more with the slave open.
+        let mut buffer = [0; 8192];
+        while let Ok(n) = terminal.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            captured.extend_from_slice(&buffer[..n]);
+        }
+        drop(slave);
+        let output = std::fs::read_to_string(stdout).unwrap();
+        let stderr = String::from_utf8_lossy(&captured);
+        assert!(
+            status.success() && output.contains("9.9.9"),
+            "{output}\n{stderr}"
+        );
+        if quiet {
+            assert!(
+                captured.is_empty(),
+                "quiet upgrade drew progress: {stderr:?}"
+            );
+        } else {
+            assert!(
+                stderr.matches("osdk@9.9.9").count() >= 2,
+                "must observe actual progress updates: {stderr:?}"
+            );
+            assert!(
+                !stderr.contains("[------------------------------] 0 B/"),
+                "orphan zero-progress bar: {stderr:?}"
+            );
+        }
+        for name in ["osdk", "osdk-shim"] {
+            assert_eq!(std::fs::read(install.join(name)).unwrap(), payload);
+        }
+    }
+    server.join().unwrap();
+}
+
 #[test]
 fn self_upgrade_help_documents_the_mirror_choice_in_both_languages() {
     let temp = tempfile::tempdir().unwrap();

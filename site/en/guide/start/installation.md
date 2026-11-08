@@ -238,6 +238,10 @@ osdk self upgrade --dry-run
 osdk self upgrade
 ```
 
+The download still runs in the version being replaced. For example, upgrading
+from 0.0.10 can leave an empty progress line. This was fixed in 0.0.12; the updated
+downloader takes effect the next time you run osdk.
+
 `osdk` and `osdk-shim` are always replaced together, and the download is
 verified against the release checksums. Downloads are speed-probed the same way
 tool downloads are, so a GitHub mirror is used automatically when it is the

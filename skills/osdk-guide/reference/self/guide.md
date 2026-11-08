@@ -12,6 +12,10 @@ osdk self upgrade [--version VERSION] [--dry-run] [--force]
 | `--dry-run` | 只报告可用版本，不下载替换 |
 | `--force` | 当前已是目标版本也重装 |
 
+自身升级的下载由旧进程执行，下载器修复在更新后的下一次运行才生效；
+例如 0.0.10 的空进度条问题已在 0.0.12 修复，旧版升级时仍可能显示它。
+`--quiet` 隐藏下载进度，不隐藏升级结果。
+
 升级同时替换 `osdk` 与 `osdk-shim`。Linux musl 安装继续选择 musl 产物，不切换到
 glibc。下载源走特殊 key `self`：
 

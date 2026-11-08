@@ -98,6 +98,9 @@ osdk self upgrade --dry-run   # what is available
 osdk self upgrade             # download it and replace this installation
 ```
 
+Self-upgrade downloads run in the currently installed version. When upgrading
+from a version with a progress display bug, its fix takes effect on the next run.
+
 Both programs are replaced together and the download is checksum-verified. Linux
 self-updates preserve the installed GNU or musl ABI. Update sources are
 speed-probed just like tool downloads, so a GitHub mirror is

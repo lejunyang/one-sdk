@@ -91,6 +91,13 @@ transfers alike. Regression tests capture a real stderr pseudo-terminal as well
 as the shared area, with a standalone bar as a positive control so orphan output
 cannot escape observation.
 
+`self upgrade` uses this same downloader, with the download executed by the old
+process being replaced. Replacing its executable on disk cannot change that
+process's rendering behavior. A CLI regression test upgrades a temporary
+installation from a local fixture with a real stderr pseudo-terminal, checking
+that no empty progress line escapes, multiple transfer updates are visible,
+`--quiet` draws nothing, and both installed programs contain the new bytes.
+
 ## Failure semantics and caveats
 
 - Each source candidate must complete download, checksum/attestation,

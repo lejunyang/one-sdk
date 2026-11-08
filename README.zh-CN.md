@@ -90,6 +90,8 @@ osdk self upgrade --dry-run   # 看看有什么可用版本
 osdk self upgrade             # 下载并替换当前安装
 ```
 
+自身升级的下载由当前已安装版本执行；如果旧版本有进度显示问题，修复会在升级后的下一次运行生效。
+
 两个程序会一起替换，下载内容会做校验和比对；Linux 自更新会保持已经安装的 GNU 或 musl
 ABI。更新源与工具下载一样会做测速，因此 GitHub 镜像更快时会自动走镜像；
 `osdk source test self` 可以看到实测结果，
