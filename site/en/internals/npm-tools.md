@@ -419,7 +419,14 @@ verifies package identity, bin metadata, targets and launchers before publishing
 Differing versions require explicit `--package`. Failures before publication
 leave both live installs intact. Only then does npm uninstall run with an explicit
 source prefix. Failed restoration preserves and reports backups. Copies do not
-share mutable hard links; absolute or escaping symlinks are rejected. The existing
+share mutable hard links. Directory names are installation keys; manifest names
+determine eligibility for registry reinstalls. Linked and aliased packages still
+contribute bin ownership, but are not migrated automatically. Absolute links and
+links resolving outside the prefix are withheld from staged npm. After npm exits
+and migrated artifacts pass verification, their original link text is restored
+before publication. Occupied link paths or symlinked parent directories abort
+publication. External projects are never copied or written; relative links resolve
+to their original targets once published at the original location. The existing
 Node-to-Node migration also pins prefixes explicitly, independent of activation
 variables and builtin defaults.
 

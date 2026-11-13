@@ -27,7 +27,8 @@ osdk doctor --verify --tool node
 
 普通诊断还会列出各 Node 版本目录中的旧 npm 全局包、精确版本和路径，以及共享 npm
 prefix 内的重复包。可先用 `node migrate-packages --from VERSION --to-global` 预览，
-不同版本需 `--package NAME` 明确选择；`--apply` 才执行。doctor 本身不迁移或删包。
+不同版本需 `--package NAME` 明确选择；`--apply` 才执行。本地链接和别名包会提示从原始来源
+单独处理，不会建议按 registry 包迁移。doctor 本身不迁移或删包。
 
 托管 npm 默认 prefix 的合法刷新不会被误报为配置漂移；更新只维护已知干净的对应文件
 记录，不会重录整个安装目录或掩盖既有修改，旧安装缺失的完整性基线也不会自动生成。

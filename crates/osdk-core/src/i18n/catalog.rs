@@ -199,6 +199,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.node_migrate_skip_local",
+        (
+            "skip linked or aliased package {package}; reinstall it separately from its original source",
+            "跳过本地链接或别名包 {package}；请从其原始来源单独重新安装",
+        ),
+    );
+    m.insert(
         "msg.node_migrate_nothing",
         (
             "no global npm packages need migration",

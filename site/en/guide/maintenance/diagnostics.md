@@ -6,6 +6,8 @@ Plain `doctor` also reads legacy npm globals inside each Node version and lists
 their names, versions and paths, including duplicates in the shared prefix.
 Preview with the suggested `node migrate-packages --from VERSION --to-global`;
 use `--package NAME` to explicitly select a source version when versions differ.
+Linked and aliased packages are marked for separate handling from their original
+source rather than suggested for registry migration.
 Diagnosis does not change packages or configuration.
 
 ## Diagnostics

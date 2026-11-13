@@ -12,6 +12,7 @@ struct GlobalPackage {
     root: PathBuf,
     bins: BTreeMap<String, String>,
     native: bool,
+    registry_package: bool,
 }
 
 impl GlobalPackage {
@@ -64,15 +65,23 @@ fn packages(prefix: &Path) -> Result<Vec<GlobalPackage>> {
             .with_context(|| format!("reading {}", manifest.display()))?;
         let name = value["name"].as_str().unwrap_or("");
         let version = value["version"].as_str().unwrap_or("");
-        if name != expected_name
-            || !matches!(VersionSpec::parse(version), VersionSpec::Exact(ref exact) if exact == version)
+        // npm link and npm aliases need not use their manifest name as the
+        // installation key. Inventory them for command ownership, but do not
+        // turn them into registry reinstall requests.
+        let linked = std::fs::symlink_metadata(&root)?.file_type().is_symlink()
+            || std::fs::symlink_metadata(root.parent().unwrap())?
+                .file_type()
+                .is_symlink();
+        let registry_package = !linked && name == expected_name;
+        if registry_package
+            && !matches!(VersionSpec::parse(version), VersionSpec::Exact(ref exact) if exact == version)
         {
             return Err(anyhow!(
                 "invalid npm package identity at {}",
                 manifest.display()
             ));
         }
-        osdk_core::tool::ToolId::parse(&format!("npm:{name}"))?;
+        osdk_core::tool::ToolId::parse(&format!("npm:{expected_name}"))?;
         let mut bins = BTreeMap::new();
         if let Some(bin) = value["bin"].as_str() {
             bins.insert(
@@ -104,11 +113,12 @@ fn packages(prefix: &Path) -> Result<Vec<GlobalPackage>> {
                 .iter()
                 .any(|key| value["scripts"][key].is_string());
         out.push(GlobalPackage {
-            name: name.into(),
+            name: expected_name,
             version: version.into(),
             root,
             bins,
             native,
+            registry_package,
         });
     }
     out.sort_by(|left, right| left.name.cmp(&right.name));
@@ -139,10 +149,17 @@ pub(super) fn doctor_node_globals(app: &App) -> Result<()> {
                     )
                 );
             }
-            println!(
-                "    osdk node migrate-packages --from {version} --to-global --package {}",
-                package.name
-            );
+            if package.registry_package {
+                println!(
+                    "    osdk node migrate-packages --from {version} --to-global --package {}",
+                    package.name
+                );
+            } else {
+                println!(
+                    "    {}",
+                    t!("msg.node_migrate_skip_local", package = package.name)
+                );
+            }
         }
     }
     Ok(())
@@ -175,6 +192,13 @@ pub(super) fn migrate_to_shared(
     let mut conflicts = false;
     for package in &source_packages {
         if !selected.is_empty() && !selected.contains(&package.name) {
+            continue;
+        }
+        if !package.registry_package {
+            println!(
+                "{}",
+                t!("msg.node_migrate_skip_local", package = package.name)
+            );
             continue;
         }
         if package.native {
@@ -242,7 +266,7 @@ pub(super) fn migrate_to_shared(
         .prefix(".npm-migrate-")
         .tempdir_in(app.ctx.dirs.global_packages())?;
     let staged_prefix = staging.path().join("next");
-    copy_prefix(&prefix, &staged_prefix)?;
+    let preserved_links = copy_prefix(&prefix, &staged_prefix)?;
     let target = ManagedNodeTools {
         bin: source.bin.clone(),
         npm: source.npm.clone(),
@@ -262,6 +286,9 @@ pub(super) fn migrate_to_shared(
     args.extend(specs.iter().map(String::as_str));
     npm_command(&target, &args)?;
     verify_migrated(&staged_prefix, &planned)?;
+    // Restore original link text only after npm exits. Relative links may be
+    // broken in staging and become valid at the final prefix location.
+    restore_links(&staged_prefix, &preserved_links)?;
     let previous = staging.path().join("previous");
     let had_previous = prefix.exists();
     if had_previous {
@@ -316,7 +343,9 @@ fn verify_migrated(prefix: &Path, expected: &[&GlobalPackage]) -> Result<()> {
         let installed = actual
             .iter()
             .find(|installed| {
-                installed.name == package.name && installed.version == package.version
+                installed.registry_package
+                    && installed.name == package.name
+                    && installed.version == package.version
             })
             .ok_or_else(|| {
                 anyhow!(
@@ -357,10 +386,18 @@ fn verify_migrated(prefix: &Path, expected: &[&GlobalPackage]) -> Result<()> {
     Ok(())
 }
 
-fn copy_prefix(source: &Path, target: &Path) -> Result<()> {
+struct PreservedLink {
+    relative: PathBuf,
+    link: PathBuf,
+    #[cfg(windows)]
+    directory: bool,
+}
+
+fn copy_prefix(source: &Path, target: &Path) -> Result<Vec<PreservedLink>> {
     std::fs::create_dir_all(target)?;
+    let mut preserved = Vec::new();
     if !source.exists() {
-        return Ok(());
+        return Ok(preserved);
     }
     if std::fs::symlink_metadata(source)?.file_type().is_symlink() {
         return Err(anyhow!(
@@ -377,19 +414,20 @@ fn copy_prefix(source: &Path, target: &Path) -> Result<()> {
         let to = target.join(entry.path().strip_prefix(source)?);
         if entry.file_type().is_symlink() {
             let link = std::fs::read_link(entry.path())?;
-            // Absolute links would keep pointing at the live prefix while
-            // staging. Linked global packages need a manual migration.
-            if link.is_absolute() {
-                return Err(anyhow!(
-                    "cannot stage absolute npm link {}",
-                    entry.path().display()
-                ));
-            }
-            if !std::fs::canonicalize(entry.path())?.starts_with(&canonical_source) {
-                return Err(anyhow!(
-                    "npm link escapes prefix: {}",
-                    entry.path().display()
-                ));
+            // npm must never see a staged link into the live prefix or a local
+            // project. Keep it aside without copying or modifying its target.
+            if link.is_absolute()
+                || !std::fs::canonicalize(entry.path())
+                    .with_context(|| format!("resolving npm link {}", entry.path().display()))?
+                    .starts_with(&canonical_source)
+            {
+                preserved.push(PreservedLink {
+                    relative: entry.path().strip_prefix(source)?.to_owned(),
+                    link,
+                    #[cfg(windows)]
+                    directory: entry.path().is_dir(),
+                });
+                continue;
             }
             #[cfg(unix)]
             std::os::unix::fs::symlink(link, to)?;
@@ -407,12 +445,71 @@ fn copy_prefix(source: &Path, target: &Path) -> Result<()> {
             return Err(anyhow!("unsupported npm file {}", entry.path().display()));
         }
     }
+    Ok(preserved)
+}
+
+fn restore_links(prefix: &Path, links: &[PreservedLink]) -> Result<()> {
+    for link in links {
+        let mut parent = prefix.to_owned();
+        for component in link.relative.parent().unwrap().components() {
+            parent.push(component);
+            match std::fs::symlink_metadata(&parent) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&parent)?;
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "npm changed preserved link parent {}",
+                        parent.display()
+                    ))
+                }
+            }
+        }
+        let to = prefix.join(&link.relative);
+        match std::fs::symlink_metadata(&to) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(anyhow!("npm replaced preserved link {}", to.display())),
+            Err(error) => return Err(error.into()),
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&link.link, &to)?;
+        #[cfg(windows)]
+        if link.directory {
+            std::os::windows::fs::symlink_dir(&link.link, &to)?;
+        } else {
+            std::os::windows::fs::symlink_file(&link.link, &to)?;
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_accepts_aliases_without_confusing_manifest_and_install_names() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, manifest_name) in [
+            ("agentbuddy", "agentbuddy"),
+            ("omem-assistant", "@omem-ai/app"),
+        ] {
+            let root = modules(temp.path()).join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("package.json"),
+                serde_json::json!({"name":manifest_name,"version":"0.0.1","bin":{"omem":"dist/cli.js"}}).to_string(),
+            ).unwrap();
+        }
+        let packages = packages(temp.path()).unwrap();
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name, "agentbuddy");
+        assert!(packages[0].registry_package);
+        assert_eq!(packages[1].name, "omem-assistant");
+        assert!(!packages[1].registry_package);
+        assert_eq!(packages[1].bins["omem"], "dist/cli.js");
+    }
 
     #[test]
     fn staging_copies_package_bytes_without_aliasing_the_live_prefix() {
@@ -454,22 +551,93 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    fn test_link(target: &Path, link: &Path, directory: bool) {
+        #[cfg(unix)]
+        {
+            let _ = directory;
+            std::os::unix::fs::symlink(target, link).unwrap();
+        }
+        #[cfg(windows)]
+        if directory {
+            std::os::windows::fs::symlink_dir(target, link).unwrap();
+        } else {
+            std::os::windows::fs::symlink_file(target, link).unwrap();
+        }
+    }
+
     #[test]
-    fn staging_preserves_internal_launchers_but_rejects_links_outside_the_prefix() {
+    fn staging_preserves_internal_launchers_and_sets_external_links_aside() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         std::fs::create_dir_all(source.join("bin")).unwrap();
         std::fs::write(source.join("entry"), "original").unwrap();
-        std::os::unix::fs::symlink("../entry", source.join("bin/example")).unwrap();
+        let internal = Path::new("..").join("entry");
+        test_link(&internal, &source.join("bin/example"), false);
         let target = temp.path().join("target");
         copy_prefix(&source, &target).unwrap();
         assert_eq!(
             std::fs::read_link(target.join("bin/example")).unwrap(),
-            PathBuf::from("../entry")
+            internal
         );
         std::fs::write(temp.path().join("outside"), "outside").unwrap();
-        std::os::unix::fs::symlink("../outside", source.join("escape")).unwrap();
-        assert!(copy_prefix(&source, &temp.path().join("rejected")).is_err());
+        let external = Path::new("..").join("outside");
+        test_link(&external, &source.join("escape"), false);
+        let stage = temp.path().join("staging/next");
+        let links = copy_prefix(&source, &stage).unwrap();
+        assert!(stage.join("escape").symlink_metadata().is_err());
+        assert_eq!(links.len(), 1);
+        restore_links(&stage, &links).unwrap();
+        assert_eq!(std::fs::read_link(stage.join("escape")).unwrap(), external);
+        // The relative link must resolve at its final location, not at next/.
+        std::fs::remove_dir_all(&source).unwrap();
+        std::fs::rename(&stage, &source).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(source.join("escape")).unwrap(),
+            "outside"
+        );
+    }
+
+    #[test]
+    fn staging_hides_linked_projects_and_refuses_to_overwrite_npm_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("package.json"), r#"{"name":"local-project"}"#).unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(modules(&source)).unwrap();
+        let relative = modules(Path::new("")).join("local-project");
+        test_link(&project, &source.join(&relative), true);
+        let inventory = packages(&source).unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert!(!inventory[0].registry_package);
+        let stage = temp.path().join("next");
+        let links = copy_prefix(&source, &stage).unwrap();
+        assert!(!stage.join(&relative).exists());
+        assert_eq!(links.len(), 1);
+        // Do not hide a new npm-created package under a restored link.
+        std::fs::create_dir_all(stage.join(&relative)).unwrap();
+        assert!(restore_links(&stage, &links)
+            .unwrap_err()
+            .to_string()
+            .contains("replaced preserved link"));
+        std::fs::remove_dir(stage.join(&relative)).unwrap();
+        // Nor traverse a parent npm replaced with a link into a live tree.
+        std::fs::remove_dir(modules(&stage)).unwrap();
+        test_link(&project, &modules(&stage), true);
+        assert!(restore_links(&stage, &links)
+            .unwrap_err()
+            .to_string()
+            .contains("changed preserved link parent"));
+        // Remove just the link (remove_dir for a Windows directory symlink).
+        #[cfg(unix)]
+        std::fs::remove_file(modules(&stage)).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(modules(&stage)).unwrap();
+        restore_links(&stage, &links).unwrap();
+        assert_eq!(std::fs::read_link(stage.join(&relative)).unwrap(), project);
+        assert_eq!(
+            std::fs::read_to_string(project.join("package.json")).unwrap(),
+            r#"{"name":"local-project"}"#
+        );
     }
 }

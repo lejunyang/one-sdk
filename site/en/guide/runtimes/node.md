@@ -58,15 +58,18 @@ selected source packages. A differing shared version requires explicit
 `--package` selection; osdk never chooses by version order. Without `--apply`,
 only package metadata is read and no npm process runs. npm/Corepack themselves
 and packages with install scripts or gyp markers are excluded; reinstall those
-separately after checking runtime compatibility.
+separately after checking runtime compatibility. Linked and aliased source packages
+are also excluded from registry reinstalls; handle them from their original source.
 
 Apply reinstalls exact versions with scripts disabled, requiring an available
 registry and suitable npm login configuration. Do not run concurrent global
 installs. Failed installation or artifact verification leaves both live copies
 intact. Success removes the corresponding source packages and rebuilds shims;
-copies in other Node versions need separate migration. Shared packages linked
-outside the prefix require manual handling. If source cleanup fails, the shared
-installation remains and the previous shared prefix backup location is reported.
+copies in other Node versions need separate migration. Unselected shared local
+package links and their launchers stay unchanged, including links whose directory
+and manifest names differ. Command-name conflicts still block migration. If source
+cleanup fails, the shared installation remains and the previous shared prefix
+backup location is reported.
 
 Node also supports global-package migration:
 

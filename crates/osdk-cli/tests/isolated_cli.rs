@@ -10812,6 +10812,122 @@ fn shared_node_migration_replaces_selected_duplicate_and_cleans_source_after_ver
 }
 
 #[cfg(unix)]
+fn linked_shared_npm_project(root: &Path, command: &str) -> PathBuf {
+    let project = root.join("omem-project");
+    std::fs::create_dir_all(project.join("dist")).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        serde_json::json!({"name":"@omem-ai/app","version":"0.0.1","bin":{command:"dist/cli.js"}})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(project.join("dist/cli.js"), "original local project").unwrap();
+    let shared = root.join("data/global/npm");
+    std::fs::create_dir_all(shared.join("lib/node_modules")).unwrap();
+    std::fs::create_dir_all(shared.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&project, shared.join("lib/node_modules/omem-assistant")).unwrap();
+    std::os::unix::fs::symlink(
+        "../lib/node_modules/omem-assistant/dist/cli.js",
+        shared.join("bin").join(command),
+    )
+    .unwrap();
+    project
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_node_migration_preserves_unselected_local_links_without_exposing_them_to_npm() {
+    for result in ["exit 0", "exit 9"] {
+        let temp = tempfile::tempdir().unwrap();
+        let install_result = format!(
+            "test ! -e \"$prefix/lib/node_modules/omem-assistant\" || exit 90\n  test ! -L \"$prefix/bin/omem\" || exit 91\n  {result}"
+        );
+        let (source, shared) = shared_migration_fixture(temp.path(), &install_result);
+        let project = linked_shared_npm_project(temp.path(), "omem");
+        let prefix = temp.path().join("data/global/npm");
+        let args = [
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to-global",
+            "--package",
+            "agentbuddy",
+        ];
+        let preview = run_isolated(temp.path(), &args);
+        assert!(
+            preview.status.success(),
+            "{}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &[&args[..], &["--apply"]].concat(),
+            &[("PATH", "/usr/bin:/bin")],
+        );
+        assert_eq!(
+            output.status.success(),
+            result == "exit 0",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(source.exists(), result != "exit 0");
+        assert!(std::fs::read_to_string(shared.join("package.json"))
+            .unwrap()
+            .contains(if result == "exit 0" {
+                "1.7.11"
+            } else {
+                "1.5.10"
+            }));
+        assert_eq!(
+            std::fs::read_link(prefix.join("lib/node_modules/omem-assistant")).unwrap(),
+            project
+        );
+        assert_eq!(
+            std::fs::read_link(prefix.join("bin/omem")).unwrap(),
+            PathBuf::from("../lib/node_modules/omem-assistant/dist/cli.js")
+        );
+        assert_eq!(
+            std::fs::read_to_string(prefix.join("bin/omem")).unwrap(),
+            "original local project"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_node_migration_still_detects_commands_owned_by_local_links() {
+    let temp = tempfile::tempdir().unwrap();
+    let (source, _) = shared_migration_fixture(temp.path(), "exit 99");
+    let project = linked_shared_npm_project(temp.path(), "agentbuddy");
+    let output = run_isolated(
+        temp.path(),
+        &[
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to-global",
+            "--package",
+            "agentbuddy",
+            "--apply",
+        ],
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("npm command `agentbuddy`") && error.contains("omem-assistant"),
+        "{error}"
+    );
+    assert!(source.exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("dist/cli.js")).unwrap(),
+        "original local project"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn shared_node_migration_failure_and_false_success_preserve_both_live_copies() {
     for result in [

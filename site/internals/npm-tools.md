@@ -317,7 +317,11 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 临时目录，在那里禁脚本安装精确版本；检查 package identity、bin 元数据、文件目标与 launcher
 后才发布。不同版本须显式 `--package`。发布前失败删除临时目录，不改两份 live 安装；
 发布后才以显式源 prefix 调用 npm uninstall。恢复失败会保留备份并报告路径。复制不复用
-可变文件的硬链接，拒绝绝对链接与越出 prefix 的链接。Node 间旧迁移也显式指定 prefix，
+可变文件的硬链接。包目录名作为安装键，manifest 名称仅决定可否按 registry 包重装；
+本地链接与别名包仍参与 bin 归属检查，但不会自动迁移。绝对链接或解析到 prefix 外的链接
+不交给暂存 npm；npm 退出且迁移产物校验通过后，按原始链接文本恢复，再发布目录。恢复前
+检查位置未被 npm 占用、父目录未被换成链接，冲突则中止发布。因此不会复制或写入外部项目，
+相对链接在发布回原位置后仍指向原目标。Node 间旧迁移也显式指定 prefix，
 不受激活变量或 builtin 默认值影响。
 
 Node `bin_names` 只接受 `node`/`corepack`，不再从目录位置推导第三方命令归属；缺省
