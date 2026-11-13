@@ -390,6 +390,8 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 
 Node 版本目录中的旧全局命令需迁移后再发布托管 shim；共享 npm 目录中的命令继续可用。
 
+命令发生冲突时，`osdk reshim` 仍重建其他入口，最后列出全部冲突及来源路径，并返回非零退出码。
+
 旧全局包若仍在 Node 版本目录，`osdk doctor` 会列出版本与位置。先用
 `osdk node migrate-packages --from VERSION --to-global` 预览；不同版本用
 `--package NAME` 明确选择源包，加 `--apply` 才迁移。

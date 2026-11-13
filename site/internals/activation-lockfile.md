@@ -26,7 +26,10 @@ shim 启动时重新加载配置并按当前工作目录选择已安装版本，
 加入完整的 `node_modules/.bin`。shim
 启动时扫描受管 inventory 以恢复 backend ownership，并为其 PATH 追加受管 Node。若多个
 backend 导出同名 bin，运行时仅在当前配置能唯一选出 owner 时路由，否则拒绝任选一个；
-CLI 生成或 `reshim` 则始终对多个已安装 backend owner 移除歧义的受管 shim 并报错。
+CLI 生成对多个已安装 backend owner 移除歧义的受管 shim 并报错。`reshim` 在统一的
+owner 快照上先排除所有冲突名，再生成其余 static、dynamic、system 和 native-global
+入口；reconciliation 清理歧义入口，最后汇总所有冲突并以非零状态退出。诊断路径才
+收集来源的版本及文件路径，不增加 shim 启动路径的扫描。
 同一 backend 的多个版本由活跃版本选择处理，不构成 owner 冲突。详见
 [npm 开发工具实现](./npm-tools)。
 

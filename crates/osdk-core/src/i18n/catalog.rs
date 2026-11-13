@@ -12,6 +12,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
 
     // ---- runtime messages -------------------------------------------------
     m.insert(
+        "err.reshim_conflicts",
+        (
+            "rebuilt non-conflicting shims; {count} command conflict(s) remain:\n{details}",
+            "已重建无冲突的 shim；仍有 {count} 个命令冲突：\n{details}",
+        ),
+    );
+    m.insert(
         "help.node.migrate.flag.to_global",
         ("Move into the shared npm prefix", "迁移到共享 npm prefix"),
     );

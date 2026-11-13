@@ -10854,3 +10854,86 @@ fn reshim_does_not_assign_legacy_npm_globals_to_node() {
             .is_file());
     }
 }
+
+#[test]
+fn reshim_reports_all_conflict_paths_and_still_rebuilds_unrelated_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bun_bin = root.join("installs/bun/1.0.0/bin");
+    let npm_bin = root.join(if cfg!(windows) {
+        "data/global/npm"
+    } else {
+        "data/global/npm/bin"
+    });
+    let pnpm_bin = root.join("data/global/pnpm/bin");
+    let data_bin = root.join("data/bin");
+    std::fs::create_dir_all(&data_bin).unwrap();
+    std::fs::write(
+        data_bin.join(if cfg!(windows) {
+            "osdk-shim.exe"
+        } else {
+            "osdk-shim"
+        }),
+        "fixture launcher",
+    )
+    .unwrap();
+    for (bin, names) in [
+        (&bun_bin, vec!["bun"]),
+        (
+            &npm_bin,
+            vec!["bun", "shared-one", "shared-two", "good-cli"],
+        ),
+        (&pnpm_bin, vec!["shared-one", "shared-two"]),
+    ] {
+        std::fs::create_dir_all(bin).unwrap();
+        for name in names {
+            let file = bin.join(if cfg!(windows) {
+                format!("{name}.cmd")
+            } else {
+                name.to_string()
+            });
+            std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+    }
+    std::fs::write(bun_bin.parent().unwrap().join(".osdk-complete"), "").unwrap();
+    let output = run_isolated(root, &["reshim"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    for name in ["bun", "shared-one", "shared-two"] {
+        assert!(error.contains(name), "{error}");
+    }
+    for bin in [&bun_bin, &npm_bin, &pnpm_bin] {
+        assert!(error.contains(&bin.display().to_string()), "{error}");
+    }
+    assert!(error.contains("bun@1.0.0"), "{error}");
+    for name in ["bunx", "good-cli"] {
+        assert!(
+            root.join("data/shims")
+                .join(if cfg!(windows) {
+                    format!("{name}.cmd")
+                } else {
+                    name.to_string()
+                })
+                .is_file(),
+            "lost {name}"
+        );
+    }
+    for name in ["bun", "shared-one", "shared-two"] {
+        assert!(
+            !root
+                .join("data/shims")
+                .join(if cfg!(windows) {
+                    format!("{name}.cmd")
+                } else {
+                    name.to_string()
+                })
+                .exists(),
+            "published conflict {name}"
+        );
+    }
+}

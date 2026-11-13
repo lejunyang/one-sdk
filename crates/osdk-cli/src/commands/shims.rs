@@ -3,6 +3,12 @@
 use super::*;
 
 pub fn reshim(app: &App) -> Result<()> {
+    let owners = installed_shim_owners(app)?;
+    let conflicts = owners
+        .iter()
+        .filter(|(name, ids)| is_real_shim_conflict(name, ids))
+        .map(|(name, _)| name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut total = 0;
     for backend in all_display_backends(app)? {
         if osdk_core::execution::enabled(&app.ctx) {
@@ -21,7 +27,8 @@ pub fn reshim(app: &App) -> Result<()> {
                             backend.id(),
                             &name,
                             true,
-                        ) {
+                        ) && !conflicts.contains(&name)
+                        {
                             osdk_core::shim::generate_shim(&app.ctx.dirs, &name, &shim)?;
                             total += 1;
                         }
@@ -70,12 +77,27 @@ pub fn reshim(app: &App) -> Result<()> {
                 }
                 tv.options = request.options.clone();
             }
-            total += generate_shims_for(app, backend.as_ref(), &tv)?;
+            total += generate_shims_for_inner(app, backend.as_ref(), &tv, Some(&conflicts))?;
         }
     }
-    total += generate_shims_for_global_bins(app)?;
+    total += generate_shims_for_global_bins(app, &conflicts)?;
     reconcile_managed_shims(app)?;
     println!("{}", t!("msg.reshimmed", count = total));
+    if !conflicts.is_empty() {
+        let mut details = Vec::new();
+        for name in &conflicts {
+            details.push(t!(
+                "err.shim_generation_conflict",
+                name = name,
+                owners = shim_conflict_sources(app, name, &owners[name])?
+            ));
+        }
+        return Err(anyhow!(t!(
+            "err.reshim_conflicts",
+            count = conflicts.len(),
+            details = details.join("\n")
+        )));
+    }
     Ok(())
 }
 
@@ -83,7 +105,10 @@ pub fn reshim(app: &App) -> Result<()> {
 /// `pnpm add -g`, which osdk redirects into controlled global bin dirs.
 /// Names shared with a registered tool version dedupe here (the shim file is
 /// the same launcher; routing is decided at execution time).
-pub(crate) fn generate_shims_for_global_bins(app: &App) -> Result<usize> {
+fn generate_shims_for_global_bins(
+    app: &App,
+    conflicts: &std::collections::BTreeSet<String>,
+) -> Result<usize> {
     let Some(shim_bin) = osdk_core::shim::find_shim_binary(&app.ctx.dirs) else {
         return Ok(0);
     };
@@ -91,7 +116,7 @@ pub(crate) fn generate_shims_for_global_bins(app: &App) -> Result<usize> {
     let mut seen = std::collections::BTreeSet::new();
     for source in osdk_core::shim::global_bin_sources(&app.ctx) {
         for name in source.names {
-            if !seen.insert(name.clone()) {
+            if conflicts.contains(&name) || !seen.insert(name.clone()) {
                 continue;
             }
             osdk_core::shim::generate_shim(&app.ctx.dirs, &name, &shim_bin)?;
@@ -188,6 +213,15 @@ pub(crate) fn generate_shims_for(
     backend: &dyn Backend,
     tv: &ToolVersion,
 ) -> Result<usize> {
+    generate_shims_for_inner(app, backend, tv, None)
+}
+
+fn generate_shims_for_inner(
+    app: &App,
+    backend: &dyn Backend,
+    tv: &ToolVersion,
+    skip_conflicts: Option<&std::collections::BTreeSet<String>>,
+) -> Result<usize> {
     let shim_bin = match osdk_core::shim::find_shim_binary(&app.ctx.dirs) {
         Some(b) => b,
         None => {
@@ -197,8 +231,12 @@ pub(crate) fn generate_shims_for(
         }
     };
     let dynamic_report = app.dynamic_scan_report()?;
-    let names = routed_bin_names_for_version(&app.ctx, &dynamic_report, backend, tv)?;
-    ensure_no_shim_conflicts(app, backend.id(), &names)?;
+    let mut names = routed_bin_names_for_version(&app.ctx, &dynamic_report, backend, tv)?;
+    if let Some(conflicts) = skip_conflicts {
+        names.retain(|name| !conflicts.contains(name));
+    } else {
+        ensure_no_shim_conflicts(app, backend.id(), &names)?;
+    }
     let owners = installed_shim_owners(app)?;
     let mut count = 0;
     for name in names {
@@ -610,11 +648,99 @@ pub(crate) fn ensure_no_shim_conflicts(
             return Err(anyhow!(t!(
                 "err.shim_generation_conflict",
                 name = name,
-                owners = owner_ids.into_iter().collect::<Vec<_>>().join(", ")
+                owners = shim_conflict_sources(app, name, &owner_ids)?
             )));
         }
     }
     Ok(())
+}
+
+/// Resolve locations only on the diagnostic path, never on shim startup.
+fn shim_conflict_sources(
+    app: &App,
+    name: &str,
+    owners: &std::collections::BTreeSet<String>,
+) -> Result<String> {
+    let mut locations = std::collections::BTreeSet::new();
+    let report = app.dynamic_scan_report()?;
+    let globals = osdk_core::shim::global_bin_sources(&app.ctx);
+    for owner in owners {
+        let mut found = false;
+        for source in globals.iter().filter(|source| {
+            source.owner == owner && source.names.iter().any(|candidate| candidate == name)
+        }) {
+            for path in command_paths(&source.bin_dir, name) {
+                locations.insert(format!("{owner} (global): {}", path.display()));
+                found = true;
+            }
+        }
+        if let Ok(backend) = app.registry.get(owner) {
+            if owner.contains(':') {
+                for install in report
+                    .installs
+                    .iter()
+                    .filter(|install| &install.canonical_id == owner)
+                {
+                    for bin in install.manifest.bins.iter().filter(|bin| bin.name == name) {
+                        locations.insert(format!(
+                            "{owner}@{}: {}",
+                            install.manifest.identity.version,
+                            install
+                                .install_root
+                                .join(bin.path.replace('\\', "/"))
+                                .display()
+                        ));
+                        found = true;
+                    }
+                }
+            } else {
+                for version in backend.list_installed(&app.ctx)? {
+                    let tv = ToolVersion::new(owner, &version);
+                    if !osdk_core::shim::routed_bin_names(&app.ctx, backend.as_ref(), &tv)?
+                        .iter()
+                        .any(|candidate| candidate == name)
+                    {
+                        continue;
+                    }
+                    for dir in backend.bin_paths(&app.ctx, &tv)? {
+                        for path in command_paths(&dir, name) {
+                            locations.insert(format!("{owner}@{version}: {}", path.display()));
+                            found = true;
+                        }
+                    }
+                }
+                if osdk_core::execution::enabled(&app.ctx) {
+                    if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+                        osdk_core::execution::resolve_without_probes(
+                            &app.ctx,
+                            backend.as_ref(),
+                            &std::env::current_dir()?,
+                        )
+                        .ok()
+                        .and_then(|selection| selection.target)
+                    {
+                        locations
+                            .insert(format!("{owner} (system): {}", target.executable.display()));
+                        found = true;
+                    }
+                }
+            }
+        }
+        if !found {
+            locations.insert(owner.clone());
+        }
+    }
+    Ok(locations.into_iter().collect::<Vec<_>>().join("; "))
+}
+
+fn command_paths(directory: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| executable_basename(&entry.file_name().to_string_lossy()) == name)
+        .map(|entry| entry.path())
+        .collect()
 }
 
 pub(crate) fn is_real_shim_conflict(

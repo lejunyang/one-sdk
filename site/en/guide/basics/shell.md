@@ -11,6 +11,12 @@ directories with:
 osdk reshim
 ```
 
+When multiple owners publish a command, `reshim` rebuilds unaffected commands,
+removes ambiguous managed shims, then reports every conflict with source paths
+and managed tool versions, returning a nonzero exit code. Conflicts solely
+between native global directories are reported too. It neither chooses an
+arbitrary owner nor deletes packages.
+
 For dynamic tools, `reshim` publishes launchers only for the exact configured
 `.osdk-install.json` schema-1 identity. It does not select another same-version
 root, and legacy `.osdk-tool.json` state is never executable.

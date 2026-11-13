@@ -29,8 +29,12 @@ activation exposes that validated generation, never the complete
 scans managed inventories to recover backend ownership and adds managed Node to that
 backend's PATH. With multiple backend owners, runtime dispatch routes only when
 current configuration selects exactly one; otherwise it refuses to choose. CLI
-generation and `reshim` always remove the ambiguous managed shim and error for
-multiple installed backend owners. Multiple versions of one backend are resolved
+generation removes ambiguous managed shims and errors for multiple installed
+backend owners. `reshim` first excludes every conflicting name from a shared
+ownership snapshot, publishes the remaining static, dynamic, system and native
+global entries, reconciles away ambiguous shims, then reports all conflicts with
+a nonzero exit status. Versions and file locations are collected only on the
+diagnostic path, adding no scans to shim startup. Multiple versions of one backend are resolved
 by active version selection and are not an owner conflict. See
 [npm developer tool implementation](./npm-tools#isolated-global-install-identity-shims-and-conflict-rejection).
 

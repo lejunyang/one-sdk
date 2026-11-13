@@ -17,6 +17,10 @@ Node 归属仅含 `node` 和实际存在的 `corepack`，旧 Node bin 内第三�
 据目录位置自动发布为 Node shim。共享 npm 中的命令照常发布；仅有旧副本时，
 先 `doctor` 并按 `reference/node/guide.md` 迁往共享 prefix。reshim 不移动或删除包。
 
+发生命令归属冲突时，先重建所有无冲突命令、清理歧义的受管 shim，最后汇总全部
+冲突和各来源路径（托管工具含版本），返回非零退出码。仅原生全局目录间的同名
+冲突也会报告；不会任选来源或删包。
+
 典型场景：安装目录已恢复但 shim 缺失，或更改 shim 暴露策略后需要重新发布入口。
 若 `doctor --verify` 报告安装文件漂移，应先 `install --force`，不要把 reshim 当修复安装内容。
 

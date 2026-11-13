@@ -442,6 +442,9 @@ installations; explicit npm prefix overrides remain supported.
 Node-directory globals need migration before they can receive managed shims;
 commands in the shared npm prefix remain available.
 
+When commands conflict, `osdk reshim` rebuilds unaffected shims and reports all
+remaining conflicts with source paths, returning a nonzero exit code.
+
 If older globals remain inside a Node version, `osdk doctor` shows their versions
 and locations. Preview `osdk node migrate-packages --from VERSION --to-global`;
 select differing source versions with `--package NAME` and add `--apply` to move them.
