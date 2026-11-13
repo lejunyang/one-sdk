@@ -3758,7 +3758,9 @@ fn global_upgrade_ignores_project_and_preserves_global_constraints() {
         node.join("bin")
     };
     std::fs::create_dir_all(&bin).unwrap();
-    let executable = bin.join(format!("fixture-node{}", std::env::consts::EXE_SUFFIX));
+    // Command lookup must use a command Node actually owns. An arbitrary
+    // executable placed next to node is legacy global state, not Node itself.
+    let executable = bin.join(format!("corepack{}", std::env::consts::EXE_SUFFIX));
     std::fs::write(&executable, b"owned command; must never execute").unwrap();
     #[cfg(unix)]
     {
@@ -3768,13 +3770,25 @@ fn global_upgrade_ignores_project_and_preserves_global_constraints() {
     let by_command = run_isolated_in(
         temp.path(),
         &project,
-        &["--offline", "upgrade", "-g", "fixture-node"],
+        &["--offline", "upgrade", "-g", "corepack"],
     );
     assert!(
         by_command.status.success(),
         "{}",
         String::from_utf8_lossy(&by_command.stderr)
     );
+    std::fs::copy(
+        &executable,
+        bin.join(format!("fixture-node{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
+    let third_party = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "upgrade", "-g", "fixture-node"],
+    );
+    assert!(!third_party.status.success());
+    assert!(String::from_utf8_lossy(&third_party.stderr).contains("not selected globally"));
     assert_eq!(std::fs::read_to_string(&user_config).unwrap(), config);
     assert_eq!(
         std::fs::read_to_string(project.join("osdk.lock")).unwrap(),
