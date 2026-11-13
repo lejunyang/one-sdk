@@ -129,3 +129,7 @@ legitimate self-update or something hostile, because on disk the two are
 identical. Tools that update themselves will keep reporting drift after every
 update — for those, `--force` reinstalls the version osdk has pinned, which is
 the point of pinning it.
+
+Managed npm prefix updates maintain the config file’s integrity record, avoiding
+false drift for legitimate refreshes. Existing npmrc edits and other damaged
+files remain detectable; missing old baselines are not rebuilt.

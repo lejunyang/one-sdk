@@ -14,7 +14,12 @@ pub struct NpmBackend;
 /// Persist the managed default in npm's own configuration, so invoking the
 /// original npm without a shell hook has the same global install location.
 /// User config, environment and CLI options retain npm's native precedence.
-pub(crate) fn configure_global_prefix(ctx: &Ctx, npm_root: &std::path::Path) -> Result<()> {
+pub(crate) fn configure_global_prefix(
+    ctx: &Ctx,
+    install_root: &std::path::Path,
+    npm_root: &std::path::Path,
+) -> Result<()> {
+    use crate::store::manifest::{FileEntry, Manifest};
     if !npm_root.is_dir() {
         return Ok(());
     }
@@ -45,9 +50,54 @@ pub(crate) fn configure_global_prefix(ctx: &Ctx, npm_root: &std::path::Path) -> 
     )?);
     text.push('\n');
     if text != original {
+        // Update only a clean, previously recorded entry. Re-recording the
+        // whole tree here would silently bless pre-existing binary or npmrc
+        // modifications. Missing/corrupt old manifests remain unverifiable.
+        let relative = path
+            .strip_prefix(install_root)
+            .map_err(|error| Error::other(error.to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let baseline = Manifest::load(install_root)
+            .ok()
+            .filter(|manifest| matches!(manifest.tool.as_str(), "node" | "npm"));
+        let mut updated = None;
+        if let Some(mut manifest) = baseline {
+            let expected = blake3::hash(original.as_bytes()).to_hex().to_string();
+            let new_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
+            if let Some(entry) = manifest
+                .files
+                .iter_mut()
+                .find(|entry| entry.path == relative)
+            {
+                if entry.symlink.is_none()
+                    && entry.hash.as_deref() == Some(expected.as_str())
+                    && std::fs::symlink_metadata(&path)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                {
+                    entry.hash = Some(new_hash);
+                    updated = Some(manifest);
+                }
+            } else if std::fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                manifest.files.push(FileEntry {
+                    path: relative,
+                    hash: Some(new_hash),
+                    mode: 0,
+                    symlink: None,
+                });
+                updated = Some(manifest);
+            }
+        }
         // Atomic replacement breaks CAS hard links instead of modifying a
         // shared blob in place. Do not rewrite unchanged files on every run.
         crate::fs::write_atomic(&path, text.as_bytes()).map_err(|error| Error::io(&path, error))?;
+        if let Some(manifest) = updated {
+            let manifest_path = Manifest::manifest_path(install_root);
+            crate::fs::write_atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)
+                .map_err(|error| Error::io(&manifest_path, error))?;
+        }
     }
     Ok(())
 }
@@ -124,12 +174,13 @@ impl Backend for NpmBackend {
             )));
         }
         write_launchers(&install.join("bin"), &entry, &npx_entry, ctx.platform.os)?;
-        configure_global_prefix(ctx, &install)?;
+        configure_global_prefix(ctx, &install, &install)?;
         Ok(())
     }
 
     fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
-        configure_global_prefix(ctx, &ctx.dirs.install_path(self.id(), &tv.version))
+        let root = ctx.dirs.install_path(self.id(), &tv.version);
+        configure_global_prefix(ctx, &root, &root)
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {

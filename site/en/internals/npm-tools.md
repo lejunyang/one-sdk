@@ -427,3 +427,10 @@ Node `bin_names` accepts only `node`/`corepack`; directory placement no longer
 assigns third-party ownership. The empty-directory fallback includes only `node`,
 not a nonexistent Corepack. The separate routed-name set still adds bundled
 package managers, preserving npm/npx fallback routing.
+
+A builtin npmrc update advances only that file’s recorded hash, and only when its
+current bytes still match the existing baseline. A newly generated config can be
+added to an existing manifest; missing or corrupt old manifests are never rebuilt.
+The installation tree is not re-baselined. Legitimate prefix refreshes therefore
+do not trigger doctor drift, while existing npmrc edits or unrelated damaged
+files remain detectable.

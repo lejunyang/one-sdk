@@ -323,3 +323,7 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 Node `bin_names` 只接受 `node`/`corepack`，不再从目录位置推导第三方命令归属；缺省
 占位仅保留 `node`，不虚构不存在的 Corepack。npm/npx 等仍由独立的路由集合补齐，
 因此收紧 ownership 不会破坏 Node 随附包管理器的回退路由。
+
+更新 builtin npmrc 时，只在文件当前哈希仍匹配已记录基线的前提下更新该条目的哈希；
+新生成的配置可加入已有清单，但缺失或损坏的旧清单不会重建。不会重录整个安装目录。
+因此合法 prefix 刷新不会触发 doctor 漂移，而已有 npmrc 修改或其他文件损坏不会被掩盖。

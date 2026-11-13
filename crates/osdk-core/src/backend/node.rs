@@ -217,7 +217,7 @@ impl NodeBackend {
         } else {
             "lib/node_modules/npm"
         });
-        crate::backend::npm_cli::configure_global_prefix(ctx, &npm_root)
+        crate::backend::npm_cli::configure_global_prefix(ctx, &root, &npm_root)
     }
 }
 
@@ -661,12 +661,84 @@ mod tests {
             }
             let standalone = ctx.dirs.install_path("npm", "11.0.0");
             std::fs::create_dir_all(&standalone).unwrap();
+            crate::store::manifest::Manifest::record_tree(&standalone, "npm", "11.0.0").unwrap();
             crate::backend::npm_cli::NpmBackend
                 .ensure_post_install(&ctx, &ToolVersion::new("npm", "11.0.0"))
                 .unwrap();
             assert!(std::fs::read_to_string(standalone.join("npmrc"))
                 .unwrap()
                 .contains(&format!("prefix={expected}")));
+            assert!(crate::store::manifest::Manifest::load(&standalone)
+                .unwrap()
+                .verify(&standalone)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn native_npm_defaults_preserve_integrity_without_hiding_existing_drift() {
+        use crate::store::manifest::Manifest;
+        let temp = tempfile::tempdir().unwrap();
+        for os in [Os::Linux, Os::Windows] {
+            let mut ctx = test_ctx(&temp.path().join(os.node_token()));
+            ctx.platform.os = os;
+            for (version, original) in [
+                (
+                    "20.0.0",
+                    Some("prefix=${APPDATA}/npm\nregistry=https://registry.example/\n"),
+                ),
+                ("22.0.0", None),
+            ] {
+                let root = ctx.dirs.install_path("node", version);
+                let npm = root.join(if os == Os::Windows {
+                    "node_modules/npm"
+                } else {
+                    "lib/node_modules/npm"
+                });
+                std::fs::create_dir_all(&npm).unwrap();
+                let config = npm.join("npmrc");
+                if let Some(original) = original {
+                    std::fs::write(&config, original).unwrap();
+                }
+                let binary = root.join("runtime-fixture");
+                std::fs::write(&binary, "original binary").unwrap();
+                Manifest::record_tree(&root, "node", version).unwrap();
+                let tv = ToolVersion::new("node", version);
+                NodeBackend.ensure_post_install(&ctx, &tv).unwrap();
+                assert!(Manifest::load(&root)
+                    .unwrap()
+                    .verify(&root)
+                    .unwrap()
+                    .is_empty());
+                ctx.dirs.data = ctx.dirs.data.join("relocated");
+                NodeBackend.ensure_post_install(&ctx, &tv).unwrap();
+                assert!(Manifest::load(&root)
+                    .unwrap()
+                    .verify(&root)
+                    .unwrap()
+                    .is_empty());
+                let clean = std::fs::read_to_string(&config).unwrap();
+                std::fs::write(
+                    &config,
+                    format!("{clean}registry=https://modified.example/\n"),
+                )
+                .unwrap();
+                std::fs::write(&binary, "modified binary").unwrap();
+                NodeBackend.ensure_post_install(&ctx, &tv).unwrap();
+                let manifest = Manifest::load(&root).unwrap();
+                let drift = manifest.verify(&root).unwrap();
+                assert!(
+                    drift.iter().any(|item| item.path.ends_with("npm/npmrc")),
+                    "{drift:?}"
+                );
+                assert!(drift.iter().any(|item| item.path == "runtime-fixture"));
+                // Repairing defaults must not create a baseline for an old
+                // install whose integrity was never recorded.
+                std::fs::remove_file(Manifest::manifest_path(&root)).unwrap();
+                NodeBackend.ensure_post_install(&ctx, &tv).unwrap();
+                assert!(!Manifest::manifest_path(&root).exists());
+            }
         }
     }
 
