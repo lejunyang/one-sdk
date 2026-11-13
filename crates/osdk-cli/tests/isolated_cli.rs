@@ -10576,11 +10576,16 @@ fn reshim_updates_native_npm_defaults_in_existing_installs() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let prefix =
-            serde_json::to_string(&temp.path().join("data/global/npm").to_string_lossy()).unwrap();
+        let prefix = temp.path().join("data").join("global").join("npm");
         for config in &configs {
             let text = std::fs::read_to_string(config).unwrap();
-            assert!(text.contains(&format!("prefix={prefix}")), "{text}");
+            let configured: String = serde_json::from_str(
+                text.lines()
+                    .find_map(|line| line.strip_prefix("prefix="))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(PathBuf::from(configured), prefix, "{text}");
             assert_eq!(text.matches("prefix=").count(), 1);
             assert!(text.contains("registry=https://example.test/"));
         }
@@ -10922,7 +10927,12 @@ fn reshim_reports_all_conflict_paths_and_still_rebuilds_unrelated_commands() {
         assert!(error.contains(name), "{error}");
     }
     for bin in [&bun_bin, &npm_bin, &pnpm_bin] {
-        assert!(error.contains(&bin.display().to_string()), "{error}");
+        assert!(
+            error
+                .replace('\\', "/")
+                .contains(&bin.display().to_string().replace('\\', "/")),
+            "{error}"
+        );
     }
     assert!(error.contains("bun@1.0.0"), "{error}");
     for name in ["bunx", "good-cli"] {
