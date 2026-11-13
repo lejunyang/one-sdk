@@ -56,6 +56,11 @@ pub fn reshim(app: &App) -> Result<()> {
         }
         for version in installed {
             let mut tv = ToolVersion::new(backend.id(), &version);
+            match backend.id() {
+                "node" => osdk_core::backend::node::NodeBackend::ensure_npm_prefix(&app.ctx, &tv)?,
+                "npm" => backend.ensure_post_install(&app.ctx, &tv)?,
+                _ => {}
+            }
             if backend.id().contains(':') {
                 let Some(request) = dynamic_request.as_ref() else {
                     continue;

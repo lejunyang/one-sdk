@@ -396,3 +396,15 @@ Exec resolves a known native global entry directly when its execution plan suppl
 Global command reconciliation compares the enumerated command names as well
 as the aggregate directory timestamp. Matching timestamps alone cannot prove
 that a rapid uninstall/reinstall or another bin directory was unchanged.
+
+## Native defaults for managed npm
+
+The bundled npm root (`lib/node_modules/npm` on Unix, `node_modules/npm` on
+Windows) and each independent npm root record `Dirs::npm_global_prefix()` in
+their `npmrc`. Using the builtin configuration layer also replaces the Windows
+bundled AppData default before it changes globalconfig lookup. Only prefix
+defaults are replaced; other keys and user configuration are preserved. Atomic
+replacement detaches CAS hard links; unchanged content is not rewritten. Install,
+reuse and `reshim` refresh defaults, with no writes in shim startup or prompt hot
+paths. Run `reshim` after relocating data. Environment injection still overrides
+builtin defaults; original npm retains native user, environment and CLI priority.

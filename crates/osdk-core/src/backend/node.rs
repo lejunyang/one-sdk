@@ -200,12 +200,24 @@ impl NodeBackend {
     }
 
     fn complete_install(ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
-        if let Err(error) = Self::enable_corepack(ctx, tv) {
+        if let Err(error) = NodeBackend.ensure_post_install(ctx, tv) {
             let install = ctx.dirs.install_path("node", &tv.version);
             let _ = std::fs::remove_dir_all(install);
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Repair the bundled npm defaults without running Corepack or moving any
+    /// global packages. Used by reshim to upgrade existing installations too.
+    pub fn ensure_npm_prefix(ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        let root = ctx.dirs.install_path("node", &tv.version);
+        let npm_root = root.join(if ctx.platform.os == Os::Windows {
+            "node_modules/npm"
+        } else {
+            "lib/node_modules/npm"
+        });
+        crate::backend::npm_cli::configure_global_prefix(ctx, &npm_root)
     }
 }
 
@@ -433,6 +445,7 @@ impl Backend for NodeBackend {
     }
 
     fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        Self::ensure_npm_prefix(ctx, tv)?;
         Self::enable_corepack(ctx, tv)
     }
 
@@ -609,6 +622,50 @@ mod tests {
             pick(VersionSpec::Latest, PrereleasePolicy::Allow).as_deref(),
             Some("27.0.0-alpha.0.0.0")
         );
+    }
+
+    #[test]
+    fn native_npm_defaults_are_shared_across_nodes_and_standalone_npm() {
+        let temp = tempfile::tempdir().unwrap();
+        for os in [Os::Linux, Os::Windows] {
+            let mut ctx = test_ctx(&temp.path().join(os.node_token()));
+            ctx.platform.os = os;
+            let expected =
+                serde_json::to_string(&ctx.dirs.npm_global_prefix().to_string_lossy()).unwrap();
+            for version in ["20.0.0", "22.0.0"] {
+                let root = ctx.dirs.install_path("node", version);
+                let npm = root.join(if os == Os::Windows {
+                    "node_modules/npm"
+                } else {
+                    "lib/node_modules/npm"
+                });
+                std::fs::create_dir_all(&npm).unwrap();
+                let config = npm.join("npmrc");
+                let original = "prefix=${APPDATA}/npm\nregistry=https://registry.example/\n";
+                std::fs::write(&config, original).unwrap();
+                // Materialized files may share an inode with the CAS. Never
+                // rewrite the archive's defaults through that hard link.
+                let cas_copy = root.join("original-npmrc");
+                std::fs::hard_link(&config, &cas_copy).unwrap();
+                let tv = ToolVersion::new("node", version);
+                NodeBackend.ensure_post_install(&ctx, &tv).unwrap();
+                let text = std::fs::read_to_string(&config).unwrap();
+                assert!(text.contains(&format!("prefix={expected}")), "{text}");
+                assert!(text.contains("registry=https://registry.example/"));
+                assert!(!text.contains("${APPDATA}"));
+                assert_eq!(std::fs::read_to_string(&cas_copy).unwrap(), original);
+                NodeBackend.ensure_post_install(&ctx, &tv).unwrap();
+                assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+            }
+            let standalone = ctx.dirs.install_path("npm", "11.0.0");
+            std::fs::create_dir_all(&standalone).unwrap();
+            crate::backend::npm_cli::NpmBackend
+                .ensure_post_install(&ctx, &ToolVersion::new("npm", "11.0.0"))
+                .unwrap();
+            assert!(std::fs::read_to_string(standalone.join("npmrc"))
+                .unwrap()
+                .contains(&format!("prefix={expected}")));
+        }
     }
 
     #[test]

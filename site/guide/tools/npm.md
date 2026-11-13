@@ -182,6 +182,11 @@ pnpm add -g cowsay
 统一的全局安装纳管（含 Yarn、Bun、Deno，以及 Go/Cargo 这类自包含原生工具）见
 [JavaScript 包管理器 → 全局安装自动纳管](./package-managers#全局安装自动纳管)；其中区分存储保留、项目外运行时选择、native addon 重建、系统管理器与原生输出覆盖。
 
+托管 npm 自身也持久设置共享 prefix 默认值，因此直接调用原始 npm、没有 shell
+激活时仍默认写入 `data/global/npm`。升级后用 `osdk reshim` 补齐已有安装；不会
+移动旧包。用户 npm 配置及显式 prefix 仍可覆盖原生默认值。直接调用不会触发
+shim 的退出后对账，安装完成后运行 `osdk reshim` 发布入口。
+
 ## 包名与版本语法
 
 ```text

@@ -18,6 +18,12 @@ osdk lock node@20 -o arch=arm64
 独立 npm backend 或相应 Node 安装的路由 shim 协调。执行环境还会在用户未设置时
 提供共享 `npm_config_cache`。
 
+Node 随附的 npm 和独立安装的 npm 都默认把全局包写入 `data/global/npm`，
+直接调用原始 npm、未加载 shell 激活时也适用。安装或复用版本时会设置此默认值；
+升级 osdk 后运行 `osdk reshim` 可补齐已有安装。此操作不移动旧包。用户 `.npmrc`、
+环境变量和 `--prefix` 仍按 npm 原生优先级覆盖默认值；经 shim 执行时另有托管
+`npm_config_prefix` 注入。直接执行原始 npm 后，运行 `osdk reshim` 发布新命令。
+
 `arch` 可用于生成其他架构的 lock 区段，但 osdk 没有只下载模式；实际安装会拒绝
 不能在当前 host 执行的 Node artifact。
 

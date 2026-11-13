@@ -299,3 +299,13 @@ Yarn Classic 扫描 `node_modules/.bin`。Go/Cargo 输出目录也参与全局�
 
 全局命令对账同时比较已枚举的命令名称集合和聚合目录时间戳；仅时间戳
 相同不能证明快速卸载重装或另一个 bin 目录没有变化。
+
+## 托管 npm 的原生默认 prefix
+
+Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/npm`）
+与独立 npm 根下的 `npmrc` 都记录 `Dirs::npm_global_prefix()`。使用 npm 的 builtin
+配置层，避免 Windows 随附的 AppData prefix 先改变 globalconfig 查找位置。仅替换
+该文件的 prefix 默认值，保留其他键；不改用户配置。原子替换断开 CAS hard link，
+已有值相同则不写。安装、复用及 `reshim` 刷新默认值；不在 shim 启动或提示符热路径写盘。
+迁移数据目录后应重新 `reshim`。环境注入继续覆盖 builtin；原始 npm 则保留用户配置、
+环境、CLI 的原生优先级。

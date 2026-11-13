@@ -11,6 +11,47 @@ use crate::version::{ToolVersion, VersionInfo};
 
 pub struct NpmBackend;
 
+/// Persist the managed default in npm's own configuration, so invoking the
+/// original npm without a shell hook has the same global install location.
+/// User config, environment and CLI options retain npm's native precedence.
+pub(crate) fn configure_global_prefix(ctx: &Ctx, npm_root: &std::path::Path) -> Result<()> {
+    if !npm_root.is_dir() {
+        return Ok(());
+    }
+    let _lock = crate::lock::FileLock::acquire(ctx.dirs.data.join("locks/npm-defaults.lock"))?;
+    let path = npm_root.join("npmrc");
+    let original = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(Error::io(&path, error)),
+    };
+    const COMMENT: &str = "# osdk: default global prefix (user config and --prefix override this)";
+    let mut text = String::new();
+    for line in original.lines() {
+        if line == COMMENT
+            || line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "prefix")
+        {
+            continue;
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.push_str(COMMENT);
+    text.push_str("\nprefix=");
+    text.push_str(&serde_json::to_string(
+        &ctx.dirs.npm_global_prefix().to_string_lossy(),
+    )?);
+    text.push('\n');
+    if text != original {
+        // Atomic replacement breaks CAS hard links instead of modifying a
+        // shared blob in place. Do not rewrite unchanged files on every run.
+        crate::fs::write_atomic(&path, text.as_bytes()).map_err(|error| Error::io(&path, error))?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Backend for NpmBackend {
     fn id(&self) -> &str {
@@ -83,7 +124,12 @@ impl Backend for NpmBackend {
             )));
         }
         write_launchers(&install.join("bin"), &entry, &npx_entry, ctx.platform.os)?;
+        configure_global_prefix(ctx, &install)?;
         Ok(())
+    }
+
+    fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        configure_global_prefix(ctx, &ctx.dirs.install_path(self.id(), &tv.version))
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {

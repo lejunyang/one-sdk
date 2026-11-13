@@ -223,6 +223,13 @@ native tools such as Go/Cargo) is described under
 [JavaScript package managers → Automatic global-install management](./package-managers#automatic-global-install-management),
 including storage persistence across Node switches, runtime selection outside projects, native-addon rebuilding, system managers and native output overrides.
 
+Managed npm also persists the shared prefix as its native default, so direct
+invocation without shell activation defaults to `data/global/npm`. Run
+`osdk reshim` after upgrading to update existing installs; it does not move old
+packages. User npm configuration and explicit prefix overrides still apply.
+Direct invocation does not run post-exit shim reconciliation; run `osdk reshim`
+afterwards to publish commands.
+
 ## Package and version syntax
 
 ```text

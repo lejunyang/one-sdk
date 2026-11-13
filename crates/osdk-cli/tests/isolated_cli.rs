@@ -10527,3 +10527,48 @@ fn exec_native_global_windows_cmd_keeps_explicit_node() {
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("NODE_20.0.0"));
 }
+
+#[test]
+fn reshim_updates_native_npm_defaults_in_existing_installs() {
+    let temp = tempfile::tempdir().unwrap();
+    let installs = temp.path().join("installs");
+    let mut configs = Vec::new();
+    for version in ["20.0.0", "22.0.0"] {
+        let root = installs.join("node").join(version);
+        let npm = root.join(if cfg!(windows) {
+            "node_modules/npm"
+        } else {
+            "lib/node_modules/npm"
+        });
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::write(root.join(".osdk-complete"), "").unwrap();
+        configs.push(npm.join("npmrc"));
+    }
+    let npm = installs.join("npm/11.0.0");
+    std::fs::create_dir_all(&npm).unwrap();
+    std::fs::write(npm.join(".osdk-complete"), "").unwrap();
+    configs.push(npm.join("npmrc"));
+    for config in &configs {
+        std::fs::write(
+            config,
+            "prefix=${APPDATA}/npm\nregistry=https://example.test/\n",
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        let output = run_isolated(temp.path(), &["reshim"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let prefix =
+            serde_json::to_string(&temp.path().join("data/global/npm").to_string_lossy()).unwrap();
+        for config in &configs {
+            let text = std::fs::read_to_string(config).unwrap();
+            assert!(text.contains(&format!("prefix={prefix}")), "{text}");
+            assert_eq!(text.matches("prefix=").count(), 1);
+            assert!(text.contains("registry=https://example.test/"));
+        }
+    }
+}

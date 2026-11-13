@@ -19,6 +19,14 @@ owns `node` and `corepack`; independent npm or the matching Node installation
 provides coordinated npm/npx routing. The runtime environment supplies shared
 `npm_config_cache` only when the user has not set it.
 
+Bundled and independently managed npm default to `data/global/npm`, including
+direct invocation without shell activation. Installing or reusing a version sets
+this default; run `osdk reshim` after upgrading osdk to update existing installs.
+This does not move old packages. User `.npmrc`, environment and `--prefix` retain
+npm’s native precedence; shim execution additionally injects the managed
+`npm_config_prefix`. After running original npm directly, use `osdk reshim` to
+publish new commands.
+
 `arch` can generate another architecture's lock section, but osdk has no
 download-only cross-architecture mode; actual installation rejects a Node
 artifact that cannot execute on the host.

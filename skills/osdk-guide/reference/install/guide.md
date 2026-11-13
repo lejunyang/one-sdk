@@ -22,6 +22,10 @@ osdk install                       # 按 osdk.toml / osdk.lock
 osdk install --include-lazy        # 连同 lazy 工具一起安装
 ```
 
+安装或复用 Node/npm 时，会在托管 npm 自身写入共享 prefix 默认配置；直接执行
+原始 npm、未激活 shell 时也默认使用 `data/global/npm`。升级后可用 `reshim`
+补齐已有版本；这不会迁移旧包，也不改用户 `.npmrc`。
+
 下载在单条带名称的进度行更新，并发下载各占一行；未知总大小时显示已下载字节，
 续传从已有字节数继续。使用全局参数 `--quiet` 隐藏 osdk 进度。
 

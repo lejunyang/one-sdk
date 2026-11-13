@@ -435,6 +435,10 @@ directory is local derived state and should normally be ignored by version
 control. Commit the package manager's native lock alongside `osdk.lock`; the
 latter does not replace the transitive dependency graph.
 
+Managed npm also defaults to the shared directory when called directly without shell
+activation. Run `osdk reshim` once after upgrading to update existing Node/npm
+installations; explicit npm prefix overrides remain supported.
+
 Managed `npm i -g` and similar commands use shared global directories, so changing
 Node does not remove the installed packages. Through osdk shims, supported JS
 managers reconcile their global command shims after exit, including rapid

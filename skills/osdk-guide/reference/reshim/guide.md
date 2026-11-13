@@ -9,6 +9,10 @@ osdk reshim
 无命令专属参数。它不会重新下载或重装工具。命令冲突、include/expose/exclude 策略来自
 `[settings.shims]`，见 `reference/configuration/settings.md`。
 
+`reshim` 还会补齐已有 Node 随附 npm 和独立 npm 的共享 prefix 默认配置，
+让未激活 shell 中直接调用原始 npm 也默认安装到 `data/global/npm`。不搬迁旧包、
+不修改用户 `.npmrc`；显式 npm 配置仍可覆盖此原生默认值。
+
 典型场景：安装目录已恢复但 shim 缺失，或更改 shim 暴露策略后需要重新发布入口。
 若 `doctor --verify` 报告安装文件漂移，应先 `install --force`，不要把 reshim 当修复安装内容。
 
