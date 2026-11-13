@@ -191,20 +191,28 @@ pub(super) fn migrate_to_shared(
     }
     let mut planned = Vec::new();
     let mut conflicts = false;
+    println!(
+        "{}",
+        if apply {
+            t!("msg.node_migrate_applying", version = from)
+        } else {
+            t!("msg.node_migrate_previewing", version = from)
+        }
+    );
     for package in &source_packages {
         if !selected.is_empty() && !selected.contains(&package.name) {
             continue;
         }
         if !package.registry_package {
             println!(
-                "{}",
+                "  {}",
                 t!("msg.node_migrate_skip_local", package = package.name)
             );
             continue;
         }
         if package.native && !allow_scripts {
             println!(
-                "{}",
+                "  {}",
                 t!(
                     "msg.node_migrate_skip_scripts_shared",
                     package = package.spec(),
@@ -216,37 +224,58 @@ pub(super) fn migrate_to_shared(
         let existing = target_packages
             .iter()
             .find(|other| other.name == package.name);
-        println!("{} -> {}", package.root.display(), prefix.display());
         if let Some(other) = existing.filter(|other| other.version != package.version) {
-            println!(
-                "{}",
-                t!(
-                    "msg.node_migrate_duplicate",
-                    source = package.spec(),
-                    target = other.spec(),
-                    name = package.name
-                )
-            );
             if !selected.contains(&package.name) {
+                println!(
+                    "  {}",
+                    t!(
+                        "msg.node_migrate_duplicate",
+                        source = package.version,
+                        target = other.version,
+                        name = package.name
+                    )
+                );
                 conflicts = true;
                 continue;
             }
+            println!(
+                "  {}",
+                t!(
+                    "msg.node_migrate_replace",
+                    package = package.spec(),
+                    version = other.version
+                )
+            );
+        } else {
+            println!("  {}", package.spec());
         }
-        println!("{}", t!("msg.node_migrate_plan", package = package.spec()));
         planned.push(package);
     }
-    if allow_scripts && !planned.is_empty() {
-        println!("{}", t!("msg.node_migrate_scripts_enabled"));
-    }
-    if !apply {
-        println!("{}", t!("msg.node_migrate_dry_run"));
+    if planned.is_empty() && !conflicts {
+        println!("\n{}", t!("msg.node_migrate_nothing"));
         return Ok(());
     }
-    if conflicts {
+    if apply && conflicts {
         return Err(anyhow!(t!("err.node_migrate_select_duplicate")));
     }
-    if planned.is_empty() {
-        println!("{}", t!("msg.node_migrate_nothing"));
+    if !planned.is_empty() {
+        println!(
+            "\n{}",
+            t!("msg.node_migrate_target", path = prefix.display())
+        );
+        if allow_scripts {
+            println!("{}", t!("msg.node_migrate_scripts_enabled"));
+        }
+    }
+    if !apply {
+        println!(
+            "\n{}",
+            if conflicts {
+                t!("msg.node_migrate_preview_conflicts")
+            } else {
+                t!("msg.node_migrate_preview_only")
+            }
+        );
         return Ok(());
     }
     // Replacing one package must not overwrite another package's command.
@@ -338,14 +367,7 @@ pub(super) fn migrate_to_shared(
             ));
         }
     }
-    println!(
-        "{}",
-        t!(
-            "msg.node_migrate_shared",
-            count = planned.len(),
-            path = prefix.display()
-        )
-    );
+    println!("\n{}", t!("msg.node_migrate_shared", count = planned.len()));
     reshim(app)
 }
 

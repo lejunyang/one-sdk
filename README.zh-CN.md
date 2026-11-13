@@ -395,7 +395,8 @@ Node 版本目录中的旧全局命令需迁移后再发布托管 shim；共享 
 旧全局包若仍在 Node 版本目录，`osdk doctor` 会列出版本与位置。先用
 `osdk node migrate-packages --from VERSION --to-global` 预览；不同版本用
 `--package NAME` 明确选择源包，加 `--apply` 才迁移。原生或含安装脚本的包默认跳过并保留源副本；
-用 `--package NAME --allow-scripts` 显式纳入，确认预览后再加 `--apply`。未选中的本地包链接保持原样。
+用 `--package NAME --allow-scripts` 显式纳入，确认预览后再加 `--apply`。预览列出替换版本，
+执行时显示进度和结果，不重复选择提示。未选中的本地包链接保持原样。
 
 托管 `npm i -g` 等命令使用共享全局目录，因此切换 Node 不会删除包文件。
 经 osdk shim 运行的受支持 JS 包管理器会在退出后对账全局命令入口，

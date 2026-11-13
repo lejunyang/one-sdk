@@ -326,7 +326,9 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 
 `--allow-scripts` 要求共享迁移且显式 `--package`，将安装参数改为 `--ignore-scripts=false`，
 覆盖继承的 ignore-scripts 配置，允许选中包及其依赖执行 npm 生命周期脚本。预览仍不调用 npm；
-默认 skip 会明确保留源副本并提示该选项。源目录的卸载始终使用 `--ignore-scripts`。
+默认 skip 会明确保留源副本并提示该选项。报告分为预览与执行，版本冲突只在未选中时提示选择；
+已选中则显示替换关系。目标路径只打印一次并单独换行，执行模式不打印预览提示；没有待迁移包
+时也不提示 `--apply`。源目录的卸载始终使用 `--ignore-scripts`。
 暂存目录提供发布前的文件回滚，不是脚本沙箱，无法撤销脚本写到 prefix 外的副作用。
 
 Node `bin_names` 只接受 `node`/`corepack`，不再从目录位置推导第三方命令归属；缺省

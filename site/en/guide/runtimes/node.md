@@ -64,6 +64,10 @@ requires `--to-global` and at least one `--package NAME`; `--apply` is still req
 to execute. Linked and aliased source packages are excluded from registry reinstalls;
 handle them from their original source.
 
+Selected packages show “replaces shared” instead of asking for selection again.
+The package list, target directory and script policy appear on separate lines.
+`--apply` reports execution and completion without repeating preview instructions.
+
 Apply reinstalls exact versions with scripts disabled by default, requiring an
 available registry and suitable npm login configuration. When enabled, script
 changes outside the shared prefix cannot be rolled back by migration. Do not run

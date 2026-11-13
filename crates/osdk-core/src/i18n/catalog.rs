@@ -46,22 +46,61 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "msg.node_migrate_duplicate",
         (
-            "source {source}; shared {target}; select --package {name} to keep the source version",
-            "源版本 {source}；共享版本 {target}；使用 --package {name} 明确保留源版本",
+            "{name}: Node {source} / npm {target}\n    select Node: --package {name}",
+            "{name}：Node {source} / npm {target}\n    选择 Node 版本：--package {name}",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_replace",
+        (
+            "{package} (replaces shared {version})",
+            "{package}（替换共享版本 {version}）",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_previewing",
+        (
+            "Preview: Node {version} -> shared npm",
+            "预览：Node {version} → 共享 npm",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_applying",
+        (
+            "Migrating: Node {version} -> shared npm",
+            "迁移：Node {version} → 共享 npm",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_target",
+        ("Target:\n  {path}", "目标目录：\n  {path}"),
+    );
+    m.insert(
+        "msg.node_migrate_preview_only",
+        (
+            "Preview only; add --apply to run.",
+            "仅预览；加 --apply 执行。",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_preview_conflicts",
+        (
+            "Preview only; resolve version conflicts first.",
+            "仅预览；请先选择冲突版本。",
         ),
     );
     m.insert(
         "err.node_migrate_select_duplicate",
         (
-            "differing shared packages require explicit --package selection; no packages changed",
-            "共享目录存在不同版本，需用 --package 明确选择；未修改任何包",
+            "version conflicts; no packages changed",
+            "版本冲突，未修改任何包",
         ),
     );
     m.insert(
         "msg.node_migrate_shared",
         (
-            "migrated {count} package(s) into {path} and removed their legacy copies",
-            "已将 {count} 个包迁移到 {path} 并清理对应旧副本",
+            "migrated {count} package(s); legacy copies removed",
+            "已迁移 {count} 个包，旧副本已清理",
         ),
     );
     m.insert(
@@ -201,15 +240,15 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "msg.node_migrate_skip_scripts_shared",
         (
-            "skip native or install-script package {package}; source kept. Select --package {name} --allow-scripts to migrate",
-            "跳过原生或含安装脚本的包 {package}；保留源副本。使用 --package {name} --allow-scripts 可迁移",
+            "skip {package} (scripts disabled; source kept)\n    include: --package {name} --allow-scripts",
+            "跳过 {package}（未允许安装脚本，保留源副本）\n    允许迁移：--package {name} --allow-scripts",
         ),
     );
     m.insert(
         "msg.node_migrate_scripts_enabled",
         (
-            "npm lifecycle scripts enabled for selected packages and their dependencies on --apply",
-            "使用 --apply 时将运行选中包及其依赖的 npm 生命周期脚本",
+            "Scripts: enabled (including dependencies)",
+            "安装脚本：启用（含依赖）",
         ),
     );
     m.insert(

@@ -10726,6 +10726,26 @@ fn shared_node_migration_plans_duplicates_without_changing_packages() {
         text.contains("1.7.11") && text.contains("1.5.10") && text.contains("--package agentbuddy"),
         "{text}"
     );
+    assert!(
+        text.contains("\n    select Node: --package agentbuddy\n"),
+        "{text}"
+    );
+    assert!(!text.contains(&*source.to_string_lossy()), "{text}");
+    let apply = run_isolated(
+        temp.path(),
+        &[
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to-global",
+            "--apply",
+        ],
+    );
+    assert!(!apply.status.success());
+    assert!(
+        String::from_utf8_lossy(&apply.stderr).contains("version conflicts; no packages changed")
+    );
     assert!(source.exists());
     assert!(std::fs::read_to_string(shared.join("package.json"))
         .unwrap()
@@ -10773,20 +10793,67 @@ fn shared_node_migration_script_opt_in_is_previewed_without_running_npm() {
         text.contains("--allow-scripts") && text.contains("source kept"),
         "{text}"
     );
-    let allowed = run_isolated(temp.path(), &[&args[..], &["--allow-scripts"]].concat());
-    assert!(
-        allowed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&allowed.stderr)
-    );
-    let text = String::from_utf8_lossy(&allowed.stdout);
-    assert!(
-        text.contains("would install agentbuddy@1.7.11") && text.contains("scripts enabled"),
-        "{text}"
-    );
-    assert!(!text.contains("skip native"), "{text}");
+    assert!(!text.contains("--apply"), "{text}");
+    let shared = temp.path().join("data/global/npm").join(if cfg!(windows) {
+        "node_modules/agentbuddy"
+    } else {
+        "lib/node_modules/agentbuddy"
+    });
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("package.json"),
+        r#"{"name":"agentbuddy","version":"1.5.10"}"#,
+    )
+    .unwrap();
+    for language in ["en", "zh"] {
+        let allowed = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &[&args[..], &["--allow-scripts"]].concat(),
+            &[("OSDK_LANG", language)],
+        );
+        assert!(
+            allowed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+        let text = String::from_utf8_lossy(&allowed.stdout);
+        let (heading, replacement, scripts, target) = if language == "en" {
+            (
+                "Preview: Node 20.0.0 -> shared npm",
+                "  agentbuddy@1.7.11 (replaces shared 1.5.10)",
+                "Scripts: enabled (including dependencies)",
+                "Target:",
+            )
+        } else {
+            (
+                "预览：Node 20.0.0 → 共享 npm",
+                "  agentbuddy@1.7.11（替换共享版本 1.5.10）",
+                "安装脚本：启用（含依赖）",
+                "目标目录：",
+            )
+        };
+        assert!(text.starts_with(heading), "{text}");
+        assert!(text.contains(&format!("\n{replacement}\n")), "{text}");
+        assert!(text.contains(scripts), "{text}");
+        let lines = text.lines().collect::<Vec<_>>();
+        let target_index = lines.iter().position(|line| *line == target).unwrap();
+        let rendered_path = lines[target_index + 1].strip_prefix("  ").unwrap();
+        assert_eq!(
+            Path::new(rendered_path),
+            temp.path().join("data/global/npm"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("--package") && !text.contains("--allow-scripts"),
+            "{text}"
+        );
+        assert_eq!(text.matches(rendered_path).count(), 1, "{text}");
+    }
     assert!(source.exists());
-    assert!(!temp.path().join("data/global/npm").exists());
+    assert!(std::fs::read_to_string(shared.join("package.json"))
+        .unwrap()
+        .contains("1.5.10"));
 }
 
 #[test]
@@ -10860,37 +10927,60 @@ fi
 #[cfg(unix)]
 #[test]
 fn shared_node_migration_replaces_selected_duplicate_and_cleans_source_after_verification() {
-    let temp = tempfile::tempdir().unwrap();
-    let (source, shared) = shared_migration_fixture(temp.path(), "exit 0");
-    let output = run_isolated_in_with_env(
-        temp.path(),
-        temp.path(),
-        &[
-            "node",
-            "migrate-packages",
-            "--from",
-            "20.0.0",
-            "--to-global",
-            "--package",
-            "agentbuddy",
-            "--apply",
-        ],
-        &[
-            ("PATH", "/usr/bin:/bin"),
-            ("npm_config_prefix", "/must/not/be/used"),
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!source.exists());
-    assert!(std::fs::read_to_string(shared.join("package.json"))
-        .unwrap()
-        .contains("1.7.11"));
-    assert!(shared.join("bin/cli.js").is_file());
-    assert!(temp.path().join("data/global/npm/bin/agentbuddy").is_file());
+    for language in ["en", "zh"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (source, shared) = shared_migration_fixture(temp.path(), "exit 0");
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &[
+                "node",
+                "migrate-packages",
+                "--from",
+                "20.0.0",
+                "--to-global",
+                "--package",
+                "agentbuddy",
+                "--apply",
+            ],
+            &[
+                ("PATH", "/usr/bin:/bin"),
+                ("npm_config_prefix", "/must/not/be/used"),
+                ("OSDK_LANG", language),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.starts_with(if language == "en" {
+                "Migrating: Node 20.0.0 -> shared npm\n"
+            } else {
+                "迁移：Node 20.0.0 → 共享 npm\n"
+            }),
+            "{text}"
+        );
+        for obsolete in ["--package", "would install", "--apply", "dry-run"] {
+            assert!(!text.contains(obsolete), "{obsolete} in {text}");
+        }
+        assert!(
+            text.contains(if language == "en" {
+                "migrated 1 package(s); legacy copies removed"
+            } else {
+                "已迁移 1 个包，旧副本已清理"
+            }),
+            "{text}"
+        );
+        assert!(!source.exists());
+        assert!(std::fs::read_to_string(shared.join("package.json"))
+            .unwrap()
+            .contains("1.7.11"));
+        assert!(shared.join("bin/cli.js").is_file());
+        assert!(temp.path().join("data/global/npm/bin/agentbuddy").is_file());
+    }
 }
 
 #[cfg(unix)]
@@ -10944,6 +11034,14 @@ command="$1""#,
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.contains("Scripts: enabled (including dependencies)"),
+            "{text}"
+        );
+        for obsolete in ["--package", "would install", "--apply", "dry-run"] {
+            assert!(!text.contains(obsolete), "{obsolete} in {text}");
+        }
         assert_eq!(source.exists(), result != "exit 0");
         assert!(other.exists());
         assert!(std::fs::read_to_string(shared.join("package.json"))

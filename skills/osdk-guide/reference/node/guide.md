@@ -12,6 +12,7 @@ osdk node migrate-packages --from <NODE_VERSION> (--to <NODE_VERSION> | --to-glo
 | `--to` | 目标受管 Node 版本；与 `--to-global` 二选一 |
 | `--to-global` | 迁入共享 npm prefix，校验后清理源版本中的对应包 |
 | `--package NAME` | 可重复；只用于 `--to-global`，选择源包并明确替换共享目录中的不同版本 |
+| `--allow-scripts` | 只用于 `--to-global` 且要求 `--package`；允许运行安装脚本，含依赖脚本 |
 | `--apply` | 真正执行；省略时只生成迁移计划 |
 
 ```bash
@@ -38,6 +39,9 @@ osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy --all
 默认跳过并保留源副本；加 `--allow-scripts` 才纳入，并允许运行选中包及其依赖的 npm 生命周期脚本。
 该选项要求同时指定 `--to-global` 和至少一个 `--package NAME`；仍需 `--apply` 才执行。
 本地链接或别名包不会按 registry 包自动重装，需从原始来源单独处理。
+
+已通过 `--package` 选中的包只显示“替换共享版本”，不再提示选择。包列表、目标目录和脚本策略
+分行显示；`--apply` 显示执行状态和结果，不重复“加 --apply”等预览提示。
 
 执行时按精确版本重新安装，默认禁用安装脚本；需要包源可用及适当的 npm 登录配置。
 启用脚本后，脚本对共享目录之外的修改不在迁移回滚范围内。

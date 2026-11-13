@@ -450,7 +450,8 @@ and locations. Preview `osdk node migrate-packages --from VERSION --to-global`;
 select differing source versions with `--package NAME` and add `--apply` to move them.
 Unselected local package links remain in place. Native or install-script packages
 are skipped by default; opt in with `--package NAME --allow-scripts`, then add
-`--apply` after reviewing the plan.
+`--apply` after reviewing the plan. Preview lists replacements; apply reports
+progress and completion without repeating selection prompts.
 
 Managed `npm i -g` and similar commands use shared global directories, so changing
 Node does not remove the installed packages. Through osdk shims, supported JS

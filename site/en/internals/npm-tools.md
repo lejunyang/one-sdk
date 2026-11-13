@@ -434,7 +434,11 @@ variables and builtin defaults.
 It passes `--ignore-scripts=false` to override inherited ignore-scripts settings,
 enabling npm lifecycle scripts for selected packages and their dependencies. Preview
 still never runs npm; default skip messages explicitly retain the source and point
-to this option. Source uninstall always uses `--ignore-scripts`. Staging provides
+to this option. Reports distinguish preview and execution. Only unselected version
+conflicts prompt for selection; selected packages show their replacement instead.
+The target path appears once on its own line. Apply omits preview instructions,
+and empty plans never suggest `--apply`. Source uninstall always uses
+`--ignore-scripts`. Staging provides
 file rollback before publication, not a script sandbox; external script side effects
 cannot be undone.
 
