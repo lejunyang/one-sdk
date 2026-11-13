@@ -434,3 +434,7 @@ added to an existing manifest; missing or corrupt old manifests are never rebuil
 The installation tree is not re-baselined. Legitimate prefix refreshes therefore
 do not trigger doctor drift, while existing npmrc edits or unrelated damaged
 files remain detectable.
+
+`reshim` maintains npm defaults before execution-target and ownership selection,
+enumerating installed Node/npm separately. Selecting a system target therefore
+does not skip managed installations or modify the external target.

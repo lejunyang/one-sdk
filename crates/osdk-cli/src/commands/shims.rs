@@ -3,6 +3,19 @@
 use super::*;
 
 pub fn reshim(app: &App) -> Result<()> {
+    // Maintaining an installed npm default is independent of which execution
+    // target this directory selects (including an opted-in system runtime).
+    for id in ["node", "npm"] {
+        let backend = app.registry.get(id)?;
+        for version in backend.list_installed(&app.ctx)? {
+            let tv = ToolVersion::new(id, version);
+            if id == "node" {
+                osdk_core::backend::node::NodeBackend::ensure_npm_prefix(&app.ctx, &tv)?;
+            } else {
+                backend.ensure_post_install(&app.ctx, &tv)?;
+            }
+        }
+    }
     let owners = installed_shim_owners(app)?;
     let conflicts = owners
         .iter()
@@ -63,11 +76,6 @@ pub fn reshim(app: &App) -> Result<()> {
         }
         for version in installed {
             let mut tv = ToolVersion::new(backend.id(), &version);
-            match backend.id() {
-                "node" => osdk_core::backend::node::NodeBackend::ensure_npm_prefix(&app.ctx, &tv)?,
-                "npm" => backend.ensure_post_install(&app.ctx, &tv)?,
-                _ => {}
-            }
             if backend.id().contains(':') {
                 let Some(request) = dynamic_request.as_ref() else {
                     continue;

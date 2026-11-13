@@ -10569,8 +10569,46 @@ fn reshim_updates_native_npm_defaults_in_existing_installs() {
         )
         .unwrap();
     }
-    for _ in 0..2 {
-        let output = run_isolated(temp.path(), &["reshim"]);
+    for phase in 0..3 {
+        let output = if phase == 2 {
+            // Selecting a system runtime must not prevent maintenance of
+            // managed installations that still exist on disk.
+            for config in &configs {
+                std::fs::write(
+                    config,
+                    "prefix=\"old-default\"\nregistry=https://example.test/\n",
+                )
+                .unwrap();
+            }
+            std::fs::write(
+                temp.path().join("config/config.toml"),
+                "[settings.precedence]\ntool_order = [\"system\", \"osdk\"]\n",
+            )
+            .unwrap();
+            let external = temp.path().join("external");
+            std::fs::create_dir_all(&external).unwrap();
+            for name in ["node", "npm"] {
+                let file = external.join(if cfg!(windows) {
+                    format!("{name}.exe")
+                } else {
+                    name.to_string()
+                });
+                std::fs::write(&file, "#!/bin/sh\nexit 55\n").unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+            run_isolated_in_with_env(
+                temp.path(),
+                temp.path(),
+                &["reshim"],
+                &[("PATH", &external.display().to_string())],
+            )
+        } else {
+            run_isolated(temp.path(), &["reshim"])
+        };
         assert!(
             output.status.success(),
             "{}",

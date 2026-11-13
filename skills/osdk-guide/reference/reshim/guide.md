@@ -36,3 +36,6 @@ osdk-shim 会在该工具进程退出后自动对账其全局 bin 目录：为�
 显式配置 `tool_order=["system"]` 可使用受支持的已有 PATH/home 工具；默认不启用。显式版本及托管锁/frozen 仍保持权威。参见[system 配置、适配器和限制](../configuration/settings.md#system-执行来源)。
 
 自动对账也比较命令集合，快速卸载再安装不依赖目录时间戳一定变化。
+
+即使 tool_order 当前选中 system Node/npm，reshim 也会修复已有托管 Node/npm 的
+默认 prefix；不会修改系统安装的 npm 配置。

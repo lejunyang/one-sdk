@@ -87,3 +87,7 @@ enumerates the source with `npm ls -g --depth=0 --json --long`, skips npm itself
 packages already present on the target, and packages declaring
 `hasInstallScript=true` or `gypfile=true`. `--apply` installs exact versions; on
 failure, it restores the target's original global-package set.
+
+Even when system Node/npm is currently preferred, `reshim` updates defaults in
+existing managed installations. It touches only osdk install directories, never
+system Node/npm configuration.

@@ -327,3 +327,6 @@ Node `bin_names` 只接受 `node`/`corepack`，不再从目录位置推导第三
 更新 builtin npmrc 时，只在文件当前哈希仍匹配已记录基线的前提下更新该条目的哈希；
 新生成的配置可加入已有清单，但缺失或损坏的旧清单不会重建。不会重录整个安装目录。
 因此合法 prefix 刷新不会触发 doctor 漂移，而已有 npmrc 修改或其他文件损坏不会被掩盖。
+
+`reshim` 的 npm 默认值维护先于 execution target 与 owner 快照解析，单独枚举已有
+Node/npm 安装；当前目录选择 system 目标不会跳过这些托管安装，也不会修改外部目标。
