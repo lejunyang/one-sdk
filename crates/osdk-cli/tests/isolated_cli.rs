@@ -10789,3 +10789,68 @@ fn shared_node_migration_failure_and_false_success_preserve_both_live_copies() {
         );
     }
 }
+
+#[test]
+fn reshim_does_not_assign_legacy_npm_globals_to_node() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("installs/node/20.0.0");
+    let bin = if cfg!(windows) {
+        root.clone()
+    } else {
+        root.join("bin")
+    };
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(root.join(".osdk-complete"), "").unwrap();
+    let shared = temp.path().join("data/global/npm");
+    let shared_bin = if cfg!(windows) {
+        shared.clone()
+    } else {
+        shared.join("bin")
+    };
+    std::fs::create_dir_all(&shared_bin).unwrap();
+    for name in ["node", "agentbuddy", "other-cli"] {
+        let name = if cfg!(windows) {
+            format!("{name}.cmd")
+        } else {
+            name.to_string()
+        };
+        let path = bin.join(&name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if name != "node" && name != "node.cmd" {
+            std::fs::copy(&path, shared_bin.join(&name)).unwrap();
+        }
+    }
+    let data_bin = temp.path().join("data/bin");
+    std::fs::create_dir_all(&data_bin).unwrap();
+    std::fs::write(
+        data_bin.join(if cfg!(windows) {
+            "osdk-shim.exe"
+        } else {
+            "osdk-shim"
+        }),
+        "fixture launcher",
+    )
+    .unwrap();
+    let output = run_isolated(temp.path(), &["reshim"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for name in ["node", "agentbuddy", "other-cli"] {
+        assert!(temp
+            .path()
+            .join("data/shims")
+            .join(if cfg!(windows) {
+                format!("{name}.cmd")
+            } else {
+                name.to_string()
+            })
+            .is_file());
+    }
+}

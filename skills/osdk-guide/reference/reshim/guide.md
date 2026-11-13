@@ -13,6 +13,10 @@ osdk reshim
 让未激活 shell 中直接调用原始 npm 也默认安装到 `data/global/npm`。不搬迁旧包、
 不修改用户 `.npmrc`；显式 npm 配置仍可覆盖此原生默认值。
 
+Node 归属仅含 `node` 和实际存在的 `corepack`，旧 Node bin 内第三方命令不会
+据目录位置自动发布为 Node shim。共享 npm 中的命令照常发布；仅有旧副本时，
+先 `doctor` 并按 `reference/node/guide.md` 迁往共享 prefix。reshim 不移动或删除包。
+
 典型场景：安装目录已恢复但 shim 缺失，或更改 shim 暴露策略后需要重新发布入口。
 若 `doctor --verify` 报告安装文件漂移，应先 `install --force`，不要把 reshim 当修复安装内容。
 

@@ -36,6 +36,11 @@ higher-ranked source's LTS metadata for duplicates. A responsive but stale
 mirror therefore cannot hide a release present on a later source; the archive
 download then verifies each `SHASUMS256.txt` candidate in the same order.
 
+Node owns only `node` and an actually present `corepack`, not third-party commands
+in the same directory. `reshim` neither moves nor deletes legacy packages. If
+only a version-local copy exists, migrate it below before publishing a managed
+shim. Same-named commands in the shared npm prefix no longer conflict with Node.
+
 ## Move legacy Node-global packages into the shared prefix
 
 `osdk doctor` lists legacy packages inside each Node version, their exact versions

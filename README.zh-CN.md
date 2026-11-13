@@ -388,6 +388,8 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 直接调用托管 npm、未加载 shell 激活时，也默认使用共享目录。升级后运行一次
 `osdk reshim` 可更新已有 Node/npm 安装的默认值；仍支持显式覆盖 npm prefix。
 
+Node 版本目录中的旧全局命令需迁移后再发布托管 shim；共享 npm 目录中的命令继续可用。
+
 旧全局包若仍在 Node 版本目录，`osdk doctor` 会列出版本与位置。先用
 `osdk node migrate-packages --from VERSION --to-global` 预览；不同版本用
 `--package NAME` 明确选择源包，加 `--apply` 才迁移。

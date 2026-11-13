@@ -439,6 +439,9 @@ Managed npm also defaults to the shared directory when called directly without s
 activation. Run `osdk reshim` once after upgrading to update existing Node/npm
 installations; explicit npm prefix overrides remain supported.
 
+Node-directory globals need migration before they can receive managed shims;
+commands in the shared npm prefix remain available.
+
 If older globals remain inside a Node version, `osdk doctor` shows their versions
 and locations. Preview `osdk node migrate-packages --from VERSION --to-global`;
 select differing source versions with `--package NAME` and add `--apply` to move them.

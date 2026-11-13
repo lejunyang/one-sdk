@@ -474,16 +474,18 @@ impl Backend for NodeBackend {
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        // Package managers are managed by independent backends; do not claim
-        // ownership here even when Corepack installed launchers beside Node.
+        // Location is not ownership: legacy `npm -g` installs can leave any
+        // third-party launcher beside node. Only the runtime and its actual
+        // Corepack launcher belong to Node. Package managers are routed by
+        // shim::routed_bin_names, and legacy globals have a migration workflow.
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths)
             .into_iter()
-            .filter(|name| crate::shim::package_manager_backend_for_command(name).is_none())
+            .filter(|name| matches!(name.as_str(), "node" | "corepack"))
             .collect::<Vec<_>>();
         if discovered.is_empty() {
             // Fallback to the canonical set if the dir isn't populated yet.
-            Ok(vec!["node".into(), "corepack".into()])
+            Ok(vec!["node".into()])
         } else {
             Ok(discovered)
         }

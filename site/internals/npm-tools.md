@@ -319,3 +319,7 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 发布后才以显式源 prefix 调用 npm uninstall。恢复失败会保留备份并报告路径。复制不复用
 可变文件的硬链接，拒绝绝对链接与越出 prefix 的链接。Node 间旧迁移也显式指定 prefix，
 不受激活变量或 builtin 默认值影响。
+
+Node `bin_names` 只接受 `node`/`corepack`，不再从目录位置推导第三方命令归属；缺省
+占位仅保留 `node`，不虚构不存在的 Corepack。npm/npx 等仍由独立的路由集合补齐，
+因此收紧 ownership 不会破坏 Node 随附包管理器的回退路由。

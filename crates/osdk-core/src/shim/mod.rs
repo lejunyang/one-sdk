@@ -2819,7 +2819,12 @@ mod tests {
         let bin = NodeBackend.bin_paths(&ctx, &version).unwrap().remove(0);
         std::fs::create_dir_all(&bin).unwrap();
         let package_managers = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
-        for name in std::iter::once("node").chain(package_managers) {
+        let legacy_globals = ["agentbuddy", "other-cli"];
+        for name in ["node", "corepack"]
+            .into_iter()
+            .chain(package_managers)
+            .chain(legacy_globals)
+        {
             let file_name = if cfg!(windows) {
                 format!("{name}.cmd")
             } else {
@@ -2836,11 +2841,18 @@ mod tests {
 
         let owned = NodeBackend.bin_names(&ctx, &version).unwrap();
         assert!(owned.contains(&"node".to_string()));
+        assert!(owned.contains(&"corepack".to_string()));
+        for name in legacy_globals {
+            assert!(!owned.contains(&name.to_string()), "Node claimed {name}");
+        }
         for name in package_managers {
             assert!(!owned.contains(&name.to_string()), "{name}");
         }
 
         let routed = routed_bin_names(&ctx, &NodeBackend, &version).unwrap();
+        for name in legacy_globals {
+            assert!(!routed.contains(&name.to_string()), "Node routed {name}");
+        }
         for name in package_managers {
             assert!(routed.contains(&name.to_string()), "{name}");
         }

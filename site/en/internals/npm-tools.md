@@ -422,3 +422,8 @@ source prefix. Failed restoration preserves and reports backups. Copies do not
 share mutable hard links; absolute or escaping symlinks are rejected. The existing
 Node-to-Node migration also pins prefixes explicitly, independent of activation
 variables and builtin defaults.
+
+Node `bin_names` accepts only `node`/`corepack`; directory placement no longer
+assigns third-party ownership. The empty-directory fallback includes only `node`,
+not a nonexistent Corepack. The separate routed-name set still adds bundled
+package managers, preserving npm/npx fallback routing.
