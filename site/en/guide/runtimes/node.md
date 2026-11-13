@@ -36,6 +36,33 @@ higher-ranked source's LTS metadata for duplicates. A responsive but stale
 mirror therefore cannot hide a release present on a later source; the archive
 download then verifies each `SHASUMS256.txt` candidate in the same order.
 
+## Move legacy Node-global packages into the shared prefix
+
+`osdk doctor` lists legacy packages inside each Node version, their exact versions
+and paths, and duplicates in the shared prefix. Preview first, then explicitly
+select the source package version to retain:
+
+```bash
+osdk node migrate-packages --from 24.18.1 --to-global
+osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy
+osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy --apply
+```
+
+Choose either `--to-global` or `--to`. Repeat `--package NAME` to migrate only
+selected source packages. A differing shared version requires explicit
+`--package` selection; osdk never chooses by version order. Without `--apply`,
+only package metadata is read and no npm process runs. npm/Corepack themselves
+and packages with install scripts or gyp markers are excluded; reinstall those
+separately after checking runtime compatibility.
+
+Apply reinstalls exact versions with scripts disabled, requiring an available
+registry and suitable npm login configuration. Do not run concurrent global
+installs. Failed installation or artifact verification leaves both live copies
+intact. Success removes the corresponding source packages and rebuilds shims;
+copies in other Node versions need separate migration. Shared packages linked
+outside the prefix require manual handling. If source cleanup fails, the shared
+installation remains and the previous shared prefix backup location is reported.
+
 Node also supports global-package migration:
 
 ```text

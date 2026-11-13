@@ -788,8 +788,18 @@ pub enum NodeCommand {
         #[arg(long)]
         from: String,
         /// Target managed Node version.
+        #[arg(
+            long,
+            required_unless_present = "to_global",
+            conflicts_with = "to_global"
+        )]
+        to: Option<String>,
+        /// Move packages into osdk's shared npm prefix instead of another Node.
         #[arg(long)]
-        to: String,
+        to_global: bool,
+        /// Select source packages, explicitly replacing differing shared versions.
+        #[arg(long, value_name = "NAME", requires = "to_global")]
+        package: Vec<String>,
         /// Apply the plan. Without this flag, no packages are changed.
         #[arg(long)]
         apply: bool,

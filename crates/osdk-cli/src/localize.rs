@@ -165,6 +165,10 @@ fn localize_subcommands(cmd: Command) -> Command {
                 s.about(h("help.node.migrate.about"))
                     .mut_arg("from", |a| a.help(h("help.node.migrate.arg.from")))
                     .mut_arg("to", |a| a.help(h("help.node.migrate.arg.to")))
+                    .mut_arg("to_global", |a| {
+                        a.help(h("help.node.migrate.flag.to_global"))
+                    })
+                    .mut_arg("package", |a| a.help(h("help.node.migrate.arg.package")))
                     .mut_arg("apply", |a| a.help(h("help.node.migrate.flag.apply")))
             })
     })

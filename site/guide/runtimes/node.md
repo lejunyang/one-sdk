@@ -31,6 +31,27 @@ Node 版本列表会合并所有可达 source 的 index，并保留排序靠前�
 标记；因此一个响应正常但同步落后的镜像不会隐藏后续 source 已发布的版本。下载阶段再
 按同一顺序逐个校验 `SHASUMS256.txt` 对应的归档。
 
+## 将旧 Node 全局包迁往共享目录
+
+`osdk doctor` 会列出 Node 各版本目录里的旧全局包、精确版本和路径，以及共享目录中的
+重复版本。先预览，再明确选择要保留的源包版本：
+
+```bash
+osdk node migrate-packages --from 24.18.1 --to-global
+osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy
+osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy --apply
+```
+
+`--to-global` 与 `--to` 二选一；`--package NAME` 可重复，只迁移选中的源包。共享目录已存在
+不同版本时，必须用 `--package` 明确选择源版本，不能按版本号自动覆盖。省略 `--apply`
+只读包元数据、打印计划，不调用 npm。npm/Corepack 本体与含安装脚本或 gyp 标记的包不会迁移；
+这些包需要单独确认运行时兼容性并重新安装。
+
+执行时按精确版本重新安装，禁用安装脚本；需要包源可用及适当的 npm 登录配置。
+请勿同时运行其他全局安装。安装或产物校验失败会保留源包和现有共享安装。成功后清理该源版本
+中的对应包并重建 shim；其他 Node 版本里的副本需分别处理。链接到 prefix 外的共享包不支持
+此暂存迁移，需手工处理。源清理失败时保留已安装的共享包，并报告旧共享目录的备份位置。
+
 Node 也提供全局包迁移：
 
 ```text

@@ -10572,3 +10572,220 @@ fn reshim_updates_native_npm_defaults_in_existing_installs() {
         }
     }
 }
+
+fn write_legacy_global_package(
+    root: &Path,
+    version: &str,
+    name: &str,
+    package_version: &str,
+) -> PathBuf {
+    let prefix = root.join("installs/node").join(version);
+    std::fs::create_dir_all(&prefix).unwrap();
+    std::fs::write(prefix.join(".osdk-complete"), "").unwrap();
+    let package = prefix
+        .join(if cfg!(windows) {
+            "node_modules"
+        } else {
+            "lib/node_modules"
+        })
+        .join(name);
+    std::fs::create_dir_all(package.join("bin")).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        serde_json::json!({"name":name,"version":package_version,"bin":{name:"bin/cli.js"}})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(package.join("bin/cli.js"), "console.log('fixture')").unwrap();
+    package
+}
+
+#[test]
+fn doctor_reports_legacy_node_global_packages_and_shared_duplicates() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = write_legacy_global_package(temp.path(), "20.0.0", "agentbuddy", "1.7.11");
+    let second = write_legacy_global_package(temp.path(), "22.0.0", "other-cli", "2.0.0");
+    let shared = temp.path().join("data/global/npm").join(if cfg!(windows) {
+        "node_modules/agentbuddy"
+    } else {
+        "lib/node_modules/agentbuddy"
+    });
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("package.json"),
+        r#"{"name":"agentbuddy","version":"1.5.10"}"#,
+    )
+    .unwrap();
+    let output = run_isolated(temp.path(), &["doctor"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "agentbuddy@1.7.11",
+        "agentbuddy@1.5.10",
+        "other-cli@2.0.0",
+        "--to-global",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    assert!(first.exists() && second.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_node_migration_plans_duplicates_without_changing_packages() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = write_legacy_global_package(temp.path(), "20.0.0", "agentbuddy", "1.7.11");
+    write_fake_managed_npm(temp.path(), "20.0.0", "#!/bin/sh\nexit 99\n");
+    let shared = temp
+        .path()
+        .join("data/global/npm/lib/node_modules/agentbuddy");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("package.json"),
+        r#"{"name":"agentbuddy","version":"1.5.10"}"#,
+    )
+    .unwrap();
+    let output = run_isolated(
+        temp.path(),
+        &[
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to-global",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("1.7.11") && text.contains("1.5.10") && text.contains("--package agentbuddy"),
+        "{text}"
+    );
+    assert!(source.exists());
+    assert!(std::fs::read_to_string(shared.join("package.json"))
+        .unwrap()
+        .contains("1.5.10"));
+}
+
+#[cfg(unix)]
+fn shared_migration_fixture(root: &Path, install_result: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let source = write_legacy_global_package(root, "20.0.0", "agentbuddy", "1.7.11");
+    let shared = root.join("data/global/npm/lib/node_modules/agentbuddy");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("package.json"),
+        r#"{"name":"agentbuddy","version":"1.5.10"}"#,
+    )
+    .unwrap();
+    std::fs::write(shared.join("original"), "preserve old copy on failure").unwrap();
+    let source_config = root.join("installs/node/20.0.0/lib/node_modules/npm");
+    std::fs::create_dir_all(&source_config).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+command="$1"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --prefix ]; then prefix="$2"; break; fi
+  shift
+done
+if [ "$command" = install ]; then
+  mkdir -p "$prefix/lib/node_modules" "$prefix/bin"
+  rm -rf "$prefix/lib/node_modules/agentbuddy"
+  cp -R '{}' "$prefix/lib/node_modules/agentbuddy"
+  chmod +x "$prefix/lib/node_modules/agentbuddy/bin/cli.js"
+  ln -sf ../lib/node_modules/agentbuddy/bin/cli.js "$prefix/bin/agentbuddy"
+  {install_result}
+elif [ "$command" = uninstall ]; then
+  rm -rf "$prefix/lib/node_modules/agentbuddy"
+fi
+"#,
+        source.display()
+    );
+    write_fake_managed_npm(root, "20.0.0", &script);
+    std::fs::set_permissions(
+        source.join("bin/cli.js"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    (source, shared)
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_node_migration_replaces_selected_duplicate_and_cleans_source_after_verification() {
+    let temp = tempfile::tempdir().unwrap();
+    let (source, shared) = shared_migration_fixture(temp.path(), "exit 0");
+    let output = run_isolated_in_with_env(
+        temp.path(),
+        temp.path(),
+        &[
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to-global",
+            "--package",
+            "agentbuddy",
+            "--apply",
+        ],
+        &[
+            ("PATH", "/usr/bin:/bin"),
+            ("npm_config_prefix", "/must/not/be/used"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!source.exists());
+    assert!(std::fs::read_to_string(shared.join("package.json"))
+        .unwrap()
+        .contains("1.7.11"));
+    assert!(shared.join("bin/cli.js").is_file());
+    assert!(temp.path().join("data/global/npm/bin/agentbuddy").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_node_migration_failure_and_false_success_preserve_both_live_copies() {
+    for result in [
+        "exit 9",
+        "printf '{}' > \"$prefix/lib/node_modules/agentbuddy/package.json\"; exit 0",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (source, shared) = shared_migration_fixture(temp.path(), result);
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &[
+                "node",
+                "migrate-packages",
+                "--from",
+                "20.0.0",
+                "--to-global",
+                "--package",
+                "agentbuddy",
+                "--apply",
+            ],
+            &[("PATH", "/usr/bin:/bin")],
+        );
+        assert!(!output.status.success(), "accepted {result}");
+        assert!(source.exists());
+        assert!(std::fs::read_to_string(shared.join("package.json"))
+            .unwrap()
+            .contains("1.5.10"));
+        assert_eq!(
+            std::fs::read_to_string(shared.join("original")).unwrap(),
+            "preserve old copy on failure"
+        );
+    }
+}

@@ -408,3 +408,17 @@ replacement detaches CAS hard links; unchanged content is not rewritten. Install
 reuse and `reshim` refresh defaults, with no writes in shim startup or prompt hot
 paths. Run `reshim` after relocating data. Environment injection still overrides
 builtin defaults; original npm retains native user, environment and CLI priority.
+
+## Legacy Node-global migration
+
+`doctor` reads only top-level package metadata, including scoped packages, in
+each Node install’s `node_modules` (`lib/node_modules` on Unix), without running
+npm. `node migrate-packages --to-global` copies the shared prefix into a sibling
+staging directory, installs exact versions there with scripts disabled, and
+verifies package identity, bin metadata, targets and launchers before publishing.
+Differing versions require explicit `--package`. Failures before publication
+leave both live installs intact. Only then does npm uninstall run with an explicit
+source prefix. Failed restoration preserves and reports backups. Copies do not
+share mutable hard links; absolute or escaping symlinks are rejected. The existing
+Node-to-Node migration also pins prefixes explicitly, independent of activation
+variables and builtin defaults.

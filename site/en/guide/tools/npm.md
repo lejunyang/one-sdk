@@ -230,6 +230,11 @@ packages. User npm configuration and explicit prefix overrides still apply.
 Direct invocation does not run post-exit shim reconciliation; run `osdk reshim`
 afterwards to publish commands.
 
+For legacy packages inside a Node version directory, inspect `osdk doctor` and
+follow the [Node migration workflow](../runtimes/node#move-legacy-node-global-packages-into-the-shared-prefix)
+with `node migrate-packages --from VERSION --to-global`. Differing versions
+require explicit source package selection.
+
 ## Package and version syntax
 
 ```text

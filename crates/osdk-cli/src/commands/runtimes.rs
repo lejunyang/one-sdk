@@ -4,8 +4,23 @@ use super::*;
 
 pub fn node(app: &App, command: NodeCommand) -> Result<()> {
     match command {
-        NodeCommand::MigratePackages { from, to, apply } => {
-            migrate_node_packages(app, &from, &to, apply)
+        NodeCommand::MigratePackages {
+            from,
+            to,
+            to_global,
+            package,
+            apply,
+        } => {
+            if to_global {
+                super::npm_migration::migrate_to_shared(app, &from, &package, apply)
+            } else {
+                migrate_node_packages(
+                    app,
+                    &from,
+                    to.as_deref().expect("clap requires --to"),
+                    apply,
+                )
+            }
         }
     }
 }
@@ -1799,8 +1814,9 @@ pub(crate) fn migrate_node_packages(app: &App, from: &str, to: &str, apply: bool
 
 #[derive(Debug)]
 pub(crate) struct ManagedNodeTools {
-    bin: std::path::PathBuf,
-    npm: std::path::PathBuf,
+    pub(super) bin: std::path::PathBuf,
+    pub(super) npm: std::path::PathBuf,
+    pub(super) prefix: std::path::PathBuf,
 }
 
 pub(crate) fn managed_node_tools(app: &App, version: &str) -> Result<ManagedNodeTools> {
@@ -1813,7 +1829,7 @@ pub(crate) fn managed_node_tools(app: &App, version: &str) -> Result<ManagedNode
         )));
     }
     let bin = match app.ctx.platform.os {
-        osdk_core::platform::Os::Windows => install,
+        osdk_core::platform::Os::Windows => install.clone(),
         _ => install.join("bin"),
     };
     let npm = if matches!(app.ctx.platform.os, osdk_core::platform::Os::Windows) {
@@ -1827,7 +1843,11 @@ pub(crate) fn managed_node_tools(app: &App, version: &str) -> Result<ManagedNode
             npm.display()
         ));
     }
-    Ok(ManagedNodeTools { bin, npm })
+    Ok(ManagedNodeTools {
+        bin,
+        npm,
+        prefix: install,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1921,6 +1941,10 @@ pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std
     };
     let output = command
         .args(args)
+        // This workflow inspects version-local packages deliberately, even
+        // when activation or npm's builtin default points at the shared prefix.
+        .arg("--prefix")
+        .arg(&tools.prefix)
         .env("PATH", path)
         .output()
         .with_context(|| format!("running managed npm at {}", tools.npm.display()))?;

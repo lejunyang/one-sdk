@@ -24,3 +24,7 @@ osdk doctor --verify --tool node
 动态工具按实际安装身份目录分别验证，包括同版本的多份安装。新 PyPI 安装原地记录完整性基线；旧安装若没有清单，必须 `install --force` 重装，不能把 checked 0 当作通过。字节码缓存不参与校验。
 
 新的 Go/Cargo、npm、HTTP、GitHub 和 Conda 动态安装也会在发布前记录完整性清单。旧安装若没有基线，必须重装；校验不会用可能已被改动的文件自动补造基线。
+
+普通诊断还会列出各 Node 版本目录中的旧 npm 全局包、精确版本和路径，以及共享 npm
+prefix 内的重复包。可先用 `node migrate-packages --from VERSION --to-global` 预览，
+不同版本需 `--package NAME` 明确选择；`--apply` 才执行。doctor 本身不迁移或删包。

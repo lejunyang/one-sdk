@@ -309,3 +309,13 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 已有值相同则不写。安装、复用及 `reshim` 刷新默认值；不在 shim 启动或提示符热路径写盘。
 迁移数据目录后应重新 `reshim`。环境注入继续覆盖 builtin；原始 npm 则保留用户配置、
 环境、CLI 的原生优先级。
+
+## 旧 Node 全局包迁移
+
+`doctor` 只读各 Node 安装内 `node_modules`（Unix 为 `lib/node_modules`）的顶层包元数据，
+含 scoped 包，不执行 npm。`node migrate-packages --to-global` 将共享 prefix 复制到同盘
+临时目录，在那里禁脚本安装精确版本；检查 package identity、bin 元数据、文件目标与 launcher
+后才发布。不同版本须显式 `--package`。发布前失败删除临时目录，不改两份 live 安装；
+发布后才以显式源 prefix 调用 npm uninstall。恢复失败会保留备份并报告路径。复制不复用
+可变文件的硬链接，拒绝绝对链接与越出 prefix 的链接。Node 间旧迁移也显式指定 prefix，
+不受激活变量或 builtin 默认值影响。

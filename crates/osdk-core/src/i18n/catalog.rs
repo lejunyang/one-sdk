@@ -12,6 +12,52 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
 
     // ---- runtime messages -------------------------------------------------
     m.insert(
+        "help.node.migrate.flag.to_global",
+        ("Move into the shared npm prefix", "迁移到共享 npm prefix"),
+    );
+    m.insert(
+        "help.node.migrate.arg.package",
+        (
+            "Select a source package and replace a differing shared version (repeatable)",
+            "选择源包并替换共享目录中的不同版本（可重复）",
+        ),
+    );
+    m.insert(
+        "doctor.node_global",
+        (
+            "legacy Node-global {package} (Node {version}): {path}",
+            "旧 Node 全局包 {package}（Node {version}）：{path}",
+        ),
+    );
+    m.insert(
+        "doctor.node_global_duplicate",
+        (
+            "shared duplicate {package}: {path}",
+            "共享目录重复安装 {package}：{path}",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_duplicate",
+        (
+            "source {source}; shared {target}; select --package {name} to keep the source version",
+            "源版本 {source}；共享版本 {target}；使用 --package {name} 明确保留源版本",
+        ),
+    );
+    m.insert(
+        "err.node_migrate_select_duplicate",
+        (
+            "differing shared packages require explicit --package selection; no packages changed",
+            "共享目录存在不同版本，需用 --package 明确选择；未修改任何包",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_shared",
+        (
+            "migrated {count} package(s) into {path} and removed their legacy copies",
+            "已将 {count} 个包迁移到 {path} 并清理对应旧副本",
+        ),
+    );
+    m.insert(
         "msg.installing",
         ("installing {tool} ...", "正在安装 {tool} ..."),
     );

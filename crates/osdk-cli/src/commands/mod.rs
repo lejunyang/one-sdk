@@ -24,6 +24,7 @@ use crate::cli::{
 mod install;
 mod list;
 pub(crate) mod maintenance;
+mod npm_migration;
 mod registry;
 mod runtimes;
 mod shims;

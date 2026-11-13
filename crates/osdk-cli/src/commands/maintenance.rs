@@ -1652,6 +1652,7 @@ pub fn doctor(app: &App, verify: bool, tool: Option<String>) -> Result<()> {
     );
     println!("  backends     : {}", app.registry.ids().join(", "));
     doctor_proxy_section();
+    super::npm_migration::doctor_node_globals(app)?;
     if verify {
         doctor_verify(app, tool.as_deref())?;
     }

@@ -187,6 +187,10 @@ pnpm add -g cowsay
 移动旧包。用户 npm 配置及显式 prefix 仍可覆盖原生默认值。直接调用不会触发
 shim 的退出后对账，安装完成后运行 `osdk reshim` 发布入口。
 
+旧全局包若仍留在 Node 版本目录，用 `osdk doctor` 检查重复安装，再按
+[Node 迁移流程](../runtimes/node#将旧-node-全局包迁往共享目录)预览并执行
+`node migrate-packages --from VERSION --to-global`。不同版本需明确选择源包。
+
 ## 包名与版本语法
 
 ```text

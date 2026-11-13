@@ -2,6 +2,12 @@
 
 `osdk doctor` reports the state of the environment; `osdk doctor --verify` re-hashes installed files to find anything changed after installation.
 
+Plain `doctor` also reads legacy npm globals inside each Node version and lists
+their names, versions and paths, including duplicates in the shared prefix.
+Preview with the suggested `node migrate-packages --from VERSION --to-global`;
+use `--package NAME` to explicitly select a source version when versions differ.
+Diagnosis does not change packages or configuration.
+
 ## Diagnostics
 
 ```text
