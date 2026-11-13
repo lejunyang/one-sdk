@@ -414,7 +414,7 @@ builtin defaults; original npm retains native user, environment and CLI priority
 `doctor` reads only top-level package metadata, including scoped packages, in
 each Node install’s `node_modules` (`lib/node_modules` on Unix), without running
 npm. `node migrate-packages --to-global` copies the shared prefix into a sibling
-staging directory, installs exact versions there with scripts disabled, and
+staging directory, installs exact versions there with scripts disabled by default, and
 verifies package identity, bin metadata, targets and launchers before publishing.
 Differing versions require explicit `--package`. Failures before publication
 leave both live installs intact. Only then does npm uninstall run with an explicit
@@ -429,6 +429,14 @@ publication. External projects are never copied or written; relative links resol
 to their original targets once published at the original location. The existing
 Node-to-Node migration also pins prefixes explicitly, independent of activation
 variables and builtin defaults.
+
+`--allow-scripts` requires shared migration and explicit `--package` selection.
+It passes `--ignore-scripts=false` to override inherited ignore-scripts settings,
+enabling npm lifecycle scripts for selected packages and their dependencies. Preview
+still never runs npm; default skip messages explicitly retain the source and point
+to this option. Source uninstall always uses `--ignore-scripts`. Staging provides
+file rollback before publication, not a script sandbox; external script side effects
+cannot be undone.
 
 Node `bin_names` accepts only `node`/`corepack`; directory placement no longer
 assigns third-party ownership. The empty-directory fallback includes only `node`,

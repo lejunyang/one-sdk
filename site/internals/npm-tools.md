@@ -314,7 +314,7 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 
 `doctor` 只读各 Node 安装内 `node_modules`（Unix 为 `lib/node_modules`）的顶层包元数据，
 含 scoped 包，不执行 npm。`node migrate-packages --to-global` 将共享 prefix 复制到同盘
-临时目录，在那里禁脚本安装精确版本；检查 package identity、bin 元数据、文件目标与 launcher
+临时目录，在那里安装精确版本（默认禁用脚本）；检查 package identity、bin 元数据、文件目标与 launcher
 后才发布。不同版本须显式 `--package`。发布前失败删除临时目录，不改两份 live 安装；
 发布后才以显式源 prefix 调用 npm uninstall。恢复失败会保留备份并报告路径。复制不复用
 可变文件的硬链接。包目录名作为安装键，manifest 名称仅决定可否按 registry 包重装；
@@ -323,6 +323,11 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 检查位置未被 npm 占用、父目录未被换成链接，冲突则中止发布。因此不会复制或写入外部项目，
 相对链接在发布回原位置后仍指向原目标。Node 间旧迁移也显式指定 prefix，
 不受激活变量或 builtin 默认值影响。
+
+`--allow-scripts` 要求共享迁移且显式 `--package`，将安装参数改为 `--ignore-scripts=false`，
+覆盖继承的 ignore-scripts 配置，允许选中包及其依赖执行 npm 生命周期脚本。预览仍不调用 npm；
+默认 skip 会明确保留源副本并提示该选项。源目录的卸载始终使用 `--ignore-scripts`。
+暂存目录提供发布前的文件回滚，不是脚本沙箱，无法撤销脚本写到 prefix 外的副作用。
 
 Node `bin_names` 只接受 `node`/`corepack`，不再从目录位置推导第三方命令归属；缺省
 占位仅保留 `node`，不虚构不存在的 Corepack。npm/npx 等仍由独立的路由集合补齐，

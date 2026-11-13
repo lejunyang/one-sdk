@@ -10732,6 +10732,88 @@ fn shared_node_migration_plans_duplicates_without_changing_packages() {
         .contains("1.5.10"));
 }
 
+fn add_npm_install_script(package: &Path) {
+    let manifest = package.join("package.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    value["scripts"] = serde_json::json!({"postinstall":"node postinstall.js"});
+    std::fs::write(manifest, value.to_string()).unwrap();
+}
+
+#[test]
+fn shared_node_migration_script_opt_in_is_previewed_without_running_npm() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = write_legacy_global_package(temp.path(), "20.0.0", "agentbuddy", "1.7.11");
+    add_npm_install_script(&source);
+    let prefix = temp.path().join("installs/node/20.0.0");
+    let npm = if cfg!(windows) {
+        prefix.join("npm.cmd")
+    } else {
+        prefix.join("bin/npm")
+    };
+    std::fs::create_dir_all(npm.parent().unwrap()).unwrap();
+    std::fs::write(npm, "exit 99").unwrap();
+    let args = [
+        "node",
+        "migrate-packages",
+        "--from",
+        "20.0.0",
+        "--to-global",
+        "--package",
+        "agentbuddy",
+    ];
+    let skipped = run_isolated(temp.path(), &args);
+    assert!(
+        skipped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    let text = String::from_utf8_lossy(&skipped.stdout);
+    assert!(
+        text.contains("--allow-scripts") && text.contains("source kept"),
+        "{text}"
+    );
+    let allowed = run_isolated(temp.path(), &[&args[..], &["--allow-scripts"]].concat());
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    let text = String::from_utf8_lossy(&allowed.stdout);
+    assert!(
+        text.contains("would install agentbuddy@1.7.11") && text.contains("scripts enabled"),
+        "{text}"
+    );
+    assert!(!text.contains("skip native"), "{text}");
+    assert!(source.exists());
+    assert!(!temp.path().join("data/global/npm").exists());
+}
+
+#[test]
+fn shared_node_migration_script_opt_in_requires_named_shared_packages() {
+    let temp = tempfile::tempdir().unwrap();
+    for target in [["--to-global", ""], ["--to", "22.0.0"]] {
+        let mut args = vec![
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--allow-scripts",
+            target[0],
+        ];
+        if !target[1].is_empty() {
+            args.push(target[1]);
+        }
+        let output = run_isolated(temp.path(), &args);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("--package") && error.contains("required"),
+            "{error}"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn shared_migration_fixture(root: &Path, install_result: &str) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -10809,6 +10891,73 @@ fn shared_node_migration_replaces_selected_duplicate_and_cleans_source_after_ver
         .contains("1.7.11"));
     assert!(shared.join("bin/cli.js").is_file());
     assert!(temp.path().join("data/global/npm/bin/agentbuddy").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_node_migration_runs_opted_in_installs_and_keeps_cleanup_scripts_disabled() {
+    for result in [
+        "exit 0",
+        "exit 9",
+        "rm \"$prefix/lib/node_modules/agentbuddy/bin/cli.js\"; exit 0",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (source, shared) = shared_migration_fixture(temp.path(), result);
+        add_npm_install_script(&source);
+        let other = write_legacy_global_package(temp.path(), "20.0.0", "other-native", "2.0.0");
+        add_npm_install_script(&other);
+        let project = linked_shared_npm_project(temp.path(), "omem");
+        let npm = temp.path().join("installs/node/20.0.0/bin/npm");
+        let script = std::fs::read_to_string(&npm).unwrap().replacen(
+            "command=\"$1\"",
+            r#"if [ "$1" = install ]; then
+  case " $* " in *" --ignore-scripts=false "*) ;; *) exit 81 ;; esac
+else
+  case " $* " in *" --ignore-scripts "*) ;; *) exit 82 ;; esac
+fi
+command="$1""#,
+            1,
+        );
+        std::fs::write(npm, script).unwrap();
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &[
+                "node",
+                "migrate-packages",
+                "--from",
+                "20.0.0",
+                "--to-global",
+                "--package",
+                "agentbuddy",
+                "--allow-scripts",
+                "--apply",
+            ],
+            &[
+                ("PATH", "/usr/bin:/bin"),
+                ("npm_config_ignore_scripts", "true"),
+            ],
+        );
+        assert_eq!(
+            output.status.success(),
+            result == "exit 0",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(source.exists(), result != "exit 0");
+        assert!(other.exists());
+        assert!(std::fs::read_to_string(shared.join("package.json"))
+            .unwrap()
+            .contains(if result == "exit 0" {
+                "1.7.11"
+            } else {
+                "1.5.10"
+            }));
+        assert_eq!(
+            std::fs::read_to_string(project.join("dist/cli.js")).unwrap(),
+            "original local project"
+        );
+    }
 }
 
 #[cfg(unix)]

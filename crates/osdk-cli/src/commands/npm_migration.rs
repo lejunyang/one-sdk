@@ -171,6 +171,7 @@ pub(super) fn migrate_to_shared(
     app: &App,
     from: &str,
     selected: &[String],
+    allow_scripts: bool,
     apply: bool,
 ) -> Result<()> {
     let source = managed_node_tools(app, from)?;
@@ -201,10 +202,14 @@ pub(super) fn migrate_to_shared(
             );
             continue;
         }
-        if package.native {
+        if package.native && !allow_scripts {
             println!(
                 "{}",
-                t!("msg.node_migrate_skip_native", package = package.spec())
+                t!(
+                    "msg.node_migrate_skip_scripts_shared",
+                    package = package.spec(),
+                    name = package.name
+                )
             );
             continue;
         }
@@ -229,6 +234,9 @@ pub(super) fn migrate_to_shared(
         }
         println!("{}", t!("msg.node_migrate_plan", package = package.spec()));
         planned.push(package);
+    }
+    if allow_scripts && !planned.is_empty() {
+        println!("{}", t!("msg.node_migrate_scripts_enabled"));
     }
     if !apply {
         println!("{}", t!("msg.node_migrate_dry_run"));
@@ -279,7 +287,11 @@ pub(super) fn migrate_to_shared(
     let mut args = vec![
         "install",
         "-g",
-        "--ignore-scripts",
+        if allow_scripts {
+            "--ignore-scripts=false"
+        } else {
+            "--ignore-scripts"
+        },
         "--no-audit",
         "--no-fund",
     ];

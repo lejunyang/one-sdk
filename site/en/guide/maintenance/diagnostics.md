@@ -7,7 +7,9 @@ their names, versions and paths, including duplicates in the shared prefix.
 Preview with the suggested `node migrate-packages --from VERSION --to-global`;
 use `--package NAME` to explicitly select a source version when versions differ.
 Linked and aliased packages are marked for separate handling from their original
-source rather than suggested for registry migration.
+source rather than suggested for registry migration. Native or install-script
+packages are retained by default; shared migration supports explicit
+`--package NAME --allow-scripts`, followed by `--apply` after preview.
 Diagnosis does not change packages or configuration.
 
 ## Diagnostics

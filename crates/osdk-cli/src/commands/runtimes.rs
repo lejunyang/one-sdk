@@ -9,10 +9,11 @@ pub fn node(app: &App, command: NodeCommand) -> Result<()> {
             to,
             to_global,
             package,
+            allow_scripts,
             apply,
         } => {
             if to_global {
-                super::npm_migration::migrate_to_shared(app, &from, &package, apply)
+                super::npm_migration::migrate_to_shared(app, &from, &package, allow_scripts, apply)
             } else {
                 migrate_node_packages(
                     app,

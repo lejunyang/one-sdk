@@ -5,7 +5,8 @@
 普通 `doctor` 还会只读列出 Node 版本目录中的旧 npm 全局包（包名、版本、路径），
 并指出共享 npm prefix 中的重复安装。使用输出中的 `node migrate-packages --from VERSION
 --to-global` 先预览；不同版本用 `--package NAME` 明确选择。本地链接与别名包会标为
-需从原始来源单独处理，不会建议按 registry 包迁移。诊断本身不修改包或配置。
+需从原始来源单独处理，不会建议按 registry 包迁移。原生或含安装脚本的包默认保留；共享迁移
+可显式加 `--package NAME --allow-scripts`，预览后加 `--apply`。诊断本身不修改包或配置。
 
 ## 诊断
 

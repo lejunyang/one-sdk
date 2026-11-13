@@ -199,6 +199,20 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.node_migrate_skip_scripts_shared",
+        (
+            "skip native or install-script package {package}; source kept. Select --package {name} --allow-scripts to migrate",
+            "跳过原生或含安装脚本的包 {package}；保留源副本。使用 --package {name} --allow-scripts 可迁移",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_scripts_enabled",
+        (
+            "npm lifecycle scripts enabled for selected packages and their dependencies on --apply",
+            "使用 --apply 时将运行选中包及其依赖的 npm 生命周期脚本",
+        ),
+    );
+    m.insert(
         "msg.node_migrate_skip_local",
         (
             "skip linked or aliased package {package}; reinstall it separately from its original source",

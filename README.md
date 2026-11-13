@@ -448,7 +448,9 @@ remaining conflicts with source paths, returning a nonzero exit code.
 If older globals remain inside a Node version, `osdk doctor` shows their versions
 and locations. Preview `osdk node migrate-packages --from VERSION --to-global`;
 select differing source versions with `--package NAME` and add `--apply` to move them.
-Unselected local package links remain in place.
+Unselected local package links remain in place. Native or install-script packages
+are skipped by default; opt in with `--package NAME --allow-scripts`, then add
+`--apply` after reviewing the plan.
 
 Managed `npm i -g` and similar commands use shared global directories, so changing
 Node does not remove the installed packages. Through osdk shims, supported JS

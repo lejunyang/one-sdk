@@ -782,7 +782,7 @@ pub enum ProjectCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeCommand {
-    /// Plan or apply migration of global npm packages between managed Node versions.
+    /// Plan or apply migration of global npm packages between Nodes or into the shared prefix.
     MigratePackages {
         /// Source managed Node version.
         #[arg(long)]
@@ -800,6 +800,9 @@ pub enum NodeCommand {
         /// Select source packages, explicitly replacing differing shared versions.
         #[arg(long, value_name = "NAME", requires = "to_global")]
         package: Vec<String>,
+        /// Allow npm lifecycle scripts, including dependencies, for selected shared migrations.
+        #[arg(long, requires_all = ["to_global", "package"])]
+        allow_scripts: bool,
         /// Apply the plan. Without this flag, no packages are changed.
         #[arg(long)]
         apply: bool,

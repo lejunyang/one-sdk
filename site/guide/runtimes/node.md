@@ -42,17 +42,19 @@ Node 只声明 `node` 和实际存在的 `corepack`，不会把同目录第三�
 
 ```bash
 osdk node migrate-packages --from 24.18.1 --to-global
-osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy
-osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy --apply
+osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy --allow-scripts
+osdk node migrate-packages --from 24.18.1 --to-global --package agentbuddy --allow-scripts --apply
 ```
 
 `--to-global` 与 `--to` 二选一；`--package NAME` 可重复，只迁移选中的源包。共享目录已存在
 不同版本时，必须用 `--package` 明确选择源版本，不能按版本号自动覆盖。省略 `--apply`
-只读包元数据、打印计划，不调用 npm。npm/Corepack 本体与含安装脚本或 gyp 标记的包不会迁移；
-这些包需要单独确认运行时兼容性并重新安装。本地链接或别名包也不会按 registry 包自动重装，
-需从原始来源单独处理。
+只读包元数据、打印计划，不调用 npm。npm/Corepack 本体不会迁移。含安装脚本或 gyp 标记的包
+默认跳过并保留源副本；加 `--allow-scripts` 才纳入，并允许运行选中包及其依赖的 npm 生命周期脚本。
+该选项要求同时指定 `--to-global` 和至少一个 `--package NAME`；仍需 `--apply` 才执行。
+本地链接或别名包不会按 registry 包自动重装，需从原始来源单独处理。
 
-执行时按精确版本重新安装，禁用安装脚本；需要包源可用及适当的 npm 登录配置。
+执行时按精确版本重新安装，默认禁用安装脚本；需要包源可用及适当的 npm 登录配置。
+启用脚本后，脚本对共享目录之外的修改不在迁移回滚范围内。
 请勿同时运行其他全局安装。安装或产物校验失败会保留源包和现有共享安装。成功后清理该源版本
 中的对应包并重建 shim；其他 Node 版本里的副本需分别处理。共享目录里未选中的本地包链接及其
 命令入口保持原样，包名与链接目录名不同也不会阻断迁移；命令名冲突仍会报错。源清理失败时
