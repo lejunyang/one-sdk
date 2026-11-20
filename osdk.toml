@@ -108,11 +108,7 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 
 [tasks.test]
 description = "Workspace test suite"
-run = "cargo test --workspace"
-
-[tasks.shim-trust]
-description = "Check project trust with the standalone shim's release feature set"
-run = "cargo test --locked -p osdk-shim --test shim_contract shim_honors_registry_approval_with_foreign_system_packages -- --exact"
+run = "python scripts/test-workspace.py"
 
 [tasks.msrv]
 description = "Minimum supported Rust version still compiles"
@@ -123,7 +119,7 @@ run = "rustup run 1.91.1 cargo check --locked --workspace"
 # --- what CI runs, grouped so the name says which platform it covers ---------
 [tasks.ci]
 description = "Everything CI runs on this platform"
-run = [{ tasks = ["fmt-check", "clippy", "test", "shim-trust"] }]
+run = [{ tasks = ["fmt-check", "clippy", "test"] }]
 
 [tasks.windows-smoke]
 description = "Windows runtime contract: shims, long paths, StrictMode activation"
