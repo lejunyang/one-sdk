@@ -165,6 +165,8 @@ jobs:
           # Only the generic github: backend needs this. Current tests use local
           # fixture servers and do not require network access.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: standalone shim trust
+        run: cargo test --locked -p osdk-shim --test shim_contract shim_honors_registry_approval_with_foreign_system_packages -- --exact
       - name: build windows runtime binaries
         if: runner.os == 'Windows'
         shell: pwsh

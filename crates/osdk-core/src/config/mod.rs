@@ -17,6 +17,8 @@ use crate::source::{Selection, Source, SourceMode};
 use crate::store::link::LinkMode;
 
 pub mod inheritance;
+/// Package declarations used by both trust checks and system-package operations.
+pub mod system_packages;
 
 pub const PROJECT_CONFIG_NAMES: &[&str] = &["osdk.toml", ".osdk.toml"];
 

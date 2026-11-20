@@ -15,21 +15,7 @@ use serde::Serialize;
 /// Version of the `osdk pkg doctor --json` contract.
 pub const SYSPKG_DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
 
-/// A system package manager osdk knows how to inspect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ManagerKind {
-    Winget,
-    Homebrew,
-    /// A Linux distribution's own package manager.
-    ///
-    /// Carried in the same enum so `[sys.pkg]` can name one, but these
-    /// are not interchangeable with the two above: they own `/usr`, they need
-    /// root, and their failure-recovery guarantees differ from each other. Use
-    /// [`Self::is_distro`] wherever a code path assumes it can drive a manager
-    /// the way it drives winget.
-    Distro(super::distro::DistroManager),
-}
+pub use crate::config::system_packages::ManagerKind;
 
 impl ManagerKind {
     /// The executable name, used for discovery and for the commands printed to
@@ -39,15 +25,6 @@ impl ManagerKind {
             Self::Winget => "winget",
             Self::Homebrew => "brew",
             Self::Distro(manager) => manager.program(),
-        }
-    }
-
-    /// The name used in configuration keys and in reports.
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Winget => "winget",
-            Self::Homebrew => "brew",
-            Self::Distro(manager) => manager.id(),
         }
     }
 

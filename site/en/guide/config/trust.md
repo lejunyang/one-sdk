@@ -89,7 +89,10 @@ interpret is not cleared just because it is unrecognized.
 the rest are started by the shim, which gates only the keys it can act on
 itself -- `sources`, `registries` and the like, which decide where a subprocess
 it starts will fetch from. A table the shim never reads, such as `[sys.pkg]` or
-`[task]`, does not stop you from using tools in that directory.
+`[task]`, does not stop you from using tools in that directory. The CLI and shim
+share one approval. For example, if you have approved a project's npm registry
+and then add a `[sys.pkg]` section containing only Linux packages, the Node shim
+on macOS and Windows still accepts the existing approval.
 
 ## Trust identity and record states
 

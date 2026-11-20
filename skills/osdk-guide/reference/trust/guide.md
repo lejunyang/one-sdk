@@ -19,3 +19,5 @@ osdk trust prune [--dry-run]
 作用域：安装类命令看校验设置/`sources`/`registries`、`[tools]` 里打开的 `allow_builds`，以及 `cargo:` 条目（编译必然运行 `build.rs` 与过程宏，改版本需重新信任），`run` 看 `[task]`，
 `pkg apply` 只看在本机适用的 `[sys.pkg]` 条目；`models` 不要求信任。受管内容变化后
 旧摘要不再授权新内容。不可访问路径不会被 prune，因为它可能只是未挂载磁盘。
+
+CLI 与 shim 共用同一份批准。在 macOS 和 Windows 上，新增仅含 Linux 软件包的 `[sys.pkg]` 段后，原有 registry 批准仍可用于启动工具。

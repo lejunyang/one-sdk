@@ -26,7 +26,7 @@
 //!   read-only probes.
 
 pub mod apply;
-pub mod config;
+pub use crate::config::system_packages as config;
 pub mod distro;
 mod distro_mirror;
 pub mod elevate;

@@ -61,6 +61,8 @@ version/platform and bounded build-critical runtime identity; see
 
 CLI initialization checks trust by **command scope** before loading the project configuration; the shim filters the same full requirement set down to the keys it reaches itself. Scopes: install commands check the verification switches in `settings`, `sources`, `registries`, and `tools.allow_builds`; `run` checks `[task]`; `pkg apply` checks only the `[sys.pkg]` entries that apply on this machine; container operations check `[container]`; `models` are never checked. Identity is the canonical file path plus a BLAKE3 hash of the normalized TOML of the governed keys, so editing governed content or moving the repository invalidates the record while other edits do not. `OSDK_TRUSTED_CONFIG_PATHS` can authorize canonical files or directories. See [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs).
 
+The CLI and standalone shim use the same system-package schema and host filters when hashing an approval. Only the CLI builds the package-manager discovery and installation code.
+
 ## `osdk.lock` read semantics
 
 The current writer uses schema 4. It adds an optional typed `native` table for

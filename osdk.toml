@@ -110,6 +110,10 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 description = "Workspace test suite"
 run = "cargo test --workspace"
 
+[tasks.shim-trust]
+description = "Check project trust with the standalone shim's release feature set"
+run = "cargo test --locked -p osdk-shim --test shim_contract shim_honors_registry_approval_with_foreign_system_packages -- --exact"
+
 [tasks.msrv]
 description = "Minimum supported Rust version still compiles"
 # Pinned separately from [tools]: this must use the OLD compiler, so it asks
@@ -119,7 +123,7 @@ run = "rustup run 1.91.1 cargo check --locked --workspace"
 # --- what CI runs, grouped so the name says which platform it covers ---------
 [tasks.ci]
 description = "Everything CI runs on this platform"
-run = [{ tasks = ["fmt-check", "clippy", "test"] }]
+run = [{ tasks = ["fmt-check", "clippy", "test", "shim-trust"] }]
 
 [tasks.windows-smoke]
 description = "Windows runtime contract: shims, long paths, StrictMode activation"

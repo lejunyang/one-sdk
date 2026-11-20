@@ -77,7 +77,7 @@ osdk untrust [PATH]
 **经 shim 分派的工具是另一条线。** `cargo`、`node` 这类命令由 shim 启动，而
 shim 只对它自己会走到的键把关（`sources`、`registries` 之类决定子进程从哪拉取
 的）。像 `[sys.pkg]`、`[task]` 这种 shim 永远读不到的表，不会影响你在该目
-录下正常使用工具。
+录下正常使用工具。CLI 和 shim 共用同一份批准。例如，在已批准 npm registry 的项目中新增一段仅含 Linux 软件包的 `[sys.pkg]`，macOS 和 Windows 上的 Node shim 仍接受原有批准。
 
 ## 信任身份与失效
 

@@ -112,6 +112,53 @@ fn isolated_command(root: &Path, cwd: &Path) -> Command {
     isolated_command_with(&shim(), root, cwd)
 }
 
+#[test]
+fn shim_honors_registry_approval_with_foreign_system_packages() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let config = root.join("osdk.toml");
+    let registry =
+        "[tools]\nnode = '1.0.0'\n[registries.npm]\ndefault = 'https://registry.example.test/'\n";
+    std::fs::write(&config, registry).unwrap();
+    osdk_core::trust::trust(&root.join("config"), &config).unwrap();
+
+    // The CLI's existing approval survives adding a package for another OS.
+    // In standalone shim builds the old hash included the entire sys table.
+    let foreign_package = if cfg!(target_os = "linux") {
+        "'winget:Example' = { when = { os = 'windows' } }"
+    } else {
+        "'apt:bubblewrap' = { when = { os = 'linux' } }"
+    };
+    let contents = format!("{registry}[sys.pkg]\n{foreign_package}\n");
+    std::fs::write(&config, &contents).unwrap();
+    let run = || {
+        let output = isolated_command(root, root)
+            .args(["node", "--version"])
+            .env("OSDK_LANG", "en")
+            .output()
+            .unwrap();
+        String::from_utf8(output.stderr).unwrap()
+    };
+    // The install directory is deliberately empty. Reaching tool lookup
+    // proves the shim accepted the record before trying to launch Node.
+    let message = run();
+    assert!(
+        message.contains("node@1.0.0` is not installed"),
+        "{message}"
+    );
+
+    std::fs::write(
+        &config,
+        contents.replace("registry.example", "other.example"),
+    )
+    .unwrap();
+    let message = run();
+    assert!(
+        message.contains("project config is not trusted"),
+        "{message}"
+    );
+}
+
 fn isolated_command_with(program: &Path, root: &Path, cwd: &Path) -> Command {
     let mut command = Command::new(program);
     command

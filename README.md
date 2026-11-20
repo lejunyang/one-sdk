@@ -984,7 +984,7 @@ in that category, and when a config is refused osdk lists exactly which keys nee
 review and why:
 
 ```bash
-osdk --yes trust ./osdk.toml
+osdk --yes trust ./osdk.toml     # approves this config for osdk and its tool shims
 osdk trust list
 osdk untrust ./osdk.toml
 osdk trust prune                 # drop records whose config file is gone

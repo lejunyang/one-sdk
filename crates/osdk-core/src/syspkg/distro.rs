@@ -41,15 +41,7 @@ use serde::Serialize;
 
 use crate::process::{CaptureLimits, CommandOutcome, CommandRunner, CommandSpec};
 
-/// A Linux distribution package manager osdk can detect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DistroManager {
-    Apt,
-    Apk,
-    Pacman,
-    Dnf,
-}
+pub use crate::config::system_packages::DistroManager;
 
 impl DistroManager {
     /// Every manager osdk knows how to detect.
@@ -65,16 +57,6 @@ impl DistroManager {
     pub const fn program(self) -> &'static str {
         match self {
             Self::Apt => "apt-get",
-            Self::Apk => "apk",
-            Self::Pacman => "pacman",
-            Self::Dnf => "dnf",
-        }
-    }
-
-    /// Name used in reports and configuration.
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Apt => "apt",
             Self::Apk => "apk",
             Self::Pacman => "pacman",
             Self::Dnf => "dnf",

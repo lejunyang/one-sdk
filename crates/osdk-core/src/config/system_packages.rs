@@ -7,20 +7,61 @@
 //! project". Merging them would promise per-project isolation that a
 //! machine-wide package manager cannot deliver.
 //!
-//! # Trust
-//!
-//! This table can cause software to be installed on the user's machine, so it is
-//! execution-affecting project configuration. No special wiring is needed:
-//! `trust::requires_trust` already treats every top-level key other than
-//! `tools` and `alias` as requiring trust, so `[sys.pkg]` is covered by
-//! construction rather than by a rule that could drift.
+//! The CLI and the standalone shim use this schema to decide which package
+//! declarations contribute to a project's trust record on the current host.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::report::ManagerKind;
 use crate::platform::{Platform, PlatformFilter};
+
+/// A system package manager osdk knows how to inspect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManagerKind {
+    Winget,
+    Homebrew,
+    /// A Linux distribution's own package manager.
+    ///
+    /// Carried in the same enum so `[sys.pkg]` can name one, but these
+    /// are not interchangeable with the two above: they own `/usr`, they need
+    /// root, and their failure-recovery guarantees differ from each other.
+    Distro(DistroManager),
+}
+
+impl ManagerKind {
+    /// The name used in configuration keys and in reports.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Winget => "winget",
+            Self::Homebrew => "brew",
+            Self::Distro(manager) => manager.id(),
+        }
+    }
+}
+
+/// A Linux distribution package manager osdk can detect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DistroManager {
+    Apt,
+    Apk,
+    Pacman,
+    Dnf,
+}
+
+impl DistroManager {
+    /// Name used in reports and configuration.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Apt => "apt",
+            Self::Apk => "apk",
+            Self::Pacman => "pacman",
+            Self::Dnf => "dnf",
+        }
+    }
+}
 
 /// A package requested directly in `[sys.pkg]`.
 ///
@@ -182,10 +223,10 @@ impl PackageKey {
         let manager = match manager {
             "winget" => ManagerKind::Winget,
             "brew" => ManagerKind::Homebrew,
-            "apt" => ManagerKind::Distro(super::distro::DistroManager::Apt),
-            "apk" => ManagerKind::Distro(super::distro::DistroManager::Apk),
-            "pacman" => ManagerKind::Distro(super::distro::DistroManager::Pacman),
-            "dnf" => ManagerKind::Distro(super::distro::DistroManager::Dnf),
+            "apt" => ManagerKind::Distro(DistroManager::Apt),
+            "apk" => ManagerKind::Distro(DistroManager::Apk),
+            "pacman" => ManagerKind::Distro(DistroManager::Pacman),
+            "dnf" => ManagerKind::Distro(DistroManager::Dnf),
             other => {
                 return Err(KeyError::UnknownManager {
                     manager: other.to_owned(),

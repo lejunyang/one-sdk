@@ -868,7 +868,7 @@ osdk --attestations required install github:cli/cli@latest
 不在此列；被拒绝时，osdk 会逐条列出具体是哪些键以及各自原因：
 
 ```bash
-osdk --yes trust ./osdk.toml
+osdk --yes trust ./osdk.toml     # 这份批准对 osdk 和工具 shim 都生效
 osdk trust list
 osdk untrust ./osdk.toml
 osdk trust prune                 # 清理配置文件已不存在的记录
