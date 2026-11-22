@@ -4077,6 +4077,80 @@ fn install_without_arguments_consumes_matching_platform_lock() {
 
 #[cfg(unix)]
 #[test]
+fn pypi_private_pip_index_serves_latest_and_reaches_installer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let index = format!("http://{}/simple/", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_fixture_connection(&listener, "native Python index");
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.ends_with(b"\r\n\r\n") {
+            let read = stream.read(&mut buf).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buf[..read]);
+        }
+        let request = String::from_utf8(request).unwrap();
+        assert!(
+            request.starts_with("GET /simple/private-fixture/ "),
+            "{request}"
+        );
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        let body = r#"<a href="private_fixture-9.8.7-py3-none-any.whl">private_fixture-9.8.7-py3-none-any.whl</a>"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+
+    // A closed osdk-managed index would make this fail if the native one
+    // were treated as a hint rather than used for both steps.
+    std::fs::create_dir(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        "[registries.python]\nurls = [\"https://127.0.0.1:1/simple/\"]\n",
+    )
+    .unwrap();
+    let pip_config = root.join("native-pip.conf");
+    std::fs::write(&pip_config, format!("[install]\nindex-url = {index}\n")).unwrap();
+    let python = root.join("installs/python/3.12.0");
+    write_executable(
+        &python.join("bin/python3"),
+        r#"#!/bin/sh
+[ "$1 $2" = "-m venv" ] || exit 10
+/bin/mkdir -p "$3/bin"
+/bin/cat > "$3/bin/python" <<'EOF'
+#!/bin/sh
+[ "$PIP_INDEX_URL" = "$FIXTURE_INDEX" ] || exit 11
+[ "$PIP_CONFIG_FILE" = "$FIXTURE_PIP_CONFIG" ] || exit 12
+[ "$*" = "-m pip install --only-binary=:all: private-fixture==9.8.7" ] || exit 13
+/bin/cp "$0" "${0%/*}/private-fixture"
+EOF
+/bin/chmod +x "$3/bin/python"
+"#,
+    );
+    std::fs::write(python.join(".osdk-complete"), "").unwrap();
+    let pip_path = pip_config.to_str().unwrap();
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["install", "pypi:private-fixture"],
+        &[
+            ("PIP_CONFIG_FILE", pip_path),
+            ("FIXTURE_PIP_CONFIG", pip_path),
+            ("FIXTURE_INDEX", &index),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    assert!(root.join("installs/pypi/private-fixture/9.8.7").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
 fn go_tool_use_publishes_locks_reuses_offline_and_uninstalls_exact_identity() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");

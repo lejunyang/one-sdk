@@ -819,7 +819,7 @@ Last-Modified，通过 `Range` + `If-Range` 断点续传；服务端忽略或返
 存在后才会被选中；任一步失败都会继续下一个排序来源，receipt 记录真正通过验证的来源。
 模型在某个来源耗尽尝试后同样会继续下一个排序来源；所有来源都耗尽后才终止。
 
-委托型生态只在原生解析器执行前或内部回退：Cargo 选定 sparse index 前检查精确 crate 下载端点，`pypi:` 探测实际项目并把结果传给 uv/pip，全新 `go:` 安装则收到以 `|` 连接的 GOPROXY 链。项目包管理器命令仍只执行一次，因为 lifecycle script 运行后盲目重放可能产生重复副作用。
+pip 或 uv 已配置单一索引时，`pypi:` 用它查版本和安装。没有配置原生索引时，可以通过 `[registries.python].urls` 指定 osdk 可用的镜像。全新安装 `go:` 工具时，可以在配置的 Go 代理之间回退。
 
 环境变量里已经设置的镜像（`RUSTUP_DIST_SERVER`、`GOPROXY`、`npm_config_registry`
 等）会先经过校验，再与 osdk 内置镜像一起参与测速竞争，因此过期或不可用的值不会

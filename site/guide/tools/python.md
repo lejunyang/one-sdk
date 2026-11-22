@@ -170,7 +170,7 @@ urls = ["https://pypi.tuna.tsinghua.edu.cn/simple/"]
 **显式配置会被原样使用**，osdk 不会再往里追加自己的内置候选：只列一个索引的人是
 真的只要那一个，擅自补上镜像或上游会把请求发去你没选的地方，也会让纯内网环境失效。
 
-osdk 会用一次匿名探测给候选排序，选最快的可用者。`osdk registry test python` 使用
+没有配置原生源时，osdk 会用一次匿名探测给候选排序，选最快的可用者。`osdk registry test python` 使用
 长期存在的 `pip` 项目作为通用健康检查；实际 `pypi:<project>` 安装则探测所请求项目的
 页面，避免选中“PyPI 可访问但尚未同步这个项目”的镜像。两种探测都不只看 HTTP 200，
 还会校验响应形态（PEP 503 的 anchor 或 PEP 691 的 `files` 数组），所以一个返回 200
@@ -192,31 +192,16 @@ osdk 会用一次匿名探测给候选排序，选最快的可用者。`osdk reg
 http），原因是索引是制品哈希的来源：可降级的传输会让攻击者既改制品、又改本该
 发现改动的那个哈希。
 
-pip 路径还会额外固定 `PIP_CONFIG_FILE`。uv 设计上不读 `pip.conf`，pip 会读，所以
-你系统里遗留的 `pip.conf`（比如指向一个不受信任的索引）本来能悄悄覆盖上面所有
-设置。
+### 私有索引
 
-### 私有索引与凭据
+独立的 `pypi:<project>` 工具使用同一个原生索引查版本和安装。osdk 读取 pip 的
+`PIP_INDEX_URL` 和 `pip.conf` / `pip.ini`，包括 `PIP_CONFIG_FILE` 指定的文件。
+也会读取 uv 的索引环境变量及项目、用户、系统或显式指定的配置文件。两种安装器都配置
+了源时，优先用本次选中的安装器的源。单个 uv 索引会作为默认索引，避免隐式回退到 PyPI。
 
-如果你已经为私有索引配置了凭据，osdk 会**退出索引规划**，把配置权完整交回给
-uv / pip：
-
-```
-$ osdk registry test
-python:
-  pass-through: index credentials are configured by environment variable UV_INDEX_INTERNAL_USERNAME
-```
-
-识别依据包括 `UV_INDEX_<名字>_USERNAME` / `_PASSWORD`、`UV_KEYRING_PROVIDER`、
-`PIP_INDEX_URL`、`PIP_KEYRING_PROVIDER`，以及 `~/.netrc`（Windows 上 `_netrc`）、
-`pip.conf` / `pip.ini`、`uv.toml` 等凭据文件。
-
-这样做不是「支持私有索引」，而是**不去干扰它**。osdk 把镜像映射为默认索引，而它
-无从知道哪些包本该来自你的私有索引——一旦映射，那些查询就会被送到公共镜像，正是
-上面那条 danger 要避免的依赖混淆形状。让开，凭据才能继续正常工作。
-
-注意 `UV_INDEX_URL`、`UV_INDEX`、`UV_DEFAULT_INDEX` **不算**凭据——它们配置的是
-索引地址而非身份，所以你照常可以用镜像。
+查版本只向配置的索引发匿名请求。无法确定单个可用索引，或索引要求认证才能列出版本时，
+查版本会报错。要使用 osdk 的镜像，先清除原生源设置，再配置
+`[registries.python].urls`。使用原生索引时，pip 继续读取自己的配置。
 
 ## 解释器
 

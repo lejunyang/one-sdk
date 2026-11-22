@@ -46,6 +46,12 @@ use crate::error::{Error, Result};
 use crate::source::Source;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
+#[cfg(feature = "install")]
+enum InstallIndex {
+    Native(String),
+    Managed(Option<String>),
+}
+
 /// The installer that produced an environment.
 ///
 /// Recorded because the two paths do not produce equivalent environments, and
@@ -160,9 +166,8 @@ pub fn venv_python(venv: &Path) -> PathBuf {
 ///   included, so ranking it above the default index would be a
 ///   dependency-confusion vector. Note `UV_INDEX` is exactly that
 ///   higher-precedence form and is never produced here.
-/// - `PIP_CONFIG_FILE` is pinned on the pip path. uv ignores `pip.conf` by
-///   design, but pip reads it, so a stale user-level `pip.conf` pointing at an
-///   untrusted index would otherwise silently override everything below.
+/// - `PIP_CONFIG_FILE` is pinned when osdk selects the source. With a native
+///   index, pip keeps its configuration and receives the resolved index URL.
 /// - `UV_PYTHON_DOWNLOADS=never` keeps uv from fetching an interpreter behind
 ///   osdk's back; the interpreter is always the one osdk resolved.
 /// - Offline is propagated so a cache-only install stays cache-only instead of
@@ -289,18 +294,16 @@ impl PypiBackend {
         choice: &InstallerChoice,
         interpreter: &Path,
         venv: &Path,
-        index: Option<&str>,
+        index: &InstallIndex,
     ) -> Result<()> {
-        // A user-supplied pip.conf must not be able to redirect the index, so
-        // the pip path always runs against a config file osdk controls.
-        let pip_config = venv.parent().map(|parent| parent.join(".osdk-pip.conf"));
-        if let (EnvCreator::Stdlib, Some(path)) = (choice.creator, pip_config.as_deref()) {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
-            }
-            std::fs::write(path, b"# managed by osdk\\n")
-                .map_err(|error| Error::io(path, error))?;
-        }
+        let (url, pip_config) = match index {
+            InstallIndex::Native(url) => (Some(url.as_str()), None),
+            InstallIndex::Managed(url) => (
+                url.as_deref(),
+                (choice.creator == EnvCreator::Stdlib)
+                    .then(|| Path::new(if cfg!(windows) { "nul" } else { "/dev/null" })),
+            ),
+        };
 
         // Reuse the same directory the shell hook redirects to, so an install
         // performed by osdk and one performed in an activated shell share a cache
@@ -312,10 +315,10 @@ impl PypiBackend {
         };
         let env = installer_env(
             choice.creator,
-            index,
+            url,
             ctx.config.settings.offline,
             ctx.config.settings.require_checksums,
-            pip_config.as_deref(),
+            pip_config,
             Some(&cache_dir),
         );
 
@@ -364,20 +367,18 @@ impl PypiBackend {
     /// installing from a lagging mirror is how a version that "exists" turns out
     /// to be unavailable moments later.
     #[cfg(feature = "install")]
-    async fn resolved_index(&self, ctx: &Ctx) -> Result<Option<String>> {
+    async fn resolved_index(&self, ctx: &Ctx) -> Result<String> {
         let configured = &ctx.config.registries().python;
         let candidates = crate::python_index::effective_candidates(&configured.urls);
-        match crate::python_index::plan_for_project(
+        match crate::python_index::rank_project_indexes(
             &candidates,
             configured.probe_timeout_ms,
             &self.project,
         )
         .await
         {
-            crate::python_index::IndexPlan::Selected { url, .. } => Ok(Some(url)),
-            // Credentials or native configuration require pass-through; an
-            // explicit public endpoint here would override that decision.
-            crate::python_index::IndexPlan::PassThrough { .. } => Ok(None),
+            crate::python_index::IndexPlan::Selected { url, .. } => Ok(url),
+            crate::python_index::IndexPlan::PassThrough { reason } => Err(Error::config(reason)),
             // Configured mirrors all failed. Falling back to upstream here would
             // silently ignore the configuration, so this fails closed.
             crate::python_index::IndexPlan::Unavailable { probes } => {
@@ -397,6 +398,47 @@ impl PypiBackend {
                 )))
             }
         }
+    }
+
+    #[cfg(feature = "install")]
+    async fn versions_with_options(
+        &self,
+        ctx: &Ctx,
+        options: &BTreeMap<String, String>,
+    ) -> Result<Vec<VersionInfo>> {
+        if ctx.config.settings.offline {
+            return Err(Error::other(format!(
+                "cannot list versions for `{}` while offline; request an exact version instead",
+                self.project
+            )));
+        }
+        let choice = choose_installer(locate_uv(ctx).as_deref(), require_uv(options))?;
+        let versions = if let Some(index) = super::pypi_native::index(choice.creator)? {
+            crate::python_index::list_native_versions(&index, &self.project).await?
+        } else {
+            let index = self.resolved_index(ctx).await?;
+            crate::python_index::list_versions(&ctx.client, &index, &self.project, false).await?
+        };
+
+        // Sort by PEP 440 order rather than lexically, or `0.10.0` would sort
+        // below `0.9.0` and `latest` would resolve to an older release.
+        let mut sorted = versions;
+        sorted.sort_by(|left, right| compare_pep440(left, right));
+        sorted.dedup();
+        Ok(sorted
+            .into_iter()
+            .map(|version| {
+                // Pre-releases are marked unstable so `latest` skips them, while an
+                // exact request for one still resolves. PEP 440 spells them with a
+                // letter in the release segment (`1.0rc1`, `2.0b3`, `3.0.dev1`).
+                let stable = !is_pep440_prerelease(&version);
+                VersionInfo {
+                    version,
+                    stable,
+                    lts: None,
+                }
+            })
+            .collect())
     }
 
     /// The directory holding this tool's environment.
@@ -1033,37 +1075,7 @@ impl Backend for PypiBackend {
 
     #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let index = self
-            .resolved_index(ctx)
-            .await?
-            .unwrap_or_else(|| crate::python_index::PYPI.to_string());
-        let versions = crate::python_index::list_versions(
-            &ctx.client,
-            &index,
-            &self.project,
-            ctx.config.settings.offline,
-        )
-        .await?;
-
-        // Sort by PEP 440 order rather than lexically, or `0.10.0` would sort
-        // below `0.9.0` and `latest` would resolve to an older release.
-        let mut sorted = versions;
-        sorted.sort_by(|left, right| compare_pep440(left, right));
-        sorted.dedup();
-        Ok(sorted
-            .into_iter()
-            .map(|version| {
-                // Pre-releases are marked unstable so `latest` skips them, while an
-                // exact request for one still resolves. PEP 440 spells them with a
-                // letter in the release segment (`1.0rc1`, `2.0b3`, `3.0.dev1`).
-                let stable = !is_pep440_prerelease(&version);
-                VersionInfo {
-                    version,
-                    stable,
-                    lts: None,
-                }
-            })
-            .collect())
+        self.versions_with_options(ctx, &BTreeMap::new()).await
     }
 
     #[cfg(feature = "install")]
@@ -1095,7 +1107,7 @@ impl Backend for PypiBackend {
         // Anything else -- `latest`, a range -- needs the index. Resolution goes
         // through the shared selector so prerelease policy and range semantics
         // behave the same here as for every other backend.
-        let versions = self.list_remote_versions(_ctx).await?;
+        let versions = self.versions_with_options(_ctx, &req.options).await?;
         let chosen = crate::version::select_version(&req.spec, &versions).ok_or_else(|| {
             Error::VersionResolve {
                 tool: self.id.clone(),
@@ -1126,9 +1138,11 @@ impl Backend for PypiBackend {
         // transient source failure must not remove an otherwise recoverable
         // environment before the installer has even started.
         let index = if ctx.config.settings.offline {
-            ctx.config.registries().python.urls.first().cloned()
+            InstallIndex::Managed(ctx.config.registries().python.urls.first().cloned())
+        } else if let Some(index) = super::pypi_native::index(choice.creator)? {
+            InstallIndex::Native(index)
         } else {
-            self.resolved_index(ctx).await?
+            InstallIndex::Managed(Some(self.resolved_index(ctx).await?))
         };
 
         // A dynamic install lives at `install_path/<install_id>`, not at
@@ -1164,8 +1178,7 @@ impl Backend for PypiBackend {
             std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
         }
 
-        let result =
-            self.build_environment(ctx, tv, &choice, &interpreter, &root, index.as_deref());
+        let result = self.build_environment(ctx, tv, &choice, &interpreter, &root, &index);
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&root);
             return result;

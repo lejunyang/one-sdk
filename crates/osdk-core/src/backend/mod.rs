@@ -40,6 +40,8 @@ pub mod npm_cli;
 pub mod npm_package;
 pub mod pnpm;
 pub mod pypi;
+#[cfg(feature = "install")]
+mod pypi_native;
 pub mod python;
 mod python_catalog;
 mod python_releases;

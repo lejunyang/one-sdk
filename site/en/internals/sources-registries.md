@@ -63,7 +63,7 @@ resolution joins the preferred and remaining candidates with `|` as one GOPROXY,
 letting Go perform download failover inside one provider invocation; lock replay
 restores only its recorded primary proxy. Cargo Registry selection instead reads
 the sparse `config.json` and probes the exact `.crate` URL before fixing source
-identity, avoiding a rerun after build scripts may have started. `pypi:` probes
+identity, avoiding a rerun after build scripts may have started. `pypi:` uses an anonymous listing on the selected native index when configured. Otherwise it probes
 the requested project page and injects the winner as uv/pip's default index.
 
 ## Project registry preflight

@@ -931,7 +931,7 @@ checksum/attestation verification fails, an archive cannot be unpacked, or its r
 missing. The receipt records the source whose artifact actually passed. Model sync likewise falls
 through after one source exhausts its attempts; exhaustion of every source remains terminal.
 
-Delegated ecosystems fail over only before or inside the native resolver: Cargo verifies the exact crate download endpoint before selecting a sparse index, `pypi:` probes the requested project and passes that choice to uv/pip, and fresh `go:` installs receive a `|`-joined GOPROXY chain. Project package-manager commands are still executed once, because blindly replaying a command after lifecycle scripts may duplicate side effects.
+If pip or uv is configured with a single index, `pypi:` uses it for version lookup and installation. Without a native index, set `[registries.python].urls` to choose the mirrors osdk can use. A fresh `go:` install can fall back across its configured Go proxies.
 
 A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,
 `npm_config_registry`, and the like) is validated and then raced against osdk's
