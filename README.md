@@ -638,6 +638,12 @@ Go tool installs honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (including lo
 
 Guide: [Go developer tools](site/en/guide/tools/go.md)
 
+## Scenario: install a GitHub Release with a token
+
+`osdk install github:owner/repo` uses direct GitHub URLs when
+`OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is set. See
+[GitHub Releases](site/en/guide/tools/github-releases.md).
+
 ## Scenario: work in each language ecosystem
 
 The same command style applies across ecosystems, while backend-specific

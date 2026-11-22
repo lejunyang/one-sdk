@@ -163,7 +163,12 @@ impl GithubBackend {
             owner: self.owner.clone(),
             repo: self.repo.clone(),
             policy,
-            sources: sources.to_vec(),
+            sources: if http::github_token().is_some() {
+                // Attestation APIs build their own canonical GitHub URLs.
+                Vec::new()
+            } else {
+                sources.to_vec()
+            },
         })
     }
 
@@ -171,7 +176,7 @@ impl GithubBackend {
         let mut releases = Vec::new();
         for page in 1..=10 {
             let api = self.releases_api(page);
-            let urls = http::github_url_candidates(sources, &api);
+            let urls = http::github_release_url_candidates(sources, &api)?;
             let page_releases: Vec<GhRelease> =
                 http::get_cached_github_json_from_urls(ctx, &api, &urls).await?;
             let done = page_releases.len() < 100;
@@ -217,7 +222,7 @@ impl GithubBackend {
         let mut rate_limit_error = None;
         for tag in &tags {
             let api = self.release_api(tag)?;
-            let urls = http::github_url_candidates(sources, &api);
+            let urls = http::github_release_url_candidates(sources, &api)?;
             match http::get_cached_github_json_from_urls(ctx, &api, &urls).await {
                 Ok(release) => return Ok(release),
                 Err(error) if ctx.config.settings.offline => {
@@ -297,7 +302,7 @@ impl GithubBackend {
 
     async fn public_releases(&self, ctx: &Ctx, sources: &[Source]) -> Result<Vec<GhRelease>> {
         let canonical = self.releases_atom();
-        let urls = http::github_url_candidates(sources, &canonical);
+        let urls = http::github_release_url_candidates(sources, &canonical)?;
         let atom = http::get_cached_text_from_urls(ctx, &canonical, &urls, |text| {
             !parse_release_tags(text, &self.owner, &self.repo).is_empty()
         })
@@ -321,7 +326,7 @@ impl GithubBackend {
         tag: &str,
     ) -> Result<Vec<GhAsset>> {
         let canonical = self.expanded_assets(tag)?;
-        let urls = http::github_url_candidates(sources, &canonical);
+        let urls = http::github_release_url_candidates(sources, &canonical)?;
         let html = http::get_cached_text_from_urls(ctx, &canonical, &urls, |text| {
             !parse_release_assets(text, &self.owner, &self.repo, tag).is_empty()
         })
@@ -438,9 +443,17 @@ impl GithubBackend {
                     ))
                 })?
             } else {
+                // Explicit catalog URLs already bypass anonymous mirror
+                // selection. With a token, enforce the same direct policy.
+                let url = if http::github_token().is_some() {
+                    let sources = crate::source::select::effective_sources(ctx, self);
+                    http::github_direct_release_url(&sources, source)?
+                } else {
+                    source.clone()
+                };
                 let bytes = ctx
                     .client
-                    .get(source)
+                    .get(url)
                     .send()
                     .await?
                     .error_for_status()?
@@ -503,7 +516,7 @@ impl GithubBackend {
                 .map(pipeline::parse_checksum)
                 .transpose()?;
             return Ok(SelectedArtifact {
-                urls: http::github_url_candidates(sources, &artifact.url),
+                urls: http::github_release_url_candidates(sources, &artifact.url)?,
                 asset: GhAsset {
                     name: artifact.file_name,
                     browser_download_url: artifact.url,
@@ -548,7 +561,7 @@ impl GithubBackend {
             };
 
         let asset = select_asset(self, &assets, &tv.version, ctx, rules)?;
-        let urls = http::github_url_candidates(sources, &asset.browser_download_url);
+        let urls = http::github_release_url_candidates(sources, &asset.browser_download_url)?;
         let mut checksum = static_checksums
             .get(&asset.name)
             .map(|value| pipeline::parse_checksum(value))

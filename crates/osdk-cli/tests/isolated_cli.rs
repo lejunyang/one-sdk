@@ -381,6 +381,103 @@ fn absent_condarc_preserves_osdk_conda_sources() {
     conda_source_fixture(false);
 }
 
+#[cfg(not(windows))]
+fn github_release_transport_fixture(token: Option<&str>) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    std::fs::create_dir(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        format!(
+            r#"
+[sources."github:private-owner/private-repo"]
+disable = ["github", "ghproxy"]
+[[sources."github:private-owner/private-repo".custom]]
+id = "third-party"
+kind = "custom"
+index_url = "{endpoint}/relay/"
+download_url = "{endpoint}/relay/"
+"#
+        ),
+    )
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_fixture_connection(&listener, "GitHub transport fixture");
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        let request = String::from_utf8(request).unwrap();
+        if request.starts_with("CONNECT ") {
+            // Do not tunnel traffic outside the fixture. A failed direct
+            // connection must end the request, including its mirror fallback.
+            stream
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        } else {
+            let body = r#"[{"tag_name":"v1.2.3"}]"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+        (listener, request)
+    });
+    let mut env = vec![("HTTPS_PROXY", endpoint.as_str())];
+    if let Some(token) = token {
+        env.push(("OSDK_GITHUB_TOKEN", token));
+    }
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["list-remote", "github:private-owner/private-repo"],
+        &env,
+    );
+    let (listener, request) = server.join().unwrap();
+    assert!(!request.to_ascii_lowercase().contains("\r\nauthorization:"));
+    if token.is_some() {
+        assert!(
+            request.starts_with("CONNECT api.github.com:443 "),
+            "{request}"
+        );
+        assert!(!request.contains("private-owner"));
+        assert!(
+            !output.status.success(),
+            "a direct connection failure reached the mirror"
+        );
+        assert!(
+            listener.accept().is_err(),
+            "authenticated fallback contacted the mirror"
+        );
+    } else {
+        assert!(
+            request.starts_with("GET /relay/repos/private-owner/private-repo/releases?"),
+            "{request}"
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1.2.3"));
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn github_release_transport_with_token_never_contacts_the_configured_mirror() {
+    github_release_transport_fixture(Some("fixture-github-token"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn github_release_transport_without_token_keeps_the_configured_mirror() {
+    github_release_transport_fixture(None);
+}
+
 #[test]
 fn config_list_uses_only_isolated_directories() {
     let temp = tempfile::tempdir().unwrap();

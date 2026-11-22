@@ -115,12 +115,14 @@ download cache does not change this configuration.
 ## GitHub access, failover, and tokens
 
 Token priority is `OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, then `GH_TOKEN`.
-Authorization is sent only to the exact `api.github.com` host and never to a
-proxy. The Releases API reads at most 10 pages of 100 entries. On anonymous rate
-limiting, public Atom and expanded-assets HTML can provide best-effort discovery
-of recent public releases; they are not a complete history.
+With a token, release metadata, assets, checksum files, and attestations use
+direct GitHub URLs. Authorization goes only to the official HTTPS API at
+`api.github.com`. If the direct connection fails, the operation stops to keep
+private repository names away from third-party mirrors. Remote static catalogs
+and their assets also require GitHub URLs in this mode. GitHub Enterprise
+custom API addresses are currently unsupported.
 
-Built-in `github` and `ghproxy` sources consistently cover API requests, release
-assets, Raw/Gist files, checksums/signatures, and attestation bundles, with
-ranked failover and no token forwarding. Proxy inputs are normalized to official
-URLs first so pins, cache keys, and identities do not depend on proxy spelling.
+Anonymous requests retain ranked source fallback, including `github` and
+`ghproxy`. The Releases API reads at most 10 pages of 100 entries. On anonymous
+rate limiting, public Atom and expanded-assets HTML can discover recent
+public releases on a best-effort basis.

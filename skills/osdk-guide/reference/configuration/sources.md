@@ -43,6 +43,9 @@ env_force = false
   `default_channels`、`custom_channels` 和频道列表。原生频道只接受匿名 HTTP(S) 地址，
   独占版本查询、求解与包下载。复杂配置或认证地址会提示并停止；可用自定义源加
   `--source <id>` 覆盖。
+- `github:owner/repo` 在设置 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN` 时只用
+  GitHub 直连 URL。令牌只发给官方 HTTPS API，直连失败即报错。匿名请求仍允许镜像。
+  GitHub Enterprise 自定义 API 地址目前未支持。
 - `forward_credentials` 只对明确允许的自定义端点转发 provider 凭据。
 - 特殊 key：`self` 管 osdk 自升级，`go-modules` 管 `GOPROXY`。
 

@@ -559,6 +559,12 @@ Go 工具安装保留 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`（含小写形
 
 指南：[Go 开发工具](site/guide/tools/go.md)
 
+## 场景：带令牌安装 GitHub Release
+
+设置 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN` 时，
+`osdk install github:owner/repo` 只用 GitHub 直连地址。
+详见 [GitHub Release](site/guide/tools/github-releases.md)。
+
 ## 场景：使用各语言生态
 
 各生态使用一致的命令风格，具体 backend 的能力说明见对应指南；需要生态专属操作时，

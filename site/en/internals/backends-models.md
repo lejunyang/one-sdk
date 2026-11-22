@@ -120,7 +120,11 @@ artifacts after the upstream adopted them, which for LLVM means 19.1.0 onward an
 only some assets per release, so switching digest source per version and platform
 is the `[[archive.overrides]]` case rather than an edge case.
 
-[`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. GitHub API, page, Raw, release asset, and attestation URLs all use the same normalized source candidates, while credentials are sent only to the official API host.
+[`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. Anonymous requests retain ranked, normalized source candidates. With a token,
+release requests use only direct GitHub HTTPS URLs and remove known proxy
+prefixes from older locks. Checksum discovery follows the same transport list,
+and attestation requests skip mirror rewriting. Only requests to the official
+HTTPS API carry Authorization.
 Its supported asset, platform, catalog-digest, rename, bin, and strip options are
 validated as public identity inputs and stored in the schema-1 dynamic install manifest.
 `catalog-url` is accepted for acquisition but deliberately omitted because the

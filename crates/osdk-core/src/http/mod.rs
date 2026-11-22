@@ -754,10 +754,13 @@ pub(crate) fn github_request(client: &reqwest::Client, url: &str) -> reqwest::Re
 }
 
 fn should_send_github_token(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .is_some_and(|host| host.eq_ignore_ascii_case("api.github.com"))
+    reqwest::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.port_or_known_default() == Some(443)
+            && url.host_str() == Some("api.github.com")
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
 }
 
 /// Rewrite an official GitHub API, raw-content, or release URL through one
@@ -801,6 +804,50 @@ pub fn github_url_candidates(sources: &[Source], original: &str) -> Vec<String> 
         urls.push(canonical);
     }
     urls
+}
+
+/// Release lookups with a configured token can name private repositories.
+/// Never put those paths into a proxy URL, even on direct transport failure.
+pub(crate) fn github_release_url_candidates(
+    sources: &[Source],
+    original: &str,
+) -> Result<Vec<String>> {
+    if github_token().is_none() {
+        return Ok(github_url_candidates(sources, original));
+    }
+    Ok(vec![github_direct_release_url(sources, original)?])
+}
+
+pub(crate) fn github_direct_release_url(sources: &[Source], original: &str) -> Result<String> {
+    let canonical = canonical_github_url(sources, original);
+    // A lock may have recorded the built-in proxy even if it's now disabled.
+    let direct = canonical
+        .strip_prefix("https://gh-proxy.com/")
+        .unwrap_or(&canonical);
+    let trusted = reqwest::Url::parse(direct).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.port_or_known_default() == Some(443)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && matches!(
+                url.host_str(),
+                Some(
+                    "github.com"
+                        | "api.github.com"
+                        | "raw.githubusercontent.com"
+                        | "gist.githubusercontent.com"
+                        | "release-assets.githubusercontent.com"
+                        | "objects.githubusercontent.com"
+                        | "codeload.github.com"
+                )
+            )
+    });
+    if !trusted {
+        return Err(Error::config(
+            "GitHub release operations with a token require a direct GitHub HTTPS URL",
+        ));
+    }
+    Ok(direct.into())
 }
 
 fn canonical_github_url(sources: &[Source], url: &str) -> String {
@@ -1307,6 +1354,49 @@ mod tests {
         assert!(!should_send_github_token(
             "https://raw.githubusercontent.com/cli/cli/main/README.md"
         ));
+        assert!(!should_send_github_token(
+            "http://api.github.com/repos/cli/cli"
+        ));
+        assert!(!should_send_github_token(
+            "https://api.github.com:8443/repos/cli/cli"
+        ));
+    }
+
+    #[test]
+    fn authenticated_github_releases_normalize_old_proxy_urls_and_refuse_foreign_hosts() {
+        let asset = "https://github.com/private-owner/private-repo/releases/download/v1/tool";
+        let proxy = Source::mirror(
+            "custom-proxy",
+            "https://mirror.example.test/https://github.com/",
+            10,
+        );
+        assert_eq!(
+            github_direct_release_url(std::slice::from_ref(&proxy), asset).unwrap(),
+            asset
+        );
+        assert_eq!(
+            github_direct_release_url(
+                std::slice::from_ref(&proxy),
+                &format!("https://mirror.example.test/{asset}")
+            )
+            .unwrap(),
+            asset,
+        );
+        assert_eq!(
+            github_direct_release_url(&[], &format!("https://gh-proxy.com/{asset}")).unwrap(),
+            asset
+        );
+        for foreign in [
+            "https://github.com.example.test/private-owner/private-repo",
+            "https://relay.example.test/private-owner/private-repo",
+            "http://github.com/private-owner/private-repo",
+            "https://github.com:8080/private-owner/private-repo",
+        ] {
+            assert!(
+                github_direct_release_url(&[], foreign).is_err(),
+                "{foreign}"
+            );
+        }
     }
 
     #[tokio::test]
