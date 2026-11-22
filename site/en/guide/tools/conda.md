@@ -73,6 +73,9 @@ the base URL for a named channel, `custom_channels` can override the base per
 channel, and `default_channels` defines the channels in `defaults`. When
 `default_channels` is set and `channels` is omitted, osdk uses `defaults`.
 The tool's `channels` option takes precedence over the file's channel list.
+User and environment `channels` and `default_channels` lists merge, so a later
+file does not discard your company channels. Later files' entries take priority,
+and duplicate channels are used once.
 
 Version lookup, dependency solving, and package downloads use these channels
 exclusively. Use anonymous HTTP(S) URLs. URLs with credentials and unsupported

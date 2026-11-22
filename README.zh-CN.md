@@ -535,6 +535,7 @@ revision 记录为 `immutable-revision`，Git HEAD/tag/branch 则记录为 `floa
 ## 场景：从公司 Conda 频道安装
 
 在 Conda 配置里指定公司频道后，`osdk install conda:<包名>` 会用这些频道查版本和安装。
+用户与环境配置里声明的频道会合并，公司频道不会被后读的列表丢弃。
 详见 [Conda 工具](site/guide/tools/conda.md)。
 
 ## 场景：安装 Go command package

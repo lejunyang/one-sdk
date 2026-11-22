@@ -610,7 +610,9 @@ Guide: [Cargo developer tools](site/en/guide/tools/cargo.md)
 ## Scenario: install from a company Conda channel
 
 If your Conda configuration declares company channels, `osdk install conda:<package>`
-uses those channels for lookup and installation. See [Conda tools](site/en/guide/tools/conda.md).
+uses those channels for lookup and installation. Channels declared in user and environment
+configuration are combined, keeping your company channels available.
+See [Conda tools](site/en/guide/tools/conda.md).
 
 ## Scenario: install a Go command package
 

@@ -72,8 +72,8 @@ impl NativeChannels {
                 return Err(ignored(path, "unsupported Conda merge directive"));
             }
             config.channel_alias = read.channel_alias.or(config.channel_alias);
-            config.channels = read.channels.or(config.channels);
-            config.default_channels = read.default_channels.or(config.default_channels);
+            merge_channel_list(&mut config.channels, read.channels);
+            merge_channel_list(&mut config.default_channels, read.default_channels);
             config.custom_channels.extend(read.custom_channels);
         }
         if config.channel_alias.is_none()
@@ -162,6 +162,17 @@ impl NativeChannels {
         Err(unsupported(&format!(
             "no Conda base URL is configured for channel {name}"
         )))
+    }
+}
+
+// Conda puts later configuration files first, keeps each file's list order,
+// and retains the first occurrence of each value. An empty list adds nothing.
+fn merge_channel_list(current: &mut Option<Vec<String>>, incoming: Option<Vec<String>>) {
+    if let Some(mut values) = incoming {
+        values.extend(current.take().unwrap_or_default());
+        let mut seen = std::collections::HashSet::new();
+        values.retain(|value| seen.insert(value.clone()));
+        *current = Some(values);
     }
 }
 
@@ -297,6 +308,86 @@ mod tests {
             config.urls(None).unwrap()[0].as_str(),
             "https://defaults.example.test/main/"
         );
+    }
+
+    #[test]
+    fn condarc_lists_merge_in_priority_order_and_deduplicate() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let prefix = temp.path().join("environment");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&prefix).unwrap();
+        std::fs::write(
+            home.join(".condarc"),
+            r#"
+channel_alias: https://old.example.test
+channels: [tools, shared, tools]
+default_channels: [https://old.example.test/main, https://shared.example.test/main]
+custom_channels: {tools: https://tools.example.test, shared: https://old.example.test}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            prefix.join(".condarc"),
+            r#"
+channel_alias: https://new.example.test
+channels: [deps, shared, deps]
+default_channels: [https://new.example.test/main, https://shared.example.test/main]
+custom_channels: {shared: https://new.example.test}
+"#,
+        )
+        .unwrap();
+        let paths = config_paths(Some(home), |name| {
+            (name == "CONDA_PREFIX").then(|| prefix.clone().into_os_string())
+        })
+        .into_iter()
+        .filter(|path| path.starts_with(temp.path()))
+        .collect::<Vec<_>>();
+        let config = NativeChannels::read(&paths).unwrap().unwrap();
+        assert_eq!(
+            config.channels.as_ref().unwrap(),
+            &["deps", "shared", "tools"]
+        );
+        assert_eq!(
+            config
+                .urls(None)
+                .unwrap()
+                .iter()
+                .map(Url::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "https://new.example.test/deps/",
+                "https://new.example.test/shared/",
+                "https://tools.example.test/tools/",
+            ]
+        );
+        let defaults = super::super::parse_channels("defaults").unwrap();
+        assert_eq!(
+            config
+                .urls(Some(&defaults))
+                .unwrap()
+                .iter()
+                .map(Url::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "https://new.example.test/main/",
+                "https://shared.example.test/main/",
+                "https://old.example.test/main/",
+            ]
+        );
+        std::fs::write(
+            prefix.join("condarc"),
+            "channels: []\ndefault_channels: []\n",
+        )
+        .unwrap();
+        let mut paths = paths;
+        paths.push(prefix.join("condarc"));
+        let config = NativeChannels::read(&paths).unwrap().unwrap();
+        assert_eq!(
+            config.channels.as_ref().unwrap(),
+            &["deps", "shared", "tools"]
+        );
+        assert_eq!(config.urls(Some(&defaults)).unwrap().len(), 3);
     }
 
     #[test]

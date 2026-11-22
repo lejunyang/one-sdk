@@ -65,9 +65,11 @@ spend a probe timeout before failing over.
 ### Native channel configuration
 
 Conda's system, user, and environment files are loaded in order, with `CONDARC`
-last. Later `channel_alias`, `channels`, and `default_channels` values replace
-earlier ones. `custom_channels` is overridden by channel name. YAML fragments
-in `condarc.d` are sorted by filename. Conda merge directives and advanced
+last. Later `channel_alias` values replace earlier ones. `custom_channels` merges
+by channel name, with later values winning for duplicate keys. `channels` and
+`default_channels` merge lists: later files come first, each file's order is
+preserved, and duplicates keep their first occurrence. Empty lists do not clear
+earlier entries. YAML fragments in `condarc.d` are sorted by filename. Conda merge directives and advanced
 routing features such as channel migrations raise a warning and halt native
 routing.
 

@@ -51,9 +51,11 @@ anaconda 路径 404，留着只会白等一次探测超时。
 
 ### 原生频道配置
 
-系统、用户和环境的 Conda 配置按顺序加载，`CONDARC` 优先级最高。后读到的
-`channel_alias`、`channels` 和 `default_channels` 整项覆盖，
-`custom_channels` 按频道名覆盖。支持按文件名排序的 `condarc.d` YAML。
+系统、用户和环境的 Conda 配置按顺序加载，`CONDARC` 优先级最高。
+`channel_alias` 后读覆盖，`custom_channels` 按频道名合并，重名键后读覆盖。
+`channels` 和 `default_channels` 合并列表：后读文件的条目排在前面，各文件内部
+顺序不变，重复条目只保留第一次出现的位置。空列表不清除此前的条目。
+支持按文件名排序的 `condarc.d` YAML。
 Conda 自己的合并指令和频道迁移等高级规则会提示忽略并中止使用原生源。
 
 原生配置把所选频道解析成绝对 URL，一起送入一次求解，不对内置源做探测。

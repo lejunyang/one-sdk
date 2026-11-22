@@ -63,7 +63,9 @@ osdk 读取 `CONDARC`、`~/.condarc`、`~/.config/conda/condarc` 等 Conda 配�
 `channel_alias` 为普通频道名提供基础地址，`custom_channels` 可为指定频道配置
 专用基础地址，`default_channels` 定义 `defaults` 下的频道。配置了
 `default_channels` 而未声明 `channels` 时，会用 `defaults`。工具的
-`channels` 选项优先于文件中的频道列表。
+`channels` 选项优先于文件中的频道列表。用户和环境配置中的 `channels`、
+`default_channels` 会合并，不会因后一份文件声明列表而丢掉公司频道。
+后读配置的条目优先，重复频道只使用一次。
 
 版本查询、依赖求解和包下载都使用这个配置，失败时不会尝试 osdk 的公共镜像。
 请使用匿名 HTTP(S) 地址。遇到带凭据的 URL、`custom_multichannels` 等

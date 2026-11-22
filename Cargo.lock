@@ -2921,6 +2921,7 @@ name = "osdk-cli"
 version = "0.0.15"
 dependencies = [
  "anyhow",
+ "bzip2",
  "clap",
  "clap_complete",
  "dialoguer",

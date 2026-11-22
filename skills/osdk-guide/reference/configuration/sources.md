@@ -40,7 +40,8 @@ env_force = false
   旧文件名 `config` 优先。Git、目录或需认证的替换会报错；可添加自定义源后用
   `osdk --source <id>` 显式选择。锁文件回放仍使用记录的 index。
 - `conda:<包名>` 遵循 `CONDARC`、`~/.condarc` 等配置的 `channel_alias`、
-  `default_channels`、`custom_channels` 和频道列表。原生频道只接受匿名 HTTP(S) 地址，
+  `default_channels`、`custom_channels` 和频道列表。多份配置的频道列表合并并去重，
+  后读文件优先；标量后读覆盖，字典按频道名合并。原生频道只接受匿名 HTTP(S) 地址，
   独占版本查询、求解与包下载。复杂配置或认证地址会提示并停止；可用自定义源加
   `--source <id>` 覆盖。
 - `github:owner/repo` 在设置 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN` 时只用

@@ -49,6 +49,7 @@ tempfile.workspace = true
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
 [dev-dependencies]
+bzip2 = "0.6.1"
 flate2.workspace = true
 zip.workspace = true
 tar.workspace = true

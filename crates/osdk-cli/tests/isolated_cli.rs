@@ -237,7 +237,7 @@ fn accept_fixture_connection(listener: &TcpListener, context: &str) -> TcpStream
 }
 
 #[cfg(not(windows))]
-fn conda_source_fixture(native: bool) {
+fn conda_source_fixture(native: bool, merged_field: Option<&str>) {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -264,8 +264,25 @@ download_url = "{endpoint}/fallback"
     )
     .unwrap();
     let condarc = root.join("explicit-condarc");
+    let prefix = root.join("environment");
+    if let Some(field) = merged_field {
+        std::fs::create_dir(root.join("home")).unwrap();
+        std::fs::create_dir(&prefix).unwrap();
+        std::fs::write(
+            root.join("home/.condarc"),
+            format!("{field}: [{endpoint}/private/tools, {endpoint}/private/tools]\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            prefix.join(".condarc"),
+            format!("{field}: [{endpoint}/private/deps, {endpoint}/private/deps]\n"),
+        )
+        .unwrap();
+    }
     let selected = if native {
-        std::fs::write(&condarc, format!("channel_alias: {endpoint}/private\n")).unwrap();
+        if merged_field.is_none() {
+            std::fs::write(&condarc, format!("channel_alias: {endpoint}/private\n")).unwrap();
+        }
         "private"
     } else {
         "fallback"
@@ -282,6 +299,40 @@ download_url = "{endpoint}/fallback"
         } },
     })
     .to_string();
+    let dependency_archive = {
+        let encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        for (path, content) in [
+            ("info/index.json", br#"{"name":"fixture-dep","version":"1.0.0","build":"0","build_number":0,"subdir":"noarch","depends":[]}"#.as_slice()),
+            ("info/files", b"lib/fixture-dep.txt\n".as_slice()),
+            ("lib/fixture-dep.txt", b"dependency from the higher-priority channel\n".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, content).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    };
+    let dependency_package = "fixture-dep-1.0.0-0.tar.bz2";
+    let dependency_repodata = serde_json::json!({"packages": {(dependency_package): {
+        "name": "fixture-dep", "version": "1.0.0", "build": "0", "build_number": 0,
+        "subdir": "noarch", "depends": [], "size": dependency_archive.len(),
+        "sha256": osdk_core::pipeline::verify::hash_bytes(&dependency_archive, osdk_core::pipeline::HashAlgo::Sha256),
+    }}}).to_string();
+    let mut repodata: serde_json::Value = serde_json::from_str(&repodata).unwrap();
+    if merged_field.is_some() {
+        repodata["packages"][package]["depends"] = serde_json::json!(["fixture-dep >=1"]);
+    }
+    if merged_field == Some("default_channels") {
+        // Strict priority must pick deps/1.0.0, not the newer tools/2.0.0.
+        let mut shadow: serde_json::Value = serde_json::from_str(&dependency_repodata).unwrap();
+        let mut shadow = shadow["packages"][dependency_package].take();
+        shadow["version"] = serde_json::json!("2.0.0");
+        repodata["packages"]["fixture-dep-2.0.0-0.tar.bz2"] = shadow;
+    }
+    let repodata = repodata.to_string();
     let stop = Arc::new(AtomicBool::new(false));
     let server_stop = Arc::clone(&stop);
     let server = std::thread::spawn(move || {
@@ -311,10 +362,14 @@ download_url = "{endpoint}/fallback"
             let method = line.next().unwrap();
             let path = line.next().unwrap();
             requests.push(path.to_string());
-            let (status, body): (&str, &[u8]) = if path.ends_with("/noarch/repodata.json") {
+            let (status, body): (&str, &[u8]) = if path == "/private/deps/noarch/repodata.json" {
+                ("200 OK", dependency_repodata.as_bytes())
+            } else if path.ends_with("/noarch/repodata.json") {
                 ("200 OK", repodata.as_bytes())
             } else if path.ends_with("/repodata.json") {
                 ("200 OK", br#"{"packages":{}}"#)
+            } else if path.ends_with(dependency_package) {
+                ("200 OK", &dependency_archive)
             } else if path.ends_with(package) {
                 ("200 OK", archive)
             } else {
@@ -333,7 +388,10 @@ download_url = "{endpoint}/fallback"
         requests
     });
 
-    let env = [("CONDARC", condarc.to_str().unwrap())];
+    let mut env = vec![("CONDARC", condarc.to_str().unwrap())];
+    if merged_field.is_some() {
+        env.push(("CONDA_PREFIX", prefix.to_str().unwrap()));
+    }
     let listed = run_isolated_in_with_env(root, root, &["list-remote", "conda:fixture-tool"], &env);
     let installed =
         run_isolated_in_with_env(root, root, &["install", "conda:fixture-tool@1.2.3"], &env);
@@ -350,11 +408,62 @@ download_url = "{endpoint}/fallback"
         "{}",
         String::from_utf8_lossy(&installed.stderr)
     );
-    let channel = format!("/{selected}/conda-forge/");
-    assert!(
-        requests.iter().all(|path| path.starts_with(&channel)),
-        "{requests:?}"
-    );
+    let channel = if merged_field.is_some() {
+        "/private/tools/".to_string()
+    } else {
+        format!("/{selected}/conda-forge/")
+    };
+    if merged_field.is_some() {
+        assert!(
+            requests
+                .iter()
+                .all(|path| path.starts_with("/private/tools/")
+                    || path.starts_with("/private/deps/")),
+            "{requests:?}"
+        );
+        let metadata = requests
+            .iter()
+            .filter(|path| path.ends_with("/noarch/repodata.json"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metadata.len(),
+            4,
+            "each of the lookup and install processes must query both channels once: {requests:?}"
+        );
+        assert!(
+            metadata
+                .iter()
+                .any(|path| path.as_str() == "/private/deps/noarch/repodata.json"),
+            "{requests:?}"
+        );
+        assert!(
+            metadata
+                .iter()
+                .any(|path| path.as_str() == "/private/tools/noarch/repodata.json"),
+            "{requests:?}"
+        );
+        // Query downloads are concurrent; selected package origin proves priority.
+        assert!(
+            !requests
+                .iter()
+                .any(|path| path.contains("fixture-dep-2.0.0")),
+            "{requests:?}"
+        );
+        assert!(
+            requests.contains(&"/private/deps/noarch/fixture-dep-1.0.0-0.tar.bz2".to_string()),
+            "{requests:?}"
+        );
+        assert!(walkdir::WalkDir::new(root.join("installs"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_type().is_file()
+                && entry.path().ends_with("lib/fixture-dep.txt")));
+    } else {
+        assert!(
+            requests.iter().all(|path| path.starts_with(&channel)),
+            "{requests:?}"
+        );
+    }
     assert!(
         requests.contains(&format!("{channel}noarch/repodata.json")),
         "{requests:?}"
@@ -372,13 +481,25 @@ download_url = "{endpoint}/fallback"
 #[cfg(not(windows))]
 #[test]
 fn native_condarc_routes_version_queries_and_verified_install() {
-    conda_source_fixture(true);
+    conda_source_fixture(true, None);
 }
 
 #[cfg(not(windows))]
 #[test]
 fn absent_condarc_preserves_osdk_conda_sources() {
-    conda_source_fixture(false);
+    conda_source_fixture(false, None);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn native_condarc_merges_home_and_environment_channels_for_the_full_closure() {
+    conda_source_fixture(true, Some("channels"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn native_condarc_merges_default_channels_and_removes_duplicates() {
+    conda_source_fixture(true, Some("default_channels"));
 }
 
 #[cfg(not(windows))]
