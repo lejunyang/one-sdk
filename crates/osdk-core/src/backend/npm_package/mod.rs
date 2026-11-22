@@ -3348,7 +3348,56 @@ scope = "project"
     async fn lock_only_resolution_retries_each_registry_without_running_scripts() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temporary = tempfile::tempdir().unwrap();
+        const CHILD: &str = "OSDK_NPM_LOCK_RETRY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let state = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .env_clear()
+                .args([
+                    "--exact",
+                    "backend::npm_package::tests::lock_only_resolution_retries_each_registry_without_running_scripts",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("PATH", "")
+                .current_dir(state.path());
+            for (key, directory) in [
+                ("HOME", "home"),
+                ("USERPROFILE", "home"),
+                ("CARGO_HOME", "cargo"),
+                ("RUSTUP_HOME", "rustup"),
+                ("CARGO_TARGET_DIR", "target"),
+                ("OSDK_DATA_DIR", "data"),
+                ("OSDK_CACHE_DIR", "cache"),
+                ("OSDK_CONFIG_DIR", "config"),
+                ("OSDK_STORE_DIR", "store"),
+                ("OSDK_INSTALL_DIR", "installs"),
+                ("TMPDIR", "tmp"),
+            ] {
+                let path = state.path().join(directory);
+                std::fs::create_dir_all(&path).unwrap();
+                child.env(key, path);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "isolated npm retry test failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let ancestor = tempfile::tempdir().unwrap();
+        // Reading this decoy would replace both fixture registries with one.
+        std::fs::write(
+            ancestor.path().join(".npmrc"),
+            "registry=https://ancestor.example/\n",
+        )
+        .unwrap();
+        let temporary = tempfile::tempdir_in(ancestor.path()).unwrap();
+        crate::package_registry::confine_ancestor_scan(temporary.path());
         let mut ctx = offline_test_ctx(temporary.path());
         ctx.config.settings.offline = false;
         ctx.config.sources.selection = crate::source::Selection::Ordered;
