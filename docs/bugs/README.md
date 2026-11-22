@@ -49,6 +49,7 @@
 
 | 编号 | 缺陷 | 严重度 | 状态 |
 | --- | --- | --- | --- |
+| [011](./011-global-npm-shim-sync-while-a-shim-runs.zh-CN.md) | Windows 上有任一 shim 在运行时，`use -g npm:` 落盘 shim 报 os error 32，整次安装回滚 | 高 | 已修复 |
 | [010](./010-android-preview-and-prefix-resolution.zh-CN.md) | Android 预览包发布在稳定通道，`latest` 装到 2.4 GB 预览镜像；`android-36` 被前缀匹配吃成 `android-36.1` | 高 | 已修复 |
 | [009](./009-bare-operand-ignores-project-pin.zh-CN.md) | 裸 `tool` 操作数忽略项目 pin 按 latest 解析，`exec -t java` 注入错版本 JDK | 高 | 已修复 |
 | [008](./008-shims-include-is-a-global-allowlist.zh-CN.md) | `shims.include` 是全局白名单，按 006 的告警取回一个命令会禁掉其余所有工具（646 -> 0） | 严重 | 待修复 |

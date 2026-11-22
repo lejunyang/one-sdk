@@ -94,7 +94,16 @@ pub(crate) fn sync_shim_publication(
 ) -> Result<()> {
     let shims = dirs.shims();
     for name in affected_bin_names {
-        sync_file_if_present(&shims.join(name))?;
+        let launcher = shims.join(name);
+        // On Windows the extension-less shim is usually a hard link of
+        // osdk-shim.exe: nothing of its own to flush, and opening it for writing
+        // fails while any shim runs (a long-lived tool started through one).
+        #[cfg(windows)]
+        if osdk_core::shim::is_launcher_link(dirs, &launcher) {
+            sync_file_if_present(&shims.join(format!("{name}.cmd")))?;
+            continue;
+        }
+        sync_file_if_present(&launcher)?;
         #[cfg(windows)]
         sync_file_if_present(&shims.join(format!("{name}.cmd")))?;
     }

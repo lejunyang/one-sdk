@@ -857,6 +857,44 @@ mod tests {
         sync_shim_publication(&dirs, &["created".into(), "removed".into()]).unwrap();
     }
 
+    /// A global npm install publishes new shims while another shim is running
+    /// (a long-lived tool started through one). On Windows every shim is a hard
+    /// link of the same launcher, so none of them can be opened for writing then.
+    #[cfg(windows)]
+    #[test]
+    fn shim_publication_sync_skips_launcher_links_while_a_shim_runs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = test_dirs(temporary.path());
+        let shims = dirs.shims();
+        std::fs::create_dir_all(&shims).unwrap();
+        let bin = dirs.data.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // Any small program stands in for osdk-shim.exe; it keeps running for the test.
+        let system = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "C:\\Windows".into());
+        let launcher = bin.join("osdk-shim.exe");
+        std::fs::copy(system.join("System32").join("ping.exe"), &launcher).unwrap();
+        let mut running = std::process::Command::new(&launcher)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::hard_link(&launcher, shims.join("tool")).unwrap();
+        std::fs::write(shims.join("tool.cmd"), b"@echo off\r\n").unwrap();
+
+        // The condition this guards against: a running image refuses write access under any of its names.
+        assert!(std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(shims.join("tool"))
+            .is_err());
+        let result = sync_shim_publication(&dirs, &["tool".into()]);
+        let _ = running.kill();
+        let _ = running.wait();
+        result.unwrap();
+    }
+
     #[test]
     fn shim_sync_failure_does_not_advance_activation_marker() {
         let temporary = tempfile::tempdir().unwrap();

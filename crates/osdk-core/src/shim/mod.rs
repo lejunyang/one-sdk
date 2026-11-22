@@ -1231,6 +1231,20 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Whether `path` is the launcher binary itself under another name: a Windows
+/// extension-less shim hard-linked to `osdk-shim.exe` (`write_windows_posix_launcher`).
+///
+/// Such a shim has no bytes of its own to make durable: its contents are the
+/// launcher already on disk, and the new directory entry is file-system
+/// metadata that flushing the file's data does not cover. Flushing it would
+/// also need write access, which Windows refuses for as long as any shim (any
+/// name of the same file) is running. A byte copy is a file of its own and is
+/// not covered here.
+pub fn is_launcher_link(dirs: &Dirs, path: &Path) -> bool {
+    find_shim_binary(dirs)
+        .is_some_and(|launcher| same_file::is_same_file(path, launcher).unwrap_or(false))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
