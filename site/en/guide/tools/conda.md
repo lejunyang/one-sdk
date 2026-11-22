@@ -65,6 +65,21 @@ Channel names must be plain names (`conda-forge`, `nvidia`, `bioconda`). URLs,
 path traversal, and names containing whitespace are rejected, because the
 channel name becomes part of a download URL.
 
+## Use your Conda channels
+
+osdk reads Conda configuration from `CONDARC`, `~/.condarc`,
+`~/.config/conda/condarc`, and other Conda locations. `channel_alias` supplies
+the base URL for a named channel, `custom_channels` can override the base per
+channel, and `default_channels` defines the channels in `defaults`. When
+`default_channels` is set and `channels` is omitted, osdk uses `defaults`.
+The tool's `channels` option takes precedence over the file's channel list.
+
+Version lookup, dependency solving, and package downloads use these channels
+exclusively. Use anonymous HTTP(S) URLs. URLs with credentials and unsupported
+settings such as `custom_multichannels` stop the operation with a warning.
+To override, add a custom source with `osdk source add conda:<package>` and
+select it with `--source <id>`.
+
 ## Mirrors
 
 osdk ships anaconda.org upstream plus three mirrors (TUNA, BFSU, NJU), managed

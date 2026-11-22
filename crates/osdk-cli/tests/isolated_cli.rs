@@ -236,6 +236,151 @@ fn accept_fixture_connection(listener: &TcpListener, context: &str) -> TcpStream
     }
 }
 
+#[cfg(not(windows))]
+fn conda_source_fixture(native: bool) {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    std::fs::create_dir(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        format!(
+            r#"
+[sources."conda:fixture-tool"]
+disable = ["anaconda", "tuna", "bfsu", "nju"]
+[[sources."conda:fixture-tool".custom]]
+id = "fallback"
+kind = "custom"
+download_url = "{endpoint}/fallback"
+"#
+        ),
+    )
+    .unwrap();
+    let condarc = root.join("explicit-condarc");
+    let selected = if native {
+        std::fs::write(&condarc, format!("channel_alias: {endpoint}/private\n")).unwrap();
+        "private"
+    } else {
+        "fallback"
+    };
+    let archive = include_bytes!("fixtures/conda-local-source.tar.bz2");
+    let checksum =
+        osdk_core::pipeline::verify::hash_bytes(archive, osdk_core::pipeline::HashAlgo::Sha256);
+    let package = "fixture-tool-1.2.3-0.tar.bz2";
+    let repodata = serde_json::json!({
+        "info": { "subdir": "noarch" },
+        "packages": { (package): {
+            "name": "fixture-tool", "version": "1.2.3", "build": "0", "build_number": 0,
+            "subdir": "noarch", "depends": [], "sha256": checksum, "size": archive.len(),
+        } },
+    })
+    .to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        while !server_stop.load(Ordering::Relaxed) {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(error) => panic!("{error}"),
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(FIXTURE_SERVER_TIMEOUT))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(!request.to_ascii_lowercase().contains("\r\nauthorization:"));
+            let mut line = request.split_whitespace();
+            let method = line.next().unwrap();
+            let path = line.next().unwrap();
+            requests.push(path.to_string());
+            let (status, body): (&str, &[u8]) = if path.ends_with("/noarch/repodata.json") {
+                ("200 OK", repodata.as_bytes())
+            } else if path.ends_with("/repodata.json") {
+                ("200 OK", br#"{"packages":{}}"#)
+            } else if path.ends_with(package) {
+                ("200 OK", archive)
+            } else {
+                ("404 Not Found", b"")
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            if method != "HEAD" {
+                stream.write_all(body).unwrap();
+            }
+        }
+        requests
+    });
+
+    let env = [("CONDARC", condarc.to_str().unwrap())];
+    let listed = run_isolated_in_with_env(root, root, &["list-remote", "conda:fixture-tool"], &env);
+    let installed =
+        run_isolated_in_with_env(root, root, &["install", "conda:fixture-tool@1.2.3"], &env);
+    stop.store(true, Ordering::Relaxed);
+    let requests = server.join().unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("1.2.3"));
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let channel = format!("/{selected}/conda-forge/");
+    assert!(
+        requests.iter().all(|path| path.starts_with(&channel)),
+        "{requests:?}"
+    );
+    assert!(
+        requests.contains(&format!("{channel}noarch/repodata.json")),
+        "{requests:?}"
+    );
+    assert!(
+        requests.contains(&format!("{channel}noarch/{package}")),
+        "{requests:?}"
+    );
+    assert!(walkdir::WalkDir::new(root.join("installs"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_type().is_file() && entry.path().ends_with("bin/fixture-tool")));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn native_condarc_routes_version_queries_and_verified_install() {
+    conda_source_fixture(true);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn absent_condarc_preserves_osdk_conda_sources() {
+    conda_source_fixture(false);
+}
+
 #[test]
 fn config_list_uses_only_isolated_directories() {
     let temp = tempfile::tempdir().unwrap();

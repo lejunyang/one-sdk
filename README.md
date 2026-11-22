@@ -603,6 +603,11 @@ configured. Set an osdk source explicitly if that registry requires login.
 
 Guide: [Cargo developer tools](site/en/guide/tools/cargo.md)
 
+## Scenario: install from a company Conda channel
+
+If your Conda configuration declares company channels, `osdk install conda:<package>`
+uses those channels for lookup and installation. See [Conda tools](site/en/guide/tools/conda.md).
+
 ## Scenario: install a Go command package
 
 Keep the Go runtime and Go command namespaces separate, then install a command

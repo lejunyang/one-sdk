@@ -27,6 +27,11 @@ use crate::source::Source;
 use crate::tool::{InstallIdentity, InstallScope};
 use crate::version::{ToolVersion, VersionInfo};
 
+#[cfg(feature = "install")]
+mod channel_config;
+#[cfg(feature = "install")]
+use channel_config::NativeChannels;
+
 /// The channel used when a definition does not name one.
 pub const DEFAULT_CHANNEL: &str = "conda-forge";
 
@@ -732,6 +737,12 @@ pub struct CondaBackend {
     package: String,
 }
 
+#[cfg(feature = "install")]
+struct ChannelRoutes {
+    metadata: Vec<(Option<String>, Vec<String>)>,
+    artifact_mirrors: Vec<Source>,
+}
+
 impl CondaBackend {
     pub fn from_id(id: &str) -> Option<Self> {
         let id = crate::tool::canonical_dynamic_id(id).ok()?;
@@ -809,46 +820,73 @@ impl CondaBackend {
         bases
     }
 
-    /// metadata from.
-    ///
-    /// Pointing the alias at one base is what makes mirroring work for every
-    /// channel at once: plain names such as `conda-forge` and `nvidia` resolve
-    /// beneath it, so a single choice covers a multi-channel solve without
-    /// rewriting each channel individually.
-    ///
-    /// Source order here is *not* the generic latency ranking. The probe
-    /// measures round-trip time to one small file, which would pick a nearby
-    /// mirror and then pay 445 MB of whole-subdir `repodata.json` for it; the
-    /// sharded index upstream costs 1.6 MB for the same answer. So an
-    /// explicitly pinned or user-configured source is honoured, and otherwise
-    /// the sharded source is preferred, with the ranked list kept as failover.
-    ///
-    /// The gateway caches under osdk's own cache dir rather than `~/.conda`,
-    /// so this never disturbs a conda installation the user also runs.
     #[cfg(feature = "install")]
-    fn gateway_for_base(
+    fn source_policy(
+        &self,
         ctx: &Ctx,
-        base: &str,
-    ) -> Result<(
-        rattler_repodata_gateway::Gateway,
-        rattler_conda_types::ChannelConfig,
-    )> {
-        use rattler_conda_types::ChannelConfig;
-        use rattler_repodata_gateway::Gateway;
+        candidates: Vec<Source>,
+    ) -> Result<(Vec<Source>, Option<NativeChannels>)> {
+        let native = NativeChannels::load();
+        if native.as_ref().is_ok_and(Option::is_none) {
+            return Ok((candidates, None));
+        }
+        let pin = ctx
+            .config
+            .tool_sources(self.id())
+            .and_then(|cfg| cfg.pin.as_deref());
+        if let Some(custom) = candidates.iter().find(|source| {
+            Some(source.id.as_str()) == pin && source.kind == crate::source::SourceKind::Custom
+        }) {
+            return Ok((vec![custom.clone()], None));
+        }
+        Ok((candidates, native?))
+    }
 
-        let alias = url::Url::parse(&format!("{base}/")).map_err(|error| {
-            Error::config(format!("invalid conda channel base `{base}`: {error}"))
-        })?;
+    #[cfg(feature = "install")]
+    async fn channel_routes(
+        &self,
+        ctx: &Ctx,
+        options: &BTreeMap<String, String>,
+    ) -> Result<ChannelRoutes> {
+        let candidates = crate::source::select::effective_sources(ctx, self);
+        let (candidates, native) = self.source_policy(ctx, candidates)?;
+        if let Some(native) = native {
+            let explicit = options
+                .get("channels")
+                .map(|channels| parse_channels(channels))
+                .transpose()?;
+            let urls = native.urls(explicit.as_deref())?;
+            return Ok(ChannelRoutes {
+                metadata: vec![(None, urls.into_iter().map(String::from).collect())],
+                artifact_mirrors: Vec::new(),
+            });
+        }
 
-        let channel_config = ChannelConfig {
-            channel_alias: alias,
-            root_dir: ctx.dirs.cache.join("conda"),
-        };
-        let gateway = Gateway::builder()
+        let sources =
+            crate::source::select::ranked_source_candidates(ctx, self, candidates).await?;
+        let names = self
+            .channels(options)?
+            .into_iter()
+            .map(|channel| channel.name)
+            .collect::<Vec<_>>();
+        let metadata = self
+            .metadata_bases(ctx, &sources)
+            .into_iter()
+            .map(|base| (Some(base), names.clone()))
+            .collect();
+        Ok(ChannelRoutes {
+            metadata,
+            artifact_mirrors: sources,
+        })
+    }
+
+    #[cfg(feature = "install")]
+    fn gateway(ctx: &Ctx) -> rattler_repodata_gateway::Gateway {
+        rattler_repodata_gateway::Gateway::builder()
             .with_cache_dir(ctx.dirs.cache.join("conda").join("repodata"))
+            .with_client(ctx.client.clone())
             .with_channel_config(rattler_repodata_gateway::ChannelConfig::default())
-            .finish();
-        Ok((gateway, channel_config))
+            .finish()
     }
 
     #[cfg(feature = "install")]
@@ -890,10 +928,10 @@ impl CondaBackend {
     async fn materialize(
         &self,
         ctx: &Ctx,
+        sources: &[Source],
         records: &[rattler_conda_types::RepoDataRecord],
         prefix: &std::path::Path,
     ) -> Result<()> {
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let scratch = prefix.join(".osdk-download");
         std::fs::create_dir_all(&scratch).map_err(|error| Error::io(&scratch, error))?;
         // Ownership of the requested package's own files, captured mid-loop.
@@ -920,7 +958,7 @@ impl CondaBackend {
                      install unverified bytes"
                 ))
             })?;
-            let urls = Self::artifact_urls(&sources, &record.url);
+            let urls = Self::artifact_urls(sources, &record.url);
             download_verified_conda_artifact(ctx, &urls, &archive, file_name, &hex::encode(digest))
                 .await?;
 
@@ -976,6 +1014,7 @@ impl CondaBackend {
         &self,
         ctx: &Ctx,
         tv: &ToolVersion,
+        routes: &ChannelRoutes,
     ) -> Result<Vec<rattler_conda_types::RepoDataRecord>> {
         use rattler_conda_types::{MatchSpec, ParseStrictness};
         use rattler_solve::{resolvo::Solver, SolverImpl as _, SolverTask};
@@ -1015,13 +1054,11 @@ impl CondaBackend {
         .map(rattler_conda_types::GenericVirtualPackage::from)
         .collect::<Vec<_>>();
 
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let bases = self.metadata_bases(ctx, &sources);
+        let gateway = Self::gateway(ctx);
         let mut last_error = None;
-        for (index, base) in bases.iter().enumerate() {
+        for (index, (base, channels)) in routes.metadata.iter().enumerate() {
             let result = async {
-                let (gateway, channel_config) = Self::gateway_for_base(ctx, base)?;
-                let channels = self.resolved_channels(&tv.options, &channel_config)?;
+                let channels = self.resolved_channels(ctx, base.as_deref(), channels)?;
                 // Recursive: the whole closure is needed, not just the root
                 // match. Every spec has to be queried, not only the main one.
                 let available = gateway
@@ -1051,9 +1088,9 @@ impl CondaBackend {
                 Ok(records) => return Ok(records),
                 Err(error) => {
                     tracing::warn!(
-                        source = %base,
+                        source = %base.as_deref().unwrap_or("condarc"),
                         attempt = index + 1,
-                        total = bases.len(),
+                        total = routes.metadata.len(),
                         error = %error,
                         "conda metadata source failed; trying the next source"
                     );
@@ -1063,7 +1100,7 @@ impl CondaBackend {
         }
         Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
             tool: self.id.clone(),
-            tried: bases.len(),
+            tried: routes.metadata.len(),
         }))
     }
 
@@ -1071,19 +1108,26 @@ impl CondaBackend {
     #[cfg(feature = "install")]
     fn resolved_channels(
         &self,
-        options: &BTreeMap<String, String>,
-        channel_config: &rattler_conda_types::ChannelConfig,
+        ctx: &Ctx,
+        base: Option<&str>,
+        channels: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Vec<rattler_conda_types::Channel>> {
-        use rattler_conda_types::Channel;
+        use rattler_conda_types::{Channel, ChannelConfig};
 
-        self.channels(options)?
-            .iter()
+        let base = base.unwrap_or(UPSTREAM_BASE);
+        let channel_alias = url::Url::parse(&format!("{base}/")).map_err(|error| {
+            Error::config(format!("invalid conda channel base `{base}`: {error}"))
+        })?;
+        let config = ChannelConfig {
+            channel_alias,
+            root_dir: ctx.dirs.cache.join("conda"),
+        };
+        channels
+            .into_iter()
             .map(|channel| {
-                Channel::from_str(channel.name(), channel_config).map_err(|error| {
-                    Error::config(format!(
-                        "invalid conda channel `{}`: {error}",
-                        channel.name()
-                    ))
+                let channel = channel.as_ref();
+                Channel::from_str(channel, &config).map_err(|error| {
+                    Error::config(format!("invalid conda channel `{channel}`: {error}"))
                 })
             })
             .collect()
@@ -1108,6 +1152,74 @@ impl CondaBackend {
             Error::other(format!("unsupported conda subdir `{subdir}`: {error}"))
         })?;
         Ok(vec![native, rattler_conda_types::Platform::NoArch])
+    }
+
+    #[cfg(feature = "install")]
+    async fn versions_from_channels(
+        &self,
+        ctx: &Ctx,
+        options: &BTreeMap<String, String>,
+    ) -> Result<Vec<VersionInfo>> {
+        use rattler_conda_types::{MatchSpec, PackageName, ParseStrictness};
+        use std::str::FromStr as _;
+
+        let platforms = Self::query_platforms(ctx)?;
+        let name = PackageName::from_str(&self.package)
+            .map_err(|error| Error::config(format!("invalid conda package name: {error}")))?;
+        let spec = MatchSpec::from_str(name.as_normalized(), ParseStrictness::Lenient)
+            .map_err(|error| Error::config(format!("invalid conda match spec: {error}")))?;
+        let routes = self.channel_routes(ctx, options).await?;
+        let gateway = Self::gateway(ctx);
+        let mut last_error = None;
+        for (index, (base, channels)) in routes.metadata.iter().enumerate() {
+            // Listing asks only for records for the root package.
+            let result = async {
+                let channels = self.resolved_channels(ctx, base.as_deref(), channels)?;
+                gateway
+                    .query(channels, platforms.clone(), [spec.clone()])
+                    .recursive(false)
+                    .await
+                    .map_err(|error| Error::other(format!("conda repodata query failed: {error}")))
+            }
+            .await;
+            let label = base.as_deref().unwrap_or("condarc");
+            match result {
+                Ok(records) => {
+                    let mut versions = std::collections::BTreeSet::new();
+                    for repo in records.iter() {
+                        for record in repo.iter() {
+                            versions.insert(record.package_record.version.version().clone());
+                        }
+                    }
+                    if versions.is_empty() {
+                        last_error = Some(Error::other(format!(
+                            "no conda package `{}` found at {label}",
+                            self.package
+                        )));
+                        continue;
+                    }
+                    return Ok(versions
+                        .into_iter()
+                        .map(|version| VersionInfo {
+                            stable: is_stable_version(&version),
+                            version: version.to_string(),
+                            lts: None,
+                        })
+                        .collect());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        source = %label, attempt = index + 1, total = routes.metadata.len(), error = %error,
+                        "conda metadata source failed"
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+            tool: self.id.clone(),
+            tried: routes.metadata.len(),
+        }))
     }
 }
 
@@ -1178,6 +1290,9 @@ impl Backend for CondaBackend {
     }
 
     fn probe_url(&self, ctx: &Ctx, source: &Source) -> Option<String> {
+        if source.kind == crate::source::SourceKind::Mirror && source.id.starts_with("condarc-") {
+            return source.index_url.clone();
+        }
         // `noarch/repodata.json.zst` exists on every mirror that carries the
         // channel at all, so a probe that fetches it measures the path an
         // install actually uses rather than the host's front page.
@@ -1189,84 +1304,62 @@ impl Backend for CondaBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        use rattler_conda_types::{MatchSpec, PackageName, ParseStrictness};
-        use std::str::FromStr as _;
-
-        let platforms = Self::query_platforms(ctx)?;
-
-        let name = PackageName::from_str(&self.package)
-            .map_err(|error| Error::config(format!("invalid conda package name: {error}")))?;
-        let spec = MatchSpec::from_str(name.as_normalized(), ParseStrictness::Lenient)
-            .map_err(|error| Error::config(format!("invalid conda match spec: {error}")))?;
-
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let bases = self.metadata_bases(ctx, &sources);
-        let mut last_error = None;
-        for (index, base) in bases.iter().enumerate() {
-            let result = async {
-                let (gateway, channel_config) = Self::gateway_for_base(ctx, base)?;
-                let channels = self.resolved_channels(&BTreeMap::new(), &channel_config)?;
-                // Listing deliberately does not recurse: the user asked which
-                // versions exist, not what their dependencies would drag in.
-                gateway
-                    .query(channels, platforms.clone(), [spec.clone()])
-                    .recursive(false)
-                    .await
-                    .map_err(|error| Error::other(format!("conda repodata query failed: {error}")))
-            }
-            .await;
-            match result {
-                Ok(records) => {
-                    // Sorting and prerelease detection use conda's own ordering.
-                    let mut versions: Vec<rattler_conda_types::Version> = Vec::new();
-                    for repo in records.iter() {
-                        for record in repo.iter() {
-                            let version = record.package_record.version.version().clone();
-                            if !versions.contains(&version) {
-                                versions.push(version);
-                            }
-                        }
-                    }
-                    if versions.is_empty() {
-                        last_error = Some(Error::other(format!(
-                            "no conda package `{}` found at {base}",
-                            self.package
-                        )));
-                        continue;
-                    }
-                    versions.sort();
-                    return Ok(versions
-                        .into_iter()
-                        .map(|version| VersionInfo {
-                            stable: is_stable_version(&version),
-                            version: version.to_string(),
-                            lts: None,
-                        })
-                        .collect());
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        source = %base,
-                        attempt = index + 1,
-                        total = bases.len(),
-                        error = %error,
-                        "conda metadata source failed; trying the next source"
-                    );
-                    last_error = Some(error);
-                }
-            }
+    fn restrict_sources(&self, ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
+        let (sources, native) = self.source_policy(ctx, sources)?;
+        if let Some(native) = native {
+            return Ok(native
+                .urls(None)?
+                .into_iter()
+                .enumerate()
+                .map(|(index, url)| {
+                    let probe = crate::http::join_url(url.as_str(), "noarch/repodata.json");
+                    Source::mirror(&format!("condarc-{}", index + 1), url.as_str(), 0)
+                        .with_index(&probe)
+                })
+                .collect());
         }
-        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
-            tool: self.id.clone(),
-            tried: bases.len(),
-        }))
+        Ok(sources)
+    }
+
+    #[cfg(feature = "install")]
+    async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
+        self.versions_from_channels(ctx, &BTreeMap::new()).await
+    }
+
+    #[cfg(feature = "install")]
+    async fn resolve_version(
+        &self,
+        ctx: &Ctx,
+        req: &crate::version::ToolRequest,
+    ) -> Result<ToolVersion> {
+        use crate::version::{select_version, VersionSpec};
+        let version = match &req.spec {
+            VersionSpec::Exact(version) => version.clone(),
+            spec => {
+                let versions = self.versions_from_channels(ctx, &req.options).await?;
+                select_version(spec, &versions)
+                    .map(|chosen| chosen.version.clone())
+                    .ok_or_else(|| Error::VersionResolve {
+                        tool: self.id.clone(),
+                        spec: spec.to_string(),
+                        hint: Some(crate::version::no_match_hint(
+                            spec,
+                            &versions,
+                            crate::config::PrereleasePolicy::Allow,
+                        )),
+                    })?
+            }
+        };
+        let mut resolved = ToolVersion::new(self.id(), version);
+        resolved.options = req.options.clone();
+        Ok(resolved)
     }
 
     #[cfg(feature = "install")]
     async fn install_inner(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ctx.ctx;
-        let records = self.solve(ctx, tv).await?;
+        let routes = self.channel_routes(ctx, &tv.options).await?;
+        let records = self.solve(ctx, tv, &routes).await?;
 
         // The install root is fingerprinted by the solved closure, so two
         // different builds of the same version coexist instead of clobbering
@@ -1287,7 +1380,9 @@ impl Backend for CondaBackend {
         }
         std::fs::create_dir_all(&staging).map_err(|error| Error::io(&staging, error))?;
 
-        let result = self.materialize(ctx, &records, &staging).await;
+        let result = self
+            .materialize(ctx, &routes.artifact_mirrors, &records, &staging)
+            .await;
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&staging);
             return result;

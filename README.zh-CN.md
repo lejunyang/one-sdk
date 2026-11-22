@@ -529,6 +529,11 @@ revision 记录为 `immutable-revision`，Git HEAD/tag/branch 则记录为 `floa
 
 指南：[Cargo 开发工具](site/guide/tools/cargo.md)
 
+## 场景：从公司 Conda 频道安装
+
+在 Conda 配置里指定公司频道后，`osdk install conda:<包名>` 会用这些频道查版本和安装。
+详见 [Conda 工具](site/guide/tools/conda.md)。
+
 ## 场景：安装 Go command package
 
 区分 Go runtime 与 Go command 命名空间，再使用精确的受管 Go toolchain 安装命令：

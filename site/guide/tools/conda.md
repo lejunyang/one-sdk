@@ -57,6 +57,19 @@ prefix 并存，互不覆盖。
 频道名只接受普通名字（`conda-forge`、`nvidia`、`bioconda`）。URL、路径穿越和
 带空格的名字会被拒绝，因为频道名会成为下载 URL 的一部分。
 
+## 使用 Conda 自定义频道
+
+osdk 读取 `CONDARC`、`~/.condarc`、`~/.config/conda/condarc` 等 Conda 配置。
+`channel_alias` 为普通频道名提供基础地址，`custom_channels` 可为指定频道配置
+专用基础地址，`default_channels` 定义 `defaults` 下的频道。配置了
+`default_channels` 而未声明 `channels` 时，会用 `defaults`。工具的
+`channels` 选项优先于文件中的频道列表。
+
+版本查询、依赖求解和包下载都使用这个配置，失败时不会尝试 osdk 的公共镜像。
+请使用匿名 HTTP(S) 地址。遇到带凭据的 URL、`custom_multichannels` 等
+不支持的配置时，osdk 会提示并停止。也可以用 `osdk source add conda:<包名>`
+添加自定义源，再用 `--source <id>` 显式选择它。
+
 ## 镜像与加速
 
 osdk 内置 anaconda.org 上游和三个国内镜像（TUNA、BFSU、NJU），用常规的

@@ -62,6 +62,20 @@ SJTU is deliberately excluded: `mirror.sjtu.edu.cn` refuses connections and
 `mirrors.sjtug.sjtu.edu.cn` 404s for anaconda paths, so listing it would only
 spend a probe timeout before failing over.
 
+### Native channel configuration
+
+Conda's system, user, and environment files are loaded in order, with `CONDARC`
+last. Later `channel_alias`, `channels`, and `default_channels` values replace
+earlier ones. `custom_channels` is overridden by channel name. YAML fragments
+in `condarc.d` are sorted by filename. Conda merge directives and advanced
+routing features such as channel migrations raise a warning and halt native
+routing.
+
+Resolved native channel URLs go into a single solve, bypassing built-in source
+probes. Downloads use the URLs from that solve without mirror rewriting. With
+no native declaration, shard-aware metadata fallback and ranked artifact
+mirrors still apply.
+
 ## Install identity when a prefix is N packages
 
 The dynamic install contract is written around one downloaded artifact and wants

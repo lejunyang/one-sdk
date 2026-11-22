@@ -49,6 +49,17 @@ rattler 会回落到整个 subdir 的 `repodata.json`（win-64 是 268 MB，zst 
 SJTU 被刻意排除：`mirror.sjtu.edu.cn` 拒绝连接，`mirrors.sjtug.sjtu.edu.cn` 对
 anaconda 路径 404，留着只会白等一次探测超时。
 
+### 原生频道配置
+
+系统、用户和环境的 Conda 配置按顺序加载，`CONDARC` 优先级最高。后读到的
+`channel_alias`、`channels` 和 `default_channels` 整项覆盖，
+`custom_channels` 按频道名覆盖。支持按文件名排序的 `condarc.d` YAML。
+Conda 自己的合并指令和频道迁移等高级规则会提示忽略并中止使用原生源。
+
+原生配置把所选频道解析成绝对 URL，一起送入一次求解，不对内置源做探测。
+归档下载沿用这次求解得到的 URL，省略跨镜像重映射。没有原生配置时，
+repodata 仍按原来的分片优先级回退，归档仍按原先的源顺序下载。
+
 ## 安装身份：一个 prefix 由 N 个包构成
 
 动态安装契约是围绕"一个下载的制品"设计的，要求 `artifact-file` 与

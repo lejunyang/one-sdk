@@ -39,6 +39,10 @@ env_force = false
   crates.io 替换源。匿名 sparse HTTPS 源独占版本查询和安装，不导入登录凭据。
   旧文件名 `config` 优先。Git、目录或需认证的替换会报错；可添加自定义源后用
   `osdk --source <id>` 显式选择。锁文件回放仍使用记录的 index。
+- `conda:<包名>` 遵循 `CONDARC`、`~/.condarc` 等配置的 `channel_alias`、
+  `default_channels`、`custom_channels` 和频道列表。原生频道只接受匿名 HTTP(S) 地址，
+  独占版本查询、求解与包下载。复杂配置或认证地址会提示并停止；可用自定义源加
+  `--source <id>` 覆盖。
 - `forward_credentials` 只对明确允许的自定义端点转发 provider 凭据。
 - 特殊 key：`self` 管 osdk 自升级，`go-modules` 管 `GOPROXY`。
 
