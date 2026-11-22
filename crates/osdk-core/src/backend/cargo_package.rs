@@ -1891,6 +1891,7 @@ mod tests {
         calls: Arc<Mutex<Vec<CommandSpec>>>,
         statuses: Arc<Mutex<Vec<i32>>>,
         forge_resolution: bool,
+        expected_native_index: Option<String>,
     }
 
     impl FixtureRunner {
@@ -1899,6 +1900,7 @@ mod tests {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 statuses: Arc::new(Mutex::new(statuses.into_iter().collect())),
                 forge_resolution: false,
+                expected_native_index: None,
             }
         }
 
@@ -1958,6 +1960,28 @@ mod tests {
         fn run_captured(&self, command: &CommandSpec, _limits: CaptureLimits) -> CommandOutcome {
             self.calls.lock().unwrap().push(command.clone());
             let stage = command.working_directory().unwrap();
+            if let Some(index) = &self.expected_native_index {
+                assert!(command.environment_is_cleared());
+                let env = command.environment();
+                let cargo_home =
+                    PathBuf::from(env.get(std::ffi::OsStr::new("CARGO_HOME")).unwrap());
+                assert_ne!(
+                    cargo_home,
+                    PathBuf::from(std::env::var_os("CARGO_HOME").unwrap())
+                );
+                let config = std::fs::read_to_string(cargo_home.join("config.toml")).unwrap();
+                assert!(config.contains(index), "{config}");
+                assert!(
+                    config.contains("replace-with = \"osdk-mirror\""),
+                    "{config}"
+                );
+                assert!(!cargo_home.join("credentials.toml").exists());
+                assert!(!cargo_home.join("credentials").exists());
+                assert!(!env
+                    .keys()
+                    .any(|key| key.to_string_lossy().contains("TOKEN")));
+                assert!(command.arguments().iter().any(|arg| arg == "install"));
+            }
             std::fs::create_dir_all(stage.join("bin")).unwrap();
             let code = self.statuses.lock().unwrap().remove(0);
             if code == 0 {
@@ -2050,16 +2074,85 @@ mod tests {
         assert!(config.contains("registry = \"sparse+https://mirror.example.test/index/\""));
     }
 
+    fn run_native_cargo_test_child(test: &str, marker: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cargo_home = temp.path().join("user-cargo");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&cargo_home).unwrap();
+        // A decoy proves CARGO_HOME wins over the default ~/.cargo location.
+        std::fs::create_dir(home.join(".cargo")).unwrap();
+        std::fs::write(home.join(".cargo/config.toml"),
+            "[source.crates-io]\nreplace-with='decoy'\n[source.decoy]\ngit='https://decoy.invalid/index'\n"
+        ).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .env_clear()
+            .args([
+                "--exact",
+                &format!("backend::cargo_package::tests::{test}"),
+                "--nocapture",
+            ])
+            .current_dir(temp.path())
+            .env(marker, "1")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("CARGO_HOME", &cargo_home)
+            .env("RUSTUP_HOME", temp.path().join("rustup"))
+            .env("CARGO_TARGET_DIR", temp.path().join("build"))
+            .env("TMPDIR", temp.path())
+            .env("TEMP", temp.path())
+            .env("TMP", temp.path())
+            .env("PATH", "")
+            .env("CARGO_REGISTRIES_CORP_TOKEN", "must-not-forward");
+        for (key, directory) in [
+            ("OSDK_DATA_DIR", "data"),
+            ("OSDK_CACHE_DIR", "cache"),
+            ("OSDK_CONFIG_DIR", "config"),
+            ("OSDK_STORE_DIR", "store"),
+            ("OSDK_INSTALL_DIR", "installs"),
+        ] {
+            child.env(key, temp.path().join(directory));
+        }
+        #[cfg(windows)]
+        for key in [
+            "SystemRoot",
+            "WINDIR",
+            "WINEPREFIX",
+            "WINELOADER",
+            "WINESERVER",
+            "WINEDEBUG",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                child.env(key, value);
+            }
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated Cargo test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn native_cargo_replacement_is_exclusive_and_reaches_the_isolated_provider() {
+        const CHILD: &str = "OSDK_NATIVE_CARGO_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_native_cargo_test_child(
+                "native_cargo_replacement_is_exclusive_and_reaches_the_isolated_provider",
+                CHILD,
+            );
+            return;
+        }
         let server = MetadataServer::start(vec![
             ("/private/config.json", "200 OK", r#"{"dl":"unused"}"#),
             ("/private/ri/pg/ripgrep", "200 OK", r#"{"vers":"14.1.1"}"#),
             ("/preferred/ri/pg/ripgrep", "200 OK", r#"{"vers":"99.0.0"}"#),
         ]);
         let temp = tempfile::tempdir().unwrap();
-        let user_cargo = temp.path().join("user-cargo");
-        std::fs::create_dir(&user_cargo).unwrap();
+        let user_cargo = PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
         let index = format!("sparse+{}/private/", server.base_url);
         std::fs::write(
             user_cargo.join("config.toml"),
@@ -2077,21 +2170,6 @@ mod tests {
         let mut ctx = context(temp.path(), false);
         let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
         configure_registry_sources(&mut ctx, &backend, &server.base_url);
-        let candidates = crate::source::select::effective_sources(&ctx, &backend);
-        let selected = backend
-            .sources_from_cargo_home(&ctx, candidates, Some(&user_cargo))
-            .unwrap();
-        assert_eq!(selected.len(), 1);
-        assert!(selected[0].headers.is_empty());
-        assert!(!selected[0].forward_credentials);
-        // Wire the candidate into the same resolution path without changing
-        // process-wide CARGO_HOME in a parallel test suite.
-        ctx.config
-            .sources
-            .per_tool
-            .get_mut(backend.id())
-            .unwrap()
-            .custom = selected;
         assert_eq!(
             backend.list_remote_versions(&ctx).await.unwrap()[0].version,
             "14.1.1"
@@ -2126,19 +2204,39 @@ mod tests {
             b"binstall",
         );
         assert!(!backend.binstall_eligible(&ctx, &resolved));
-        let stage = temp.path().join("stage");
-        let (bin, _, rustc) = backend.toolchain_bins(&ctx, &resolved.options).unwrap();
-        let env = backend
-            .command_env(&ctx, &resolved, &stage, &bin, &rustc)
+        let runner = FixtureRunner {
+            expected_native_index: Some(index),
+            ..FixtureRunner::new([0])
+        };
+        backend
+            .install_with_runner(&ctx, &resolved, &runner)
+            .await
             .unwrap();
-        assert!(!env.contains_key(std::ffi::OsStr::new("CARGO_REGISTRIES_CORP_TOKEN")));
-        let config = std::fs::read_to_string(stage.join("cargo-home/config.toml")).unwrap();
-        assert!(config.contains(&index));
-        assert!(!stage.join("cargo-home/credentials.toml").exists());
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            server.requests(),
+            [
+                "/private/config.json",
+                "/private/ri/pg/ripgrep",
+                "/private/config.json",
+                "/private/ri/pg/ripgrep",
+            ]
+        );
+        let lifecycle = backend.lifecycle(&ctx, &resolved).unwrap();
+        let receipt = native_tool::load_receipt(lifecycle.install_root()).unwrap();
+        assert_eq!(receipt.provider, NativeToolProvider::CargoInstall);
     }
 
     #[tokio::test]
     async fn no_native_cargo_replacement_preserves_configured_registry_fallback() {
+        const CHILD: &str = "OSDK_NO_NATIVE_CARGO_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_native_cargo_test_child(
+                "no_native_cargo_replacement_preserves_configured_registry_fallback",
+                CHILD,
+            );
+            return;
+        }
         let server = MetadataServer::start(vec![
             ("/preferred/ri/pg/ripgrep", "404 Not Found", ""),
             ("/fallback/ri/pg/ripgrep", "200 OK", r#"{"vers":"14.1.1"}"#),
@@ -2146,7 +2244,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut ctx = context(temp.path(), false);
         let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
-        let user_cargo = temp.path().join("user-cargo");
+        let user_cargo = PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
         let defaults = backend
             .sources_from_cargo_home(&ctx, backend.default_sources(), Some(&user_cargo))
             .unwrap();
