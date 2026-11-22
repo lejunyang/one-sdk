@@ -28,6 +28,10 @@ Setting only privacy rules selects direct VCS lookups. The provider still
 clears its environment and does not load the whole Go env file or forward
 credentials. Native-source module caches are keyed by policy fingerprint.
 
+Run `osdk run go-private-proxy` from the repository root to verify request
+routing for a private lookup error, an empty version list, and an explicit
+`GONOPROXY=none`. The check uses the Go on PATH and loopback proxies.
+
 Without a native policy, osdk queries each candidate's `@latest` endpoint. Prefix requests
 consume the proxy's bounded `@v/list`; exact requests must be confirmed by a
 matching `.info` response. Module-proxy escaping follows Go's uppercase `!x`

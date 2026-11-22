@@ -20,6 +20,9 @@ backend 明确分离。
 系统。受管进程仍使用清空后的环境，不会加载整个 Go 环境文件或转发凭据。模块缓存
 按原生策略指纹分开。
 
+在仓库根目录运行 `osdk run go-private-proxy`，用 PATH 上的 Go 和回环代理验证
+私有端报错、返回空版本列表，以及显式设置 `GONOPROXY=none` 时的请求路径。
+
 未配置原生源时，`latest` 请求使用候选 module 的 `@latest` endpoint；前缀请求读取有界的 `@v/list`；
 精确请求必须由匹配的 `.info` 响应证明。module proxy 转义遵循 Go 的大写字母 `!x` 规则。
 嵌套 command 会优先尝试最长 module 候选，并在每个候选内按来源排序依次尝试，避免较短
