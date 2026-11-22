@@ -48,6 +48,8 @@ catalog 内的最新版本，改成显式版本也不会查询在线 Releases。
 隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他 TLS 覆盖设置仍受隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
 
 全局 `npm:` 工具（npm/pnpm 安装器）匿名安装。用户 npmrc/环境中的认证本身不再阻断公共包，
-也不会导入凭据；无需删除用户登录配置。已知公共原生 registry 保留原地址。私有/未知源、
-scope 路由、不可读/重定向配置、自定义 TLS/代理策略及受管 Node npmrc 的认证仍拒绝。
+也不会导入凭据；无需删除用户登录配置。用户 npmrc 里的 registry 保留原地址，公共源和
+私有/公司源都一样（不带凭据访问，源要求登录时安装失败并提示）。scope 路由、地址内凭据、
+不可读/重定向配置、自定义 TLS/代理策略及受管 Node npmrc 的认证仍拒绝。要给全局安装单独
+指定源，在用户配置写 `[registries.npm] default` 并设 `[settings.precedence] npm = "osdk"`。
 需要认证的包不受此修复支持；项目 `use`、`exec` 与 shim 继续遵循原生认证配置。

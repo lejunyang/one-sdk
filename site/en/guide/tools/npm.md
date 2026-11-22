@@ -347,10 +347,14 @@ configuration inside the osdk-controlled prefix and install anonymously.
 Authentication alone in user npmrc files or environment variables (such as an npmjs login
 token) no longer blocks public packages; keep your login configuration. Credentials are
 not copied into isolated configuration, passed to installers, or sent to mirrors.
-Packages requiring authentication remain unsupported. An explicitly declared known public
-native registry keeps its original URL instead of switching mirrors when authentication
-is discarded. Private/unknown registries, scope routing, unreadable files, custom config
-locations, TLS and native proxy policy still fail closed. Authentication in npmrc files
+Packages requiring authentication remain unsupported. An explicitly declared native
+registry keeps its original URL instead of switching mirrors when authentication is
+discarded: a known public registry, and equally a private or company one (reached without
+credentials; if it requires a login, the install fails and says which registry to use
+instead). Scope routing, credentials in the registry URL, unreadable files, custom config
+locations, TLS and native proxy policy still fail closed. To pick the registry for global
+installs yourself, set `[registries.npm] default` with `[settings.precedence] npm = "osdk"`
+in your user configuration; the npmrc `registry` is then not consulted. Authentication in npmrc files
 inside managed Node installations is also rejected because those files are not guaranteed
 to belong to the isolated user configuration layers. Use an anonymously reachable registry
 for this scope. Native `exec`, shim and project delegates retain their authentication behavior.

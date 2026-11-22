@@ -1039,7 +1039,11 @@ where
                     file.display()
                 )));
             };
-            if !is_known_public_registry(&normalized) {
+            // An isolated global install carries no credentials but can still use the
+            // registry the user chose: a company mirror is usually readable without
+            // them, and swapping it for a public one would install from a source the
+            // user did not pick. Ordinary commands keep the native configuration.
+            if !is_known_public_registry(&normalized) && !isolated {
                 return Ok(NativeDecision::PassThrough(format!(
                     "private or unknown native registry is configured in {}",
                     file.display()
@@ -1547,7 +1551,7 @@ where
     .find(|name| getenv(name).is_some_and(|value| !value.trim().is_empty()))
 }
 
-fn is_known_public_registry(value: &str) -> bool {
+pub fn is_known_public_registry(value: &str) -> bool {
     same_registry(value, NPMJS) || same_registry(value, NPMMIRROR)
 }
 
@@ -2893,7 +2897,6 @@ npmRegistries:
     async fn isolated_auth_does_not_hide_routing_tls_or_unreadable_config() {
         for manager in [PackageManager::Npm, PackageManager::Pnpm] {
             for policy in [
-                "registry=https://private.invalid/\n",
                 "@private:registry=https://private.invalid/\n",
                 "registry=https://user:fixture-secret@registry.npmjs.org/\n",
                 "cafile=private.pem\n",
@@ -2932,6 +2935,51 @@ npmRegistries:
                     panic!("unsafe policy accepted: {manager} {policy}: {result:?}");
                 };
                 assert!(!reason.contains("fixture-secret"));
+            }
+        }
+    }
+
+    /// A company mirror in ~/.npmrc: the isolated global install uses it as is,
+    /// without its credentials and without swapping it for a public registry;
+    /// an ordinary command still leaves the native configuration in charge.
+    #[tokio::test]
+    async fn isolated_private_native_registry_is_used_without_credentials() {
+        let private = normalize_registry_url("https://npm.corp.invalid/repo/").unwrap();
+        for manager in [PackageManager::Npm, PackageManager::Pnpm] {
+            for auth in [
+                "//npm.corp.invalid/repo/:_authToken=fixture-secret\n",
+                "//registry.npmjs.org/:_authToken=fixture-secret\n",
+                "",
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let cwd = isolated_cwd(temp.path());
+                let home = temp.path().join("home");
+                std::fs::create_dir_all(&home).unwrap();
+                std::fs::write(
+                    home.join(".npmrc"),
+                    format!("registry=https://npm.corp.invalid/repo/\n{auth}"),
+                )
+                .unwrap();
+                // A reachable public mirror is configured: it must not be probed or chosen instead.
+                let (mirror, _guard) = unused_loopback();
+                let ctx = test_ctx(temp.path(), vec![mirror], false);
+                let getenv = |key: &str| (key == "HOME").then(|| home.display().to_string());
+                let result = plan_isolated(&ctx, &cwd, manager, "npm", &["install".into()], getenv)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(&result, RegistryPlan::Selected { url, probes } if *url == private && probes.is_empty()),
+                    "{manager} {auth:?}: {result:?}"
+                );
+                assert!(!format!("{result:?}").contains("fixture-secret"));
+
+                let ordinary = plan(&ctx, &cwd, manager, "npm", &["install".into()], getenv)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(ordinary, RegistryPlan::PassThrough { .. }),
+                    "{manager} {auth:?}: {ordinary:?}"
+                );
             }
         }
     }

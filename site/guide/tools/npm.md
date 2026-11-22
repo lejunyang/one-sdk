@@ -283,9 +283,12 @@ activation、shim 分发、`where`、`uninstall` 与 `reshim` 都从活动请求
 文档约定的显式 Registry 优先级；全局委托在 osdk 控制的前缀中匿名安装。
 用户 npmrc 或环境变量中仅存在认证信息（例如 npmjs 登录 token）不会阻止安装公共包，
 无需删除登录配置。凭据不会复制到隔离配置、传给安装器或发送给镜像；需要认证的包仍不支持。
-显式声明的已知公共原生 Registry 保持原地址，不因忽略认证而切换到镜像。
-私有/未知源、scope 路由、不可读配置、自定义配置位置、TLS 或原生代理策略仍会拒绝；
+显式声明的原生 Registry 保持原地址，不因忽略认证而切换到镜像：已知公共源如此，
+私有或公司内网源也一样（不带凭据访问；源要求登录时安装失败，并提示改用哪个源）。
+scope 路由、地址里带凭据、不可读配置、自定义配置位置、TLS 或原生代理策略仍会拒绝；
 受管 Node 内的 npmrc 认证也保持拒绝，因为不能保证属于被隔离的用户配置层。
+要给全局安装单独指定源，在用户配置里写 `[registries.npm] default` 并设
+`[settings.precedence] npm = "osdk"`，此时不再读用户 npmrc 的 `registry`。
 该作用域使用可匿名访问的 Registry；`exec`、shim 和项目委托继续保留原生认证语义。
 
 未锁定的隔离安装会为每个排序 source 重建干净的 synthetic project；`osdk lock` 生成

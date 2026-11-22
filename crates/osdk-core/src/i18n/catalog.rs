@@ -2033,8 +2033,15 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "err.npm_global_registry_isolation",
         (
-            "cannot safely isolate global {manager} install: registry preflight passed through ({reason})",
-            "无法安全隔离全局 {manager} 安装：Registry 预检要求透传（{reason}）",
+            "cannot safely isolate global {manager} install: registry preflight passed through ({reason}). To pick the registry for global installs yourself, set `[registries.npm] default = \"<url>\"` and `[settings.precedence] npm = \"osdk\"` in {config}",
+            "无法安全隔离全局 {manager} 安装：Registry 预检要求透传（{reason}）。要自己指定全局安装用的源，在 {config} 里写 `[registries.npm] default = \"<地址>\"` 和 `[settings.precedence] npm = \"osdk\"`",
+        ),
+    );
+    m.insert(
+        "err.npm_global_registry_auth",
+        (
+            "registry {url} refused the anonymous request: global {manager} installs are isolated and do not send the credentials in your npm configuration. To install from another registry, set `[registries.npm] default = \"<url>\"` and `[settings.precedence] npm = \"osdk\"` in {config}",
+            "源 {url} 拒绝了匿名请求：全局 {manager} 安装是隔离的，不带 npm 配置里的凭据。要换一个源，在 {config} 里写 `[registries.npm] default = \"<地址>\"` 和 `[settings.precedence] npm = \"osdk\"`",
         ),
     );
     m.insert(

@@ -161,8 +161,9 @@ osdk 自己发起的 npm metadata 请求和 source probe 会使用显式 `Source
 移除。受管的 npm/pnpm 子进程只会收到 registry 覆盖以及一份 osdk 自有的空配置，因此真正
 获取 package 时不转发 `Source.headers`。全局受管工具通过 `plan_isolated` 区分认证与路由：
 `env_clear` 和空的 user/global npmrc 隔离的认证层不阻断匿名安装，但不复制任何凭据。
-已知公共原生 registry 保留原 URL；scope、私有源、自定义 TLS/代理、不可读配置和
-受管 Node npmrc 的认证仍拒绝。普通 `plan` 的原生透传行为不变。`package_registry.rs` 的 Registry
+原生 registry 保留原 URL：已知公共源和私有/未知源都作为唯一候选（`Selected`，不探测、
+不换镜像，不带凭据）；安装器以 401/403 拒绝私有源时，错误附上改用 `[registries.npm] default`
+的提示。scope、URL 内凭据、自定义 TLS/代理、不可读配置和受管 Node npmrc 的认证仍拒绝。普通 `plan` 的原生透传行为不变。`package_registry.rs` 的 Registry
 preflight 针对用户随后运行的
 npm/pnpm/Yarn/Bun/Deno 命令，每次调用独立判断，不能与这里的 TTL cache 等同。
 

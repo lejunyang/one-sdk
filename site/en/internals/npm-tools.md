@@ -212,9 +212,12 @@ cross-origin redirect. The managed npm/pnpm delegates receive only a registry
 override inside an otherwise empty osdk-owned configuration, so package fetches
 do not forward `Source.headers`. Global managed-tool installation uses `plan_isolated` to separate authentication from
 routing: credentials in layers isolated by `env_clear` and empty user/global npmrc
-files do not block anonymous installation and are never copied. Known public native
-registries retain their URL. Scope/private routing, custom TLS/proxy policy, unreadable
-configuration and authentication in managed Node npmrc files still fail closed.
+files do not block anonymous installation and are never copied. Native registries retain
+their URL: a known public one and a private/unknown one alike become the only candidate
+(`Selected`, no probe, no mirror swap, no credentials); when the installer is refused with
+401/403 by a private registry, the error points at `[registries.npm] default`. Scope routing,
+credentials in the URL, custom TLS/proxy policy, unreadable configuration and
+authentication in managed Node npmrc files still fail closed.
 The normal `plan` retains native pass-through behavior.
 Registry preflight in `package_registry.rs`
 applies to npm/pnpm/Yarn/Bun/Deno commands that users run later, evaluates each

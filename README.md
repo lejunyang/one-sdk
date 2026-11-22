@@ -395,9 +395,13 @@ Guide: [Package managers and registry selection](site/en/guide/tools/package-man
 
 ## Scenario: add an npm-published developer tool
 
-Global `npm:` tools install public packages anonymously even when you are logged in
-to npm. Your login configuration stays intact and credentials are not imported;
-private or scoped registry routing remains unsupported for this isolated path.
+Global `npm:` tools install anonymously in isolation even when you are logged in to
+npm. Your login configuration stays intact and credentials are not imported. The
+`registry` in your npmrc, a company mirror included, is used as is rather than swapped
+for a public one; if it requires a login, the install fails and says so. Scoped
+registry routing remains unsupported for this isolated path. To pick the registry for
+global installs yourself, set `[registries.npm] default` with
+`[settings.precedence] npm = "osdk"` in your user configuration.
 
 Prefix a package with `npm:` to distinguish it from the npm package manager. In
 a Node project, `use` adds the package to the nearest `package.json`, keeps an

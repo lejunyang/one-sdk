@@ -104,10 +104,10 @@ async fn install_with_selection(
                 unreachable!("global planning always produces a concrete installer")
             }
         };
-        // This must precede runtime preparation and npm package resolution. A
-        // private/scoped native registry cannot be reproduced inside the
-        // isolated global installer. Discarded user credentials do not block
-        // an otherwise anonymous public install.
+        // This must precede runtime preparation and npm package resolution. The
+        // user's registry (public or private) is used as is, without the
+        // credentials the isolation discards; scoped registries, TLS and proxy
+        // policies cannot be reproduced inside the isolated installer.
         let selected_registry = plan_isolated_global_registry(
             app,
             &app.ctx.dirs.data.join("global-registry-preflight"),
@@ -766,7 +766,38 @@ pub(crate) async fn run_native_installer(
             env.insert(key.into(), url.into());
         }
     }
-    run_managed_command(executable, &args, &env, &layout.root)
+    run_managed_command(executable, &args, &env, &layout.root).map_err(|error| {
+        // The user's own registry, used without the credentials the isolation drops.
+        match selected_registry {
+            Some(url)
+                if refused_anonymous(&error)
+                    && !package_registry::is_known_public_registry(url) =>
+            {
+                error.context(osdk_core::t!(
+                    "err.npm_global_registry_auth",
+                    url = url,
+                    manager = manager,
+                    config = app.ctx.dirs.user_config_file().display()
+                ))
+            }
+            _ => error,
+        }
+    })
+}
+
+/// npm and pnpm both report an authentication refusal with the HTTP status in their output.
+fn refused_anonymous(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    [
+        "E401",
+        "E403",
+        "ERR_PNPM_FETCH_401",
+        "ERR_PNPM_FETCH_403",
+        "401 Unauthorized",
+        "403 Forbidden",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 pub(crate) fn global_registry_ctx(app: &App) -> Result<osdk_core::backend::Ctx> {
@@ -841,7 +872,8 @@ pub(crate) async fn plan_isolated_global_registry(
         RegistryPlan::PassThrough { reason } => Err(anyhow!(osdk_core::t!(
             "err.npm_global_registry_isolation",
             manager = manager,
-            reason = reason
+            reason = reason,
+            config = app.ctx.dirs.user_config_file().display()
         ))),
     }
 }

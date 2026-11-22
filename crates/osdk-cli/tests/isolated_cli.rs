@@ -6343,11 +6343,128 @@ fi
     }
 }
 
+/// A company registry in ~/.npmrc: the isolated global install is pointed at it
+/// (not refused, not swapped for the configured public mirror) and carries none
+/// of the credentials the user keeps for it.
+#[cfg(unix)]
+#[test]
+fn private_native_registry_global_use_installs_from_it_without_credentials() {
+    for manager in ["npm", "pnpm"] {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = format!("http://{address}/");
+        let server = std::thread::spawn(move || {
+            // Version metadata for the pinned fixture source; no mirror probe.
+            let mut stream = accept_fixture_connection(&listener, "private registry fixture");
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /@fixture/cli "), "{request}");
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let body = r#"{"dist-tags":{"latest":"1.2.3"},"versions":{"1.2.3":{}}}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        std::fs::create_dir_all(temp.path().join("home")).unwrap();
+        let npmrc =
+            format!("registry={endpoint}\n//{address}/:_authToken=fixture-private-secret\n");
+        std::fs::write(temp.path().join("home/.npmrc"), &npmrc).unwrap();
+        // A configured mirror that must not be chosen over the user's registry.
+        std::fs::write(
+            temp.path().join("config/config.toml"),
+            format!(
+                r#"
+[tools]
+node = "20.0.0"
+{manager} = "10.0.0"
+[sources]
+selection = "ordered"
+[sources."npm:@fixture/cli"]
+pin = "fixture"
+disable = ["npmmirror", "npm"]
+[[sources."npm:@fixture/cli".custom]]
+id = "fixture"
+kind = "custom"
+index_url = {endpoint:?}
+download_url = {endpoint:?}
+[registries.npm]
+urls = ["http://127.0.0.1:9/"]
+probe_timeout_ms = 500
+"#
+            ),
+        )
+        .unwrap();
+        let marker = temp.path().join("installer-private");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+test ! -s "$npm_config_userconfig"
+test ! -e "$HOME/.npmrc"
+test "$npm_config_registry" = '{endpoint}'
+printf private > '{marker}'
+if test '{manager}' = npm; then
+  package="$PWD/lib/node_modules/@fixture/cli"
+else
+  test "$pnpm_config_registry" = '{endpoint}'
+  package="$PWD/pnpm-global/5/node_modules/@fixture/cli"
+fi
+mkdir -p "$package" "$PWD/bin"
+printf '%s' '{{"name":"@fixture/cli","version":"1.2.3","bin":{{"fixture-cli":"cli.js"}}}}' > "$package/package.json"
+printf '#!/bin/sh\nexit 0\n' > "$package/cli.js"
+chmod +x "$package/cli.js"
+ln -s "$package/cli.js" "$PWD/bin/fixture-cli"
+if test '{manager}' = pnpm; then
+  printf 'lockfileVersion: 9.0\nimporters: {{}}\n' > "$PWD/pnpm-global/5/pnpm-lock.yaml"
+fi
+"#,
+            marker = marker.display()
+        );
+        write_fake_registry_manager(temp.path(), manager, "10.0.0", manager, &script);
+        let option = format!("installer={manager}");
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &["use", "-g", "npm:@fixture/cli@=1.2.3", "-o", &option],
+            &[("PATH", "/usr/bin:/bin")],
+        );
+        assert!(
+            output.status.success(),
+            "{manager}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        server.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "private");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("home/.npmrc")).unwrap(),
+            npmrc
+        );
+        for entry in walkdir::WalkDir::new(temp.path())
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if entry.file_type().is_file() && entry.path() != temp.path().join("home/.npmrc") {
+                let text =
+                    String::from_utf8_lossy(&std::fs::read(entry.path()).unwrap()).into_owned();
+                assert!(
+                    !text.contains("fixture-private-secret"),
+                    "credential persisted at {}",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn unsafe_native_policy_fails_before_public_metadata_probe_or_installer_spawn() {
     for installer in ["npm", "pnpm"] {
-        for native_policy in ["tls-env", "private-npmrc"] {
+        for native_policy in ["tls-env", "scoped-npmrc"] {
             let temporary = tempfile::tempdir().unwrap();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -6376,11 +6493,11 @@ probe_timeout_ms = 500
             )
             .unwrap();
 
-            if native_policy == "private-npmrc" {
+            if native_policy == "scoped-npmrc" {
                 std::fs::create_dir_all(temporary.path().join("home")).unwrap();
                 std::fs::write(
                     temporary.path().join("home/.npmrc"),
-                    "registry=https://packages.corp.invalid/\n",
+                    "@corp:registry=https://packages.corp.invalid/\n",
                 )
                 .unwrap();
             }
@@ -6433,9 +6550,14 @@ probe_timeout_ms = 500
             let expected_reason = if native_policy == "tls-env" {
                 "NPM_CONFIG_CAFILE"
             } else {
-                "private or unknown native registry"
+                "a scoped registry is configured"
             };
             assert!(stderr.contains(expected_reason), "{installer}: {stderr}");
+            // The refusal says how to choose the registry for global installs instead.
+            assert!(
+                stderr.contains("[registries.npm] default"),
+                "{installer}: {stderr}"
+            );
             assert!(
                 !stderr.contains("must-not-appear-in-errors"),
                 "{installer}: {stderr}"

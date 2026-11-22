@@ -382,8 +382,9 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 加入版本控制忽略规则。请把包管理器的原生 lock 与 `osdk.lock` 一起提交；后者不能替代
 传递依赖图。
 
-全局 `npm:` 工具匿名安装公共包，已有 npm 登录配置不会阻断安装，也不会被删除或导入凭据。
-该隔离路径仍不支持私有源或 scope 路由。
+全局 `npm:` 工具在隔离环境里匿名安装，已有 npm 登录配置不会阻断安装，也不会被删除或导入凭据。
+用户 npmrc 里的 `registry`（包括公司内网源）照原地址使用，不换成公共源；源要求登录时安装会失败并说明原因。
+该隔离路径仍不支持 scope 路由。要给全局安装单独指定源，在用户配置里写 `[registries.npm] default` 并设 `[settings.precedence] npm = "osdk"`。
 
 直接调用托管 npm、未加载 shell 激活时，也默认使用共享目录。升级后运行一次
 `osdk reshim` 可更新已有 Node/npm 安装的默认值；仍支持显式覆盖 npm prefix。
