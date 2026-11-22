@@ -30,6 +30,8 @@ use crate::tool::{InstallDependency, InstallDependencyKind, InstallIdentity, Too
 use crate::version::{ToolRequest, ToolVersion, VersionInfo, VersionSpec};
 
 const CRATES_IO_SPARSE_INDEX: &str = "sparse+https://index.crates.io/";
+const RSPROXY_SPARSE_INDEX: &str = "sparse+https://rsproxy.cn/index/";
+const NATIVE_CARGO_SOURCE: &str = "cargo-config";
 const CARGO_METADATA_LIMIT: usize = 8 * 1024 * 1024;
 const CARGO_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const CARGO_RESOLUTION_FILE: &str = "cargo-resolution.json";
@@ -65,6 +67,55 @@ pub fn validate_registry_index(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn native_registry_error(tool: &str, reason: &str) -> Error {
+    Error::config(format!(
+        "{tool}: {reason}. Configure an anonymous sparse HTTPS registry in `[sources]` \
+         with `osdk source add {tool} --id corp --download-url <https-base> \
+         --index-url <sparse+https-index>` and select it with `osdk --source corp`"
+    ))
+}
+
+fn native_registry_index(cargo_home: &Path, tool: &str) -> Result<Option<String>> {
+    // Cargo gives the legacy name precedence when both files exist.
+    for name in ["config", "config.toml"] {
+        let path = cargo_home.join(name);
+        let body = match std::fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Err(native_registry_error(
+                    tool,
+                    "could not read Cargo configuration",
+                ))
+            }
+        };
+        let config = toml::from_str::<toml::Table>(&body)
+            .map_err(|_| native_registry_error(tool, "could not parse Cargo configuration"))?;
+        let Some(sources) = config.get("source") else {
+            return Ok(None);
+        };
+        let sources = sources
+            .as_table()
+            .ok_or_else(|| native_registry_error(tool, "Cargo [source] must be a table"))?;
+        let Some(replacement) = sources
+            .get("crates-io")
+            .and_then(|source| source.get("replace-with"))
+        else {
+            return Ok(None);
+        };
+        let index = replacement.as_str()
+            .and_then(|name| sources.get(name))
+            .filter(|source| ["replace-with", "git", "directory", "local-registry"].iter()
+                .all(|key| source.get(key).is_none()))
+            .and_then(|source| source.get("registry"))
+            .and_then(toml::Value::as_str)
+            .filter(|index| validate_registry_index(index).is_ok())
+            .ok_or_else(|| native_registry_error(tool, "Cargo replace-with requires a direct sparse HTTPS registry without URL credentials"))?;
+        return Ok(Some(index.to_string()));
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +156,7 @@ fn version_infos(metadata: &CratesResponse) -> Vec<VersionInfo> {
 /// (`unable to update registry crates-io`). Source replacement is the
 /// mechanism that covers the whole graph. This writes into the stage-private
 /// `CARGO_HOME` that `command_env` hands cargo, so the real
-/// `~/.cargo/config.toml` is never read or modified. When the selection is
+/// user config is never copied to the provider. When the selection is
 /// the official index there is nothing to replace and no file is written.
 fn write_registry_replacement(cargo_home: &Path, tv: &ToolVersion) -> Result<()> {
     let Some(index) = tv.options.get(LOCKED_CARGO_INDEX_OPTION) else {
@@ -271,6 +322,38 @@ async fn preflight_crate_artifact(
     crate::http::probe_source_artifact(&ctx.client, source, &url, CARGO_METADATA_TIMEOUT).await
 }
 
+async fn check_native_registry(ctx: &Ctx, tool: &str, source: &Source) -> Result<()> {
+    if source.id != NATIVE_CARGO_SOURCE {
+        return Ok(());
+    }
+    let url = registry_config_url(source)?;
+    let response = tokio::time::timeout(CARGO_METADATA_TIMEOUT, async {
+        crate::http::get_source_response(&ctx.client, source, &url)
+            .await?
+            .error_for_status()
+            .map_err(|error| Error::network(&url, error))?
+            .json::<RegistryConfig>()
+            .await
+            .map_err(Error::from)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or_else(|| {
+        native_registry_error(
+            tool,
+            "Cargo replacement registry did not return config.json anonymously",
+        )
+    })?;
+    if response.auth_required {
+        return Err(native_registry_error(
+            tool,
+            "Cargo replacement registry requires authentication",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct CratesVersion {
     vers: String,
@@ -283,6 +366,8 @@ struct CratesVersion {
 #[derive(Debug, Deserialize)]
 struct RegistryConfig {
     dl: String,
+    #[serde(default, rename = "auth-required")]
+    auth_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,6 +388,44 @@ pub struct CargoPackageBackend {
 }
 
 impl CargoPackageBackend {
+    fn sources_from_cargo_home(
+        &self,
+        ctx: &Ctx,
+        sources: Vec<Source>,
+        cargo_home: Option<&Path>,
+    ) -> Result<Vec<Source>> {
+        if !matches!(self.source, CargoSource::Registry { .. }) {
+            return Ok(sources);
+        }
+        let Some(cargo_home) = cargo_home else {
+            return Ok(sources);
+        };
+        let index = native_registry_index(cargo_home, self.id());
+        if matches!(&index, Ok(None)) {
+            return Ok(sources);
+        }
+        let pin = ctx
+            .config
+            .tool_sources(self.id())
+            .and_then(|cfg| cfg.pin.as_deref());
+        // An explicit custom source is also the escape hatch for unsupported
+        // native declarations. Keep its selection exclusive if native config exists.
+        if let Some(custom) = sources.iter().find(|source| {
+            Some(source.id.as_str()) == pin && source.kind == crate::source::SourceKind::Custom
+        }) {
+            return Ok(vec![custom.clone()]);
+        }
+        let Some(index) = index? else {
+            unreachable!("no replacement was handled above");
+        };
+        let base = index
+            .strip_prefix("sparse+")
+            .expect("validated sparse registry");
+        Ok(vec![
+            Source::mirror(NATIVE_CARGO_SOURCE, base, 0).with_index(&index)
+        ])
+    }
+
     pub fn from_id(id: &str) -> Option<Self> {
         let id = ToolId::parse(id).ok()?;
         if id.namespace() != Some("cargo") {
@@ -508,6 +631,7 @@ impl CargoPackageBackend {
         let mut last_error = None;
         if !ctx.config.settings.offline {
             for source in &sources {
+                check_native_registry(ctx, self.id(), source).await?;
                 if let Err(error) = registry_index(source) {
                     last_error = Some(error);
                     continue;
@@ -565,6 +689,7 @@ impl CargoPackageBackend {
 
         if !ctx.config.settings.offline {
             for source in &sources {
+                check_native_registry(ctx, self.id(), source).await?;
                 let url = match crate_metadata_url(source, package) {
                     Ok(url) => url,
                     Err(error) => {
@@ -904,6 +1029,11 @@ impl CargoPackageBackend {
             || matches!(&self.source, CargoSource::Registry { package } if package == "cargo-binstall")
             || tv.options.contains_key("features")
             || tv.options.get("default-features").map(String::as_str) == Some("false")
+            // An arbitrary index can contain private crates. Binstall may
+            // discover assets on external hosts; Cargo uses the selected index.
+            || tv.options.get(LOCKED_CARGO_INDEX_OPTION).is_some_and(|index| {
+                !matches!(index.as_str(), CRATES_IO_SPARSE_INDEX | RSPROXY_SPARSE_INDEX)
+            })
         {
             return false;
         }
@@ -1210,7 +1340,7 @@ impl Backend for CargoPackageBackend {
                 Source::official("crates-io", "https://index.crates.io/")
                     .with_index(CRATES_IO_SPARSE_INDEX),
                 Source::mirror("rsproxy", "https://rsproxy.cn/index/", 10)
-                    .with_index("sparse+https://rsproxy.cn/index/"),
+                    .with_index(RSPROXY_SPARSE_INDEX),
             ],
             CargoSource::Git { .. } => Vec::new(),
         }
@@ -1224,10 +1354,22 @@ impl Backend for CargoPackageBackend {
     /// stronger probe than `config.json`: it verifies both index reachability
     /// and availability of the requested package.
     fn probe_url(&self, _ctx: &Ctx, source: &Source) -> Option<String> {
+        if source.id == NATIVE_CARGO_SOURCE {
+            return registry_config_url(source).ok();
+        }
         match &self.source {
             CargoSource::Registry { package } => crate_metadata_url(source, package).ok(),
             CargoSource::Git { .. } => None,
         }
+    }
+
+    #[cfg(feature = "install")]
+    fn restrict_sources(&self, ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
+        let home = std::env::var_os("CARGO_HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::home_dir().map(|dir| dir.join(".cargo")));
+        self.sources_from_cargo_home(ctx, sources, home.as_deref())
     }
 
     #[cfg(feature = "install")]
@@ -1605,6 +1747,7 @@ mod tests {
                             request.extend_from_slice(&buffer[..read]);
                         }
                         let request = String::from_utf8(request).unwrap();
+                        assert!(!request.to_ascii_lowercase().contains("\r\nauthorization:"));
                         let path = request
                             .lines()
                             .next()
@@ -1905,6 +2048,162 @@ mod tests {
         assert!(config.contains("[source.crates-io]"));
         assert!(config.contains("replace-with = \"osdk-mirror\""));
         assert!(config.contains("registry = \"sparse+https://mirror.example.test/index/\""));
+    }
+
+    #[tokio::test]
+    async fn native_cargo_replacement_is_exclusive_and_reaches_the_isolated_provider() {
+        let server = MetadataServer::start(vec![
+            ("/private/config.json", "200 OK", r#"{"dl":"unused"}"#),
+            ("/private/ri/pg/ripgrep", "200 OK", r#"{"vers":"14.1.1"}"#),
+            ("/preferred/ri/pg/ripgrep", "200 OK", r#"{"vers":"99.0.0"}"#),
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        let user_cargo = temp.path().join("user-cargo");
+        std::fs::create_dir(&user_cargo).unwrap();
+        let index = format!("sparse+{}/private/", server.base_url);
+        std::fs::write(
+            user_cargo.join("config.toml"),
+            format!(
+                "[source.crates-io]\nreplace-with = 'corp'\n[source.corp]\nregistry = '{index}'"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            user_cargo.join("credentials.toml"),
+            "[registries.corp]\ntoken = 'private-token'",
+        )
+        .unwrap();
+
+        let mut ctx = context(temp.path(), false);
+        let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
+        configure_registry_sources(&mut ctx, &backend, &server.base_url);
+        let candidates = crate::source::select::effective_sources(&ctx, &backend);
+        let selected = backend
+            .sources_from_cargo_home(&ctx, candidates, Some(&user_cargo))
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].headers.is_empty());
+        assert!(!selected[0].forward_credentials);
+        // Wire the candidate into the same resolution path without changing
+        // process-wide CARGO_HOME in a parallel test suite.
+        ctx.config
+            .sources
+            .per_tool
+            .get_mut(backend.id())
+            .unwrap()
+            .custom = selected;
+        assert_eq!(
+            backend.list_remote_versions(&ctx).await.unwrap()[0].version,
+            "14.1.1"
+        );
+        let mut resolved = backend
+            .resolve_version(&ctx, &ToolRequest::parse("cargo:ripgrep").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resolved.options[LOCKED_CARGO_INDEX_OPTION], index);
+        assert_eq!(
+            server.requests(),
+            [
+                "/private/config.json",
+                "/private/ri/pg/ripgrep",
+                "/private/config.json",
+                "/private/ri/pg/ripgrep",
+            ]
+        );
+
+        managed_rust(&ctx, "1.91.1");
+        resolved
+            .options
+            .insert(LOCKED_NATIVE_RUNTIME_OPTION.into(), "rust".into());
+        resolved
+            .options
+            .insert(LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(), "1.91.1".into());
+        write_executable(
+            &ctx.dirs
+                .cargo_home()
+                .join("bin")
+                .join(format!("cargo-binstall{}", ctx.platform.os.exe_suffix())),
+            b"binstall",
+        );
+        assert!(!backend.binstall_eligible(&ctx, &resolved));
+        let stage = temp.path().join("stage");
+        let (bin, _, rustc) = backend.toolchain_bins(&ctx, &resolved.options).unwrap();
+        let env = backend
+            .command_env(&ctx, &resolved, &stage, &bin, &rustc)
+            .unwrap();
+        assert!(!env.contains_key(std::ffi::OsStr::new("CARGO_REGISTRIES_CORP_TOKEN")));
+        let config = std::fs::read_to_string(stage.join("cargo-home/config.toml")).unwrap();
+        assert!(config.contains(&index));
+        assert!(!stage.join("cargo-home/credentials.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn no_native_cargo_replacement_preserves_configured_registry_fallback() {
+        let server = MetadataServer::start(vec![
+            ("/preferred/ri/pg/ripgrep", "404 Not Found", ""),
+            ("/fallback/ri/pg/ripgrep", "200 OK", r#"{"vers":"14.1.1"}"#),
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = context(temp.path(), false);
+        let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
+        let user_cargo = temp.path().join("user-cargo");
+        let defaults = backend
+            .sources_from_cargo_home(&ctx, backend.default_sources(), Some(&user_cargo))
+            .unwrap();
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|source| source.id.as_str())
+                .collect::<Vec<_>>(),
+            ["crates-io", "rsproxy"]
+        );
+        configure_registry_sources(&mut ctx, &backend, &server.base_url);
+        assert_eq!(
+            backend.list_remote_versions(&ctx).await.unwrap()[0].version,
+            "14.1.1"
+        );
+        assert_eq!(
+            server.requests(),
+            ["/preferred/ri/pg/ripgrep", "/fallback/ri/pg/ripgrep"]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_cargo_rejects_git_and_authenticated_replacements() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_cargo = temp.path().join("user-cargo");
+        std::fs::create_dir(&user_cargo).unwrap();
+        let config = user_cargo.join("config");
+        for source in [
+            "git = 'https://example.test/index'",
+            "registry = 'sparse+https://name:secret@example.test/'",
+        ] {
+            std::fs::write(
+                &config,
+                format!("[source.crates-io]\nreplace-with = 'corp'\n[source.corp]\n{source}"),
+            )
+            .unwrap();
+            let error = native_registry_index(&user_cargo, "cargo:ripgrep")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("[sources]"), "{error}");
+            assert!(!error.contains("secret"), "{error}");
+        }
+        let server = MetadataServer::start(vec![(
+            "/config.json",
+            "200 OK",
+            r#"{"auth-required":true,"dl":"unused"}"#,
+        )]);
+        let source = Source::mirror(NATIVE_CARGO_SOURCE, &server.base_url, 0)
+            .with_index(&format!("sparse+{}/", server.base_url));
+        let ctx = context(temp.path(), false);
+        let error = check_native_registry(&ctx, "cargo:ripgrep", &source)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires authentication"), "{error}");
+        assert!(error.contains("[sources]"), "{error}");
+        assert_eq!(server.requests(), ["/config.json"]);
     }
 
     #[tokio::test]

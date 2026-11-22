@@ -598,6 +598,9 @@ for a cold offline build. Registry versions are recorded as `version-only`, full
 Git revisions as `immutable-revision`, and Git HEAD/tags/branches as
 `floating-ref`.
 
+Registry installs use the anonymous sparse replacement in your Cargo home when
+configured. Set an osdk source explicitly if that registry requires login.
+
 Guide: [Cargo developer tools](site/en/guide/tools/cargo.md)
 
 ## Scenario: install a Go command package

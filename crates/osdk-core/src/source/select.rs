@@ -150,6 +150,8 @@ fn dynamic_mirror_upstream_pairs() -> Vec<(String, String)> {
 
 pub fn effective_sources_with_env(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
     let sources = effective_sources(ctx, backend);
+    #[cfg(feature = "install")]
+    let sources = backend.restrict_sources(ctx, sources)?;
     let Some(mirror) = backend.env_mirror() else {
         // A backend with no native mirror variable has nothing to reconcile, and
         // `--source-mode env` cannot apply to it.

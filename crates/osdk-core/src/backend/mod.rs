@@ -82,6 +82,12 @@ pub trait Backend: Send + Sync {
     /// download base, return a URL to fetch for measuring throughput.
     fn probe_url(&self, ctx: &Ctx, source: &Source) -> Option<String>;
 
+    /// Narrow the configured candidates before any source probes or downloads.
+    #[cfg(feature = "install")]
+    fn restrict_sources(&self, _ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
+        Ok(sources)
+    }
+
     /// The native environment variables that point this toolchain at a mirror,
     /// if it has any. Returning `Some` opts the backend into ranking an ambient
     /// value alongside its built-in sources; see [`crate::source::env`].

@@ -73,6 +73,13 @@ index directly and lists its non-yanked versions. osdk currently has crates.io
 and rsproxy defaults; the same sharded crate entry is used for probing, metadata
 fetching, and caching, so a mirror need not implement crates.io's proprietary Web API.
 
+When `[source.crates-io].replace-with` in `$CARGO_HOME/config.toml` (default
+`~/.cargo/config.toml`) points to an anonymous sparse HTTPS registry, osdk uses
+that registry exclusively for lookup and installation. The legacy file name
+`config` takes priority when both files exist. Git, directory, and authenticated
+replacements raise an error. Add an osdk source as below, then select it with
+`osdk --source corp install cargo:ripgrep`. Locked installs use the recorded index.
+
 For a custom Cargo mirror, `--index-url` is the sole authoritative sparse index:
 osdk strips `sparse+` to read version metadata, while Cargo consumes the original
 value. The generic `source add` surface still requires `--download-url`; use the

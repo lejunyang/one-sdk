@@ -524,6 +524,9 @@ osdk use \
 全新离线构建所需的完整 source graph。Registry 版本记录为 `version-only`，完整 Git
 revision 记录为 `immutable-revision`，Git HEAD/tag/branch 则记录为 `floating-ref`。
 
+安装 Registry crate 时，osdk 会使用 Cargo home 中配置的匿名 sparse 替换源。
+源要求登录时，请显式指定 osdk 自定义源。
+
 指南：[Cargo 开发工具](site/guide/tools/cargo.md)
 
 ## 场景：安装 Go command package

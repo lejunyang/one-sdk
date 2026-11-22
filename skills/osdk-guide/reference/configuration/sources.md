@@ -35,6 +35,10 @@ env_force = false
 - probe 成功只影响排序；osdk 直连产物在校验、解包或必需文件检查失败时仍会换下一个源。
 - 委托安装器使用安全的目标级策略：Rust 逐源执行 rustup，Cargo 预检精确 crate URL，
   `pypi:` 探测实际项目页，`go:` 在全新解析时生成 `|` 分隔的 GOPROXY 回退链。
+- `cargo:<crate>` 从 `$CARGO_HOME/config.toml`（默认 `~/.cargo/config.toml`）读取
+  crates.io 替换源。匿名 sparse HTTPS 源独占版本查询和安装，不导入登录凭据。
+  旧文件名 `config` 优先。Git、目录或需认证的替换会报错；可添加自定义源后用
+  `osdk --source <id>` 显式选择。锁文件回放仍使用记录的 index。
 - `forward_credentials` 只对明确允许的自定义端点转发 provider 凭据。
 - 特殊 key：`self` 管 osdk 自升级，`go-modules` 管 `GOPROXY`。
 

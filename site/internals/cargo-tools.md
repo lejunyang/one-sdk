@@ -26,6 +26,12 @@ feature 会经过校验、排序和去重；默认值 `default-features=true` �
 
 ## 解析与精确 Rust 绑定
 
+源选择先读取用户 Cargo home 的 crates.io 替换配置。原生 sparse 源以
+单候选进入选择器，在线先读取 `config.json` 检查 `auth-required`。安装阶段
+只将选定 index 写入私有 Cargo 配置，原生配置与凭据不会复制给 provider。
+显式选择的 osdk 自定义源可以覆盖该声明；自定义 index 走源码安装，
+避免 `cargo-binstall` 为私有 crate 发现外部资产。
+
 Registry 解析向常规 ranked-source selector 请求 Cargo metadata。每个候选都从其标准
 sparse index 按 crate 名长度计算分片路径，并读取逐行 JSON 记录；crates.io 与 rsproxy
 不再需要各自的 Web API。用于探测、实时 metadata 和离线缓存的都是同一个 crate 分片

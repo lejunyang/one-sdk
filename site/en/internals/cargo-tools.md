@@ -37,6 +37,14 @@ identity.
 
 ## Resolution and exact Rust binding
 
+Source selection first checks the user's Cargo home for crates.io replacement.
+An eligible native sparse index enters selection as the only candidate. Online
+resolution checks its `config.json` for `auth-required`. The provider receives
+the selected index in a private Cargo config, leaving the original config and
+credentials in place. An explicitly selected osdk custom source can override
+the native declaration. Nonstandard indexes use a source build to keep private
+crate names out of `cargo-binstall` asset discovery.
+
 Registry resolution asks the normal ranked-source selector for Cargo metadata.
 Every candidate computes the crate-name shard path in its standard sparse index
 and reads newline-delimited JSON records; neither crates.io nor rsproxy needs a
