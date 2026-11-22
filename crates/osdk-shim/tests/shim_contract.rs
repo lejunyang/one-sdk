@@ -2641,11 +2641,14 @@ fn native_global_binary_needs_no_node_and_rustup_alias_stays_a_tool() {
     let root = temp.path();
     let launcher = root.join("data/global/npm/bin/native-probe");
     std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-    // macOS can kill a relocated copy of a system binary. A link exercises the
-    // native npm launcher while executing the original /bin/echo.
-    std::os::unix::fs::symlink("/bin/echo", &launcher).unwrap();
+    // macOS can kill a relocated copy of a system binary, so link to the original
+    // instead. It must be a program that ignores the name it runs under: on
+    // uutils coreutils (Ubuntu runners now) /bin/echo is a multi-call binary
+    // that refuses to run as `native-probe`. /bin/sh (dash, bash, the macOS
+    // launcher) is native and does not dispatch on its name.
+    std::os::unix::fs::symlink("/bin/sh", &launcher).unwrap();
     let output = isolated_command(root, root)
-        .args(["native-probe", "NATIVE_OK"])
+        .args(["native-probe", "-c", "echo NATIVE_OK"])
         .output()
         .unwrap();
     assert!(
