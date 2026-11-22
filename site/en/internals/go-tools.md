@@ -16,7 +16,8 @@ prefixes, exact semantic versions, or canonical Go pseudo-versions.
 When the process environment or Go's user environment file sets a module source
 policy, osdk runs the managed Go executable with `go list -m -json` for version
 lookup. It passes the same allowlisted source settings to `go install`, so Go
-handles each fallback separator, privacy patterns, and direct resolution.
+handles each fallback separator, privacy patterns, and direct resolution. An
+activation-injected `GOPROXY` is read as its saved user value or absence.
 Setting only privacy rules selects direct VCS lookups. The provider still
 clears its environment and does not load the whole Go env file or forward
 credentials. Native-source module caches are keyed by policy fingerprint.

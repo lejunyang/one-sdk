@@ -4167,7 +4167,7 @@ fn go_native_file_policy_reaches_version_lookup_install_and_shim() {
         r#"#!/bin/sh
 set -eu
 if [ "$1" = "env" ]; then
-    [ "${{GOPROXY-unset}}" = unset ] || exit 10
+    [ -z "${{GOPROXY:-}}" ] || exit 10
     [ "$GOENV" = '{}' ] || exit 11
     printf 'native go env retained\n'
     exit
@@ -4201,6 +4201,11 @@ esac
 
     let env = [
         ("GOENV", goenv.to_str().unwrap()),
+        // The public proxy left by a prior activation must not replace GOENV.
+        ("GOPROXY", "https://proxy.golang.org|direct"),
+        ("OSDK_MANAGED_ENV", "GOPROXY"),
+        ("OSDK_ORIG_GOPROXY_SET", "1"),
+        ("OSDK_ORIG_GOPROXY_PRESENT", "0"),
         ("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()),
     ];
     let output = run_isolated_in_with_env(
