@@ -175,6 +175,13 @@ pub trait Backend: Send + Sync {
     /// Backend-specific install transaction; call `install` to apply policy.
     async fn install_inner(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()>;
 
+    /// Check request policy before an install can be satisfied from disk
+    /// without running the backend's version resolver.
+    #[cfg(feature = "install")]
+    fn validate_install_reuse(&self, _ctx: &Ctx, _req: &ToolRequest) -> Result<()> {
+        Ok(())
+    }
+
     /// Take the tool versions this backend installed on its own behalf during
     /// the most recent [`Backend::install`], clearing the record.
     ///

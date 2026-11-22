@@ -544,6 +544,8 @@ gopls version
 root 与精确 Go runtime，不记录传递 module graph；因此可离线复用精确匹配的完整安装，
 但不能进行全新离线构建。
 
+在线运行 `osdk install` 时，即使 Go 工具已经安装，也会核对当前代理及私有模块设置是否与锁文件一致。
+
 Go 工具安装保留 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`（含小写形式）。
 
 指南：[Go 开发工具](site/guide/tools/go.md)

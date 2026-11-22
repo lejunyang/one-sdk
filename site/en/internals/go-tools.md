@@ -153,3 +153,6 @@ represent this dependency and reject `go:` entries.
 and source identity but no transitive module graph or source payload. Cold
 offline installation and repair therefore fail before provider execution; only
 a complete, exactly matching installation can be reused offline.
+An online lock replay compares the current source policy fingerprint before
+looking for a complete install, including on the path that skips version
+resolution. Offline reuse continues to validate the locked install identity.

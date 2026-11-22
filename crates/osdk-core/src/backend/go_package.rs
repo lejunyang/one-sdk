@@ -1078,6 +1078,15 @@ impl Backend for GoPackageBackend {
     }
 
     #[cfg(feature = "install")]
+    fn validate_install_reuse(&self, ctx: &Ctx, req: &ToolRequest) -> Result<()> {
+        if !ctx.config.settings.offline && Self::has_locked_resolution(&req.options) {
+            let native = NativeGoSource::discover()?;
+            self.check_replay_source(&req.options, native.as_ref())?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "install")]
     async fn install_inner(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         self.install_with_runner(ctx.ctx, tv, &SystemCommandRunner)
             .await

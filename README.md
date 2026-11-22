@@ -622,6 +622,9 @@ schema-4 lock records the proxy, module root, and exact Go runtime—not the
 transitive module graph—so an exact completed install can be reused offline,
 but a cold offline build cannot.
 
+Online `osdk install` checks that the current Go proxy and privacy settings match
+the lock even when the tool is already installed.
+
 Go tool installs honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (including lowercase forms).
 
 Guide: [Go developer tools](site/en/guide/tools/go.md)

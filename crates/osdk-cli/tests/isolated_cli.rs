@@ -4317,9 +4317,11 @@ fn go_native_file_policy_reaches_version_lookup_install_and_shim() {
     )
     .unwrap();
     let runtime = root.join("installs/go/1.24.0");
+    let provider_calls = root.join("go-provider-calls");
     let script = format!(
         r#"#!/bin/sh
 set -eu
+printf '%s\n' "$*" >> '{}'
 if [ "$1" = "env" ]; then
     [ -z "${{GOPROXY:-}}" ] || exit 10
     [ "$GOENV" = '{}' ] || exit 11
@@ -4342,6 +4344,7 @@ case "$*" in
     *) exit 16 ;;
 esac
 "#,
+        provider_calls.display(),
         goenv.display()
     );
     write_executable(&runtime.join("bin/go"), &script);
@@ -4388,6 +4391,31 @@ esac
         String::from_utf8_lossy(&shim_env.stdout).trim(),
         "native go env retained"
     );
+
+    let calls_before_replay = std::fs::read_to_string(&provider_calls).unwrap();
+    let replay = |args: &[&str]| run_isolated_in_with_env(root, root, args, &env);
+    let original_policy = replay(&["install"]);
+    assert!(original_policy.status.success(), "{original_policy:?}");
+    let original_goenv = std::fs::read_to_string(&goenv).unwrap();
+    std::fs::write(&goenv, "GOPROXY=off\nGOPRIVATE=private.example\n").unwrap();
+    let changed_policy = replay(&["install"]);
+    assert!(!changed_policy.status.success(), "{changed_policy:?}");
+    let error = String::from_utf8_lossy(&changed_policy.stderr);
+    assert!(
+        error.contains("differs from the active native policy"),
+        "{error}"
+    );
+    let offline_reuse = replay(&["--offline", "install"]);
+    assert!(offline_reuse.status.success(), "{offline_reuse:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("osdk.lock")).unwrap(),
+        lock
+    );
+    assert_eq!(
+        std::fs::read_to_string(&provider_calls).unwrap(),
+        calls_before_replay
+    );
+    std::fs::write(&goenv, original_goenv).unwrap();
 
     let removed = run_isolated_in_with_env(
         root,

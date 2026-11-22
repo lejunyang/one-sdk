@@ -100,8 +100,9 @@ lookup and installation. Go keeps the order and separators of the configured
 proxy chain, including `direct` or `off`. With only privacy settings configured,
 standalone `go:` tools fetch directly from VCS. Use a proxy URL without embedded
 credentials. A managed Go runtime must be installed before listing or locking
-versions with a native source. Recreate the lock if you change the native source
-settings. After activation, an override such as `GOPROXY=off go list -m` or
+versions with a native source. Online `osdk install` checks the locked policy
+even when the tool is already installed. Recreate the lock if you change the
+native source settings. An exact, complete install can still be reused offline. After activation, an override such as `GOPROXY=off go list -m` or
 `GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
 applies to that command. When a command path matches the effective
 `GONOPROXY` rule, version lookup also keeps parent-module searches within that

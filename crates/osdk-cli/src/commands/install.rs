@@ -1652,6 +1652,7 @@ async fn install_one_with_resolution(
                 VersionSpec::Exact(_) | VersionSpec::Pinned(_)
             ))
     {
+        backend.validate_install_reuse(&app.ctx, &effective)?;
         if let Some(installed) = installed_dynamic_match(app, backend.as_ref(), &effective) {
             backend.ensure_post_install(&app.ctx, &installed)?;
             println!("{}", t!("msg.already_installed", tool = installed));
