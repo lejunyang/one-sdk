@@ -740,9 +740,9 @@ impl GoPackageBackend {
             .tempdir_in(&ctx.dirs.cache)
             .map_err(|error| Error::io(&ctx.dirs.cache, error))?;
         let env = self.command_env(ctx, &tv, stage.path(), Some(native))?;
-        let candidates = module_path_candidates(&self.command_path);
+        let command_path = self.command_path.clone();
         tokio::task::spawn_blocking(move || {
-            query_native_module(&go, stage.path(), env, candidates, query.as_deref())
+            query_native_module(&go, stage.path(), env, &command_path, query.as_deref())
         })
         .await
         .map_err(|error| Error::other(format!("Go module lookup did not complete: {error}")))?
@@ -1179,16 +1179,28 @@ fn query_native_module(
     go: &Path,
     cwd: &Path,
     env: BTreeMap<OsString, OsString>,
-    candidates: Vec<String>,
+    command_path: &str,
     query: Option<&str>,
 ) -> Result<(String, Vec<VersionInfo>)> {
+    let patterns = env
+        .get(OsStr::new("GONOPROXY"))
+        .or_else(|| env.get(OsStr::new("GOPRIVATE")))
+        .and_then(|value| value.to_str());
+    let private_prefix =
+        super::go_env::private_query_prefix(command_path, patterns.unwrap_or_default())?;
+    let candidates = module_path_candidates(command_path);
     let command = CommandSpec::new(go)
         .args(["list", "-m", "-json"])
         .envs(env)
         .current_dir(cwd)
         .clear_env();
     let mut last_error = None;
-    for module in candidates {
+    // Go reevaluates privacy for each go list invocation. Keep a private
+    // command's ancestor probes inside its original no-proxy boundary.
+    for module in candidates
+        .into_iter()
+        .take_while(|module| private_prefix.is_none_or(|prefix| module.starts_with(prefix)))
+    {
         let command = match query {
             Some(query) => command.clone().arg(format!("{module}@{query}")),
             None => command.clone().args(["-versions", &module]),
@@ -1222,9 +1234,12 @@ fn query_native_module(
             _ => return Err(Error::other("native Go module metadata lookup exceeded its time or output limits or could not start")),
         }
     }
+    let detail = last_error.as_deref().unwrap_or("no module versions found");
+    let scope = private_prefix
+        .map(|prefix| format!("; search limited to private module paths under `{prefix}`"))
+        .unwrap_or_default();
     Err(Error::other(format!(
-        "native Go module lookup failed: {}; check GOPROXY and Go privacy settings",
-        last_error.as_deref().unwrap_or("no module versions found")
+        "native Go module lookup failed: {detail}{scope}; check GOPROXY and Go privacy settings"
     )))
 }
 

@@ -91,7 +91,9 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 版本控制系统。代理 URL 不得内嵌凭据。用原生源列出或锁定版本前，先安装受管 Go
 运行时；修改原生源后重新生成锁文件。激活后仍可用 `GOPROXY=off go list -m`
 或 `GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
-为单条命令指定代理策略。
+为单条命令指定代理策略。命令路径匹配生效的 `GONOPROXY` 规则时，查版本也只在规则
+覆盖范围内尝试父模块。Go 默认使用 `GOPRIVATE` 作为 `GONOPROXY`，显式设置
+`GONOPROXY=none` 则允许使用用户配置的代理。
 
 未配置原生 Go 源时，内置候选为 `https://proxy.golang.org` 与 `https://goproxy.cn`。它们遵循通用的 `auto`、
 `ordered` 和 pin 来源策略；auto 会先探测并缓存排序，再解析 metadata。精确版本仍通过

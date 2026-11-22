@@ -103,7 +103,10 @@ credentials. A managed Go runtime must be installed before listing or locking
 versions with a native source. Recreate the lock if you change the native source
 settings. After activation, an override such as `GOPROXY=off go list -m` or
 `GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
-applies to that command.
+applies to that command. When a command path matches the effective
+`GONOPROXY` rule, version lookup also keeps parent-module searches within that
+rule. Go defaults `GONOPROXY` to `GOPRIVATE`; explicitly setting
+`GONOPROXY=none` allows the configured proxy.
 
 Without native Go source settings, the built-in candidates are `https://proxy.golang.org` and
 `https://goproxy.cn`. The normal `auto`, `ordered`, and pinned source policies

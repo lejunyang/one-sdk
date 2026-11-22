@@ -20,6 +20,10 @@ handles each fallback separator, privacy patterns, and direct resolution. An
 activation records the last `GOPROXY` it wrote. Version lookup, source fingerprints
 and shim execution use the saved value or absence only while the current value
 matches that record. A command-level override changes the effective source policy.
+For version lookup, each native `go list -m` invocation receives a candidate
+module path. If the original command path matches the effective no-proxy
+patterns, osdk limits those candidates to the broadest matching path prefix.
+An empty result or failed lookup cannot extend that search beyond the prefix.
 Setting only privacy rules selects direct VCS lookups. The provider still
 clears its environment and does not load the whole Go env file or forward
 credentials. Native-source module caches are keyed by policy fingerprint.

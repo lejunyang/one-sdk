@@ -4240,6 +4240,71 @@ fn complete_go_fixture(runtime: &Path) {
 
 #[cfg(unix)]
 #[test]
+fn private_go_lookup_never_retries_a_public_parent() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let runtime = root.join("installs/go/1.24.0");
+    write_executable(
+        &runtime.join("bin/go"),
+        r#"#!/bin/sh
+[ "$1 $2 $3 $4" = "list -m -json -versions" ] || exit 2
+case "$5" in
+    private.example/acme/secret/fail/* | private.example/acme/secret/fail | private.example/acme/secret/found/cli)
+        printf 'private module unavailable\n' >&2; exit 1 ;;
+    private.example/acme/secret/empty/* | private.example/acme/secret/empty | private.example/acme/secret)
+        printf '{"Path":"%s","Versions":[]}\n' "$5" ;;
+    private.example/acme/secret/found)
+        printf '{"Path":"%s","Versions":["v1.2.3"]}\n' "$5" ;;
+    private.example/acme)
+        printf '{"Path":"%s","Versions":["v9.0.0"]}\n' "$5" ;;
+    *) exit 2 ;;
+esac
+"#,
+    );
+    complete_go_fixture(&runtime);
+    let lookup = |package, privacy, no_proxy| {
+        run_isolated_in_with_env(
+            root,
+            root,
+            &[
+                "list-remote",
+                &format!("go:private.example/acme/secret/{package}/cli"),
+            ],
+            &[
+                ("GOPROXY", "http://127.0.0.1:1|off"),
+                ("GOPRIVATE", privacy),
+                ("GONOPROXY", no_proxy),
+            ],
+        )
+    };
+    let privacy = "*.example/acme/secret/";
+    for (pattern, no_proxy) in [("unrelated.example", ""), (privacy, "none")] {
+        let public = lookup("fail", pattern, no_proxy);
+        assert!(public.status.success(), "{public:?}");
+        assert_eq!(String::from_utf8_lossy(&public.stdout).trim(), "9.0.0");
+    }
+    let found = lookup("found", privacy, "");
+    assert!(found.status.success(), "{found:?}");
+    assert_eq!(String::from_utf8_lossy(&found.stdout).trim(), "1.2.3");
+    for (package, reason) in [
+        ("fail", "private module unavailable"),
+        ("empty", "no module versions found"),
+    ] {
+        let private = lookup(package, privacy, "");
+        let error = String::from_utf8_lossy(&private.stderr);
+        assert!(!private.status.success(), "{private:?}");
+        assert!(error.contains(reason), "{error}");
+        assert!(
+            error.contains(
+                "search limited to private module paths under `private.example/acme/secret`"
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn go_native_file_policy_reaches_version_lookup_install_and_shim() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
