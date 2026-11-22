@@ -18,7 +18,7 @@ Rust 请求；Rust 会优先解析，其精确版本在 Cargo 继续解析前绑
 详见 [Cargo 开发工具实现](./cargo-tools#解析与精确-rust-绑定)。
 
 `go:` 使用专用 namespace schema 校验规范 module/command path、语义或伪版本、tags 与
-受限构建环境。它会注入或保留一个受管 Go 请求，先解析该 runtime，再通过已排序 Go proxy
+受限构建环境。它会注入或保留一个受管 Go 请求，先解析该 runtime，再通过原生 Go 源策略或已排序的 Go proxy
 metadata 发现最长 module root。详见 [Go 开发工具实现](./go-tools#规范身份与版本选择)。
 
 `VersionSpec` 的语义在 [`version/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 中定义：

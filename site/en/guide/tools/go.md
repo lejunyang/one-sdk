@@ -94,7 +94,16 @@ including their lowercase forms, so it can use the same network route as osdk
 metadata requests. These transport settings do not replace the selected
 `GOPROXY` module source or the isolated build environment.
 
-The built-in candidates are `https://proxy.golang.org` and
+For private modules, set `GOPROXY`, `GOPRIVATE`, or `GONOPROXY` in the
+environment or with `go env -w`. osdk uses those settings for both version
+lookup and installation. Go keeps the order and separators of the configured
+proxy chain, including `direct` or `off`. With only privacy settings configured,
+standalone `go:` tools fetch directly from VCS. Use a proxy URL without embedded
+credentials. A managed Go runtime must be installed before listing or locking
+versions with a native source. Recreate the lock if you change the native source
+settings.
+
+Without native Go source settings, the built-in candidates are `https://proxy.golang.org` and
 `https://goproxy.cn`. The normal `auto`, `ordered`, and pinned source policies
 apply; auto mode probes candidates and caches the ranking before metadata
 resolution. Exact versions are still verified with the chosen proxy's `.info`
@@ -117,7 +126,7 @@ different channel: `[sources.go]` only selects where the Go toolchain archive is
 downloaded from, while module downloads are driven by the go command through
 `GOPROXY`, so mirroring the archive does not mirror the modules.
 
-A managed go's xec_env injects a ranked GOPROXY. The candidate set is
+With no native source policy, managed Go receives a ranked GOPROXY. The candidate set is
 configured under its own `go-modules` name (`proxy.golang.org`, `goproxy.cn` and
 `mirrors.aliyun.com/goproxy` by default, with `direct` appended). Ranking here is
 configuration-level only, with no network probe: this code runs in the shim on
@@ -131,8 +140,8 @@ unreachable proxy and never reaches the mirrors behind it -- exactly the case
 mirrors exist for. The gatekeeper semantics a comma buys (a private proxy
 answering 403 stops the lookup instead of leaking the module path onward) do not
 apply, because every candidate here is a public mirror of the same public module
-set. A `GOPROXY` the user set themselves -- including `off` and `direct` -- is
-never overridden.
+set. Managed Go keeps native proxy and privacy settings from the environment and
+the Go environment file.
 
 `go-modules` is not a backend and so cannot be reached through the registry, but
 like `self` (osdk's own release download) it carries per-tool source

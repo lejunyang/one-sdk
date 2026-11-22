@@ -930,7 +930,7 @@ pub(crate) fn validate_go_native_replay(
     let source = native.source.as_deref().ok_or_else(|| {
         anyhow::anyhow!("schema 4 Go entry `{backend}` is missing its proxy source")
     })?;
-    osdk_core::backend::go_package::validate_go_proxy(source)?;
+    osdk_core::backend::go_package::validate_go_source_identity(source)?;
     let module = native.module.as_deref().ok_or_else(|| {
         anyhow::anyhow!("schema 4 Go entry `{backend}` is missing its module root")
     })?;

@@ -13,7 +13,15 @@ preserve case and reject URL delimiters, traversal, hidden components, control
 characters, and whitespace. Selectors are `latest`, one/two-component numeric
 prefixes, exact semantic versions, or canonical Go pseudo-versions.
 
-For `latest`, osdk queries each candidate's `@latest` endpoint. Prefix requests
+When the process environment or Go's user environment file sets a module source
+policy, osdk runs the managed Go executable with `go list -m -json` for version
+lookup. It passes the same allowlisted source settings to `go install`, so Go
+handles each fallback separator, privacy patterns, and direct resolution.
+Setting only privacy rules selects direct VCS lookups. The provider still
+clears its environment and does not load the whole Go env file or forward
+credentials. Native-source module caches are keyed by policy fingerprint.
+
+Without a native policy, osdk queries each candidate's `@latest` endpoint. Prefix requests
 consume the proxy's bounded `@v/list`; exact requests must be confirmed by a
 matching `.info` response. Module-proxy escaping follows Go's uppercase `!x`
 form. For nested commands, candidate module roots are tried longest first and
@@ -73,7 +81,7 @@ TMPDIR, TEMP, TMP   = <stage>/tmp
 GIT_TERMINAL_PROMPT = 0
 ```
 
-The command is `go install [-tags TAGS] <command-path>@v<exact-version>`. A fresh
+The command is `go install [-tags TAGS] <command-path>@v<exact-version>`. With osdk-managed sources, a fresh
 resolution puts the selected proxy first and appends the other allowed candidates
 with `|`, so Go can switch on any download error while osdk still starts the
 provider only once; `direct` is not appended. Lock replay has no complete source
@@ -102,6 +110,9 @@ Reuse, activation, shims, `where`, listing, and uninstall all revalidate this
 same identity, receipt, seal, binary content, and managed Go dependency.
 
 ## Lock schema 4
+
+Native-source locks store a `native:<sha256>` policy fingerprint in `source`. Online replay requires the same active policy.
+
 
 Go tools use the shared typed `native` table:
 

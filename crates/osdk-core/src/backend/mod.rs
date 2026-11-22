@@ -27,6 +27,7 @@ pub mod dynamic;
 pub mod github;
 mod github_asset;
 pub mod go;
+pub(crate) mod go_env;
 #[cfg(test)]
 mod go_module_proxy_tests;
 pub mod go_package;

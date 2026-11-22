@@ -17,6 +17,8 @@ osdk lock node@20 python@3.12
 osdk lock cargo:ripgrep@14 -o features=pcre2
 ```
 
+使用原生 Go 源时，先安装受管 Go 再锁定 `go:` 版本。锁文件记录策略指纹，源策略变更后重新生成锁文件。
+
 只把项目声明或显式点名的工具写入 lock；用户全局选择不会混入项目 lock。各平台条目
 分开保存。不要手写 lock 内的下载 URL、checksum、安装器身份或私有 replay metadata。
 

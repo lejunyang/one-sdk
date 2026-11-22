@@ -34,7 +34,8 @@ env_force = false
 - `pin` 是优先尝试，不是禁用其他回退源。
 - probe 成功只影响排序；osdk 直连产物在校验、解包或必需文件检查失败时仍会换下一个源。
 - 委托安装器使用安全的目标级策略：Rust 逐源执行 rustup，Cargo 预检精确 crate URL，
-  `pypi:` 探测实际项目页，`go:` 在全新解析时生成 `|` 分隔的 GOPROXY 回退链。
+  `pypi:` 和 `go:` 优先使用原生源。未配置原生源时，`pypi:` 探测实际项目页，
+  `go:` 在全新解析时生成 `|` 分隔的 GOPROXY 回退链。
 - `forward_credentials` 只对明确允许的自定义端点转发 provider 凭据。
 - 特殊 key：`self` 管 osdk 自升级，`go-modules` 管 `GOPROXY`。
 

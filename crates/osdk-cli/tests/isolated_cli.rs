@@ -4151,6 +4151,117 @@ EOF
 
 #[cfg(unix)]
 #[test]
+fn go_native_file_policy_reaches_version_lookup_install_and_shim() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[tools]\ngo = \"1.24.0\"\n").unwrap();
+    let goenv = root.join("go.env");
+    let chain = "http://127.0.0.1:1/,https://private.example/proxy|direct";
+    std::fs::write(
+        &goenv,
+        format!("GOPROXY={chain}\nGOPRIVATE=private.example\n"),
+    )
+    .unwrap();
+    let runtime = root.join("installs/go/1.24.0");
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+if [ "$1" = "env" ]; then
+    [ "${{GOPROXY-unset}}" = unset ] || exit 10
+    [ "$GOENV" = '{}' ] || exit 11
+    printf 'native go env retained\n'
+    exit
+fi
+[ "$GOPROXY" = '{chain}' ] || exit 12
+[ "$GOPRIVATE" = 'private.example' ] || exit 13
+[ "${{GONOPROXY-unset}}" = unset ] || exit 14
+[ "$GOENV" = off ] && [ "$GOAUTH" = off ] || exit 15
+case "$*" in
+    'list -m -json private.example/acme/cli/cmd/cli@latest') exit 1 ;;
+    'list -m -json private.example/acme/cli/cmd@latest') exit 1 ;;
+    'list -m -json private.example/acme/cli@latest')
+        printf '%s\n' '{{"Path":"private.example/acme/cli","Version":"v1.2.3"}}' ;;
+    'install private.example/acme/cli/cmd/cli@v1.2.3')
+        /bin/mkdir -p "$GOBIN"
+        printf '#!/bin/sh\nprintf native-cli-ok\n' > "$GOBIN/cli"
+        /bin/chmod +x "$GOBIN/cli" ;;
+    *) exit 16 ;;
+esac
+"#,
+        goenv.display()
+    );
+    write_executable(&runtime.join("bin/go"), &script);
+    write_executable(&runtime.join("bin/gofmt"), "#!/bin/sh\nexit 0\n");
+    write_executable(&runtime.join("pkg/tool/compile"), "#!/bin/sh\nexit 0\n");
+    std::fs::create_dir_all(runtime.join("src/runtime")).unwrap();
+    std::fs::write(runtime.join("src/runtime/runtime.go"), "package runtime\n").unwrap();
+    std::fs::write(runtime.join("VERSION"), "go1.24.0\n").unwrap();
+    std::fs::write(runtime.join("go.env"), "GOTOOLCHAIN=local\n").unwrap();
+    std::fs::write(runtime.join(".osdk-complete"), "").unwrap();
+
+    let env = [
+        ("GOENV", goenv.to_str().unwrap()),
+        ("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()),
+    ];
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["use", "go:private.example/acme/cli/cmd/cli@latest"],
+        &env,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock = std::fs::read_to_string(root.join("osdk.lock")).unwrap();
+    assert!(lock.contains("version = \"1.2.3\""), "{lock}");
+    assert!(lock.contains("source = \"native:"), "{lock}");
+    assert!(
+        lock.contains("module = \"private.example/acme/cli\""),
+        "{lock}"
+    );
+    assert!(!lock.contains(chain), "{lock}");
+
+    let shim_env =
+        run_isolated_in_with_env(root, root, &["exec", "--", "go", "env", "GOPROXY"], &env);
+    assert!(
+        shim_env.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shim_env.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&shim_env.stdout).trim(),
+        "native go env retained"
+    );
+
+    let removed = run_isolated_in_with_env(
+        root,
+        root,
+        &[
+            "--yes",
+            "uninstall",
+            "go:private.example/acme/cli/cmd/cli@1.2.3",
+        ],
+        &env,
+    );
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    std::fs::write(&goenv, "GOPROXY=off\n").unwrap();
+    let replay = run_isolated_in_with_env(root, root, &["install"], &env);
+    assert!(!replay.status.success());
+    let error = String::from_utf8_lossy(&replay.stderr);
+    assert!(
+        error.contains("differs from the active native policy"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn go_tool_use_publishes_locks_reuses_offline_and_uninstalls_exact_identity() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");

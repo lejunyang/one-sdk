@@ -55,16 +55,17 @@ override inside an otherwise empty osdk-owned configuration, so `npm:<package>`
 package fetches do not forward `Source.headers`. Project operations may use native trusted configuration;
 global npm-tool installs remain anonymous: discarded user credentials alone do not block
 public packages, while private/scoped policy still fails closed. See [npm tools](/en/guide/tools/npm#sources-and-shared-storage).
-Go command tools add one stricter boundary: if custom sources exist, only those
+Go command tools delegate a configured native policy to Go. With osdk-managed sources, if custom sources exist, only those
 custom candidates (plus an explicitly pinned candidate) are ranked, so a private
 module path is not sent to public default proxies. Custom headers are rejected
-because `go install` cannot enforce osdk's per-request forwarding policy. A fresh
+because `go install` cannot enforce osdk's per-request forwarding policy. For osdk-managed sources, a fresh
 resolution joins the preferred and remaining candidates with `|` as one GOPROXY,
 letting Go perform download failover inside one provider invocation; lock replay
-restores only its recorded primary proxy. Cargo Registry selection instead reads
+restores the recorded primary proxy or checks the native policy fingerprint. Cargo Registry selection instead reads
 the sparse `config.json` and probes the exact `.crate` URL before fixing source
-identity, avoiding a rerun after build scripts may have started. `pypi:` uses an anonymous listing on the selected native index when configured. Otherwise it probes
-the requested project page and injects the winner as uv/pip's default index.
+identity, avoiding a rerun after build scripts may have started. `pypi:` lists
+versions anonymously on the selected native index when configured. Otherwise it
+probes the requested project page and injects the winner as uv/pip's default index.
 
 ## Project registry preflight
 

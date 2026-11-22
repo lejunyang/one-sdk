@@ -48,7 +48,7 @@ endpoint 或 pin、选择策略为 `auto` 且非 offline 时刷新。当前对 `
 本节的竞速规则描述 SDK/工具产物来源。exec/shim/deps 的项目包操作保留显式包源环境变量，不把它们与镜像竞速。见[包源优先级](/guide/project/deps#包源与原生配置优先级)。
 
 各工具链本身都支持用环境变量指定镜像：rustup 读 `RUSTUP_DIST_SERVER`
-（以及 `RUSTUP_UPDATE_ROOT`），go 命令读 `GOPROXY`，npm 系读
+（以及 `RUSTUP_UPDATE_ROOT`），go 命令直接使用原生模块源设置，npm 系读
 `npm_config_registry`、`pnpm_config_registry`、`YARN_REGISTRY`、
 `YARN_NPM_REGISTRY_SERVER`、`BUN_CONFIG_REGISTRY` 等。
 
@@ -59,8 +59,9 @@ endpoint 或 pin、选择策略为 `auto` 且非 offline 时刷新。当前对 `
   osdk 打印一条 warning 并忽略该值，继续用内置镜像，而不是静默丢弃；
 - 校验通过则作为 id 为 `env` 的候选加入探测，可在 `osdk source list <工具>`
   中看到；若它与某个内置镜像地址相同，则不会重复出现；
-- `GOPROXY` 的 `off`、`direct` 以及逗号/竖线分隔的回退列表是合法的 go 设置，
-  但不是单一可探测的镜像，因此会被跳过并给出说明。
+
+Go 的原生模块源设置按策略直接使用，包括 `off`、`direct` 和逗号或竖线分隔的
+代理链。见 [Go 开发工具](../tools/go)。
 
 需要无条件遵循环境变量时（例如公司内网镜像即使较慢也必须使用）用
 `--source-mode env`，此时缺失或不合法都会**报错**而不是回退，避免配置错误被
@@ -138,8 +139,8 @@ Last-Modified，重试时用 `Range` + `If-Range` 续传；服务端忽略或返
 
 委托型安装器不能统一用“命令失败就重跑”处理，因为安装脚本可能已经产生副作用。osdk
 改在安全边界内做目标级验证：Rust 对每个 source 重跑完整 rustup 下载命令；Cargo 在锁定
-sparse index 前检查该 crate 精确版本的 `config.json` 下载端点；`pypi:` 用实际项目页而非
-固定 `pip` 页探测，并把选中 index 作为 uv/pip 的默认 index；`go:` 把排序候选以 `|`
-组成一次原生 `GOPROXY` 回退链。普通项目里的 npm/uv/pip 等命令仍只执行一次，不会在
+sparse index 前检查该 crate 精确版本的 `config.json` 下载端点。未配置原生源时，
+`pypi:` 探测实际项目页并把选中地址设为 uv/pip 的默认索引，`go:` 把排序候选以 `|`
+组成一次 `GOPROXY` 回退链。普通项目里的 npm/uv/pip 等命令仍只执行一次，不会在
 可能已运行 lifecycle script 后盲目重放。HTTP metadata 在线请求失败后可使用 stale 缓存；
 严格 offline 只读已有缓存，缓存产物仍会重新校验和解包。

@@ -35,8 +35,9 @@ Zig 与 Gradle index 中的绝对产物 URL 会按发布相对路径重映射到
 Maven/Kotlin 也使用有效 source 列表，而不是固定只用内置首项。
 
 委托型安装不会一概在命令失败后重跑：Cargo 会在选定 sparse index 前探测精确 crate
-制品，`pypi:` 会探测实际项目页并把结果传给 uv/pip，`go:` 的全新解析会生成以 `|`
-连接的原生 `GOPROXY` 回退链。普通项目依赖命令可能已经执行 lifecycle script，因此
+制品。配置原生源时，`pypi:` 使用单一 pip/uv 索引，`go:` 保留环境变量或
+`go env -w` 保存的代理链和私有模块设置。未配置原生源时，`pypi:` 探测实际项目页，
+`go:` 把排序候选连成 `GOPROXY` 回退链。普通项目依赖命令可能已经执行 lifecycle script，因此
 仍只运行一次。
 
 Node 会合并所有可达版本 index；经典 CPython 会合并同一 release tag 的

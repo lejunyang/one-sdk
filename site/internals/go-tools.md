@@ -11,7 +11,13 @@ backend 明确分离。
 保留大小写，并拒绝 URL 分隔符、路径穿越、隐藏 component、控制字符与空白。selector
 支持 `latest`、一到两段数字前缀、精确语义版本与规范 Go 伪版本。
 
-`latest` 请求使用候选 module 的 `@latest` endpoint；前缀请求读取有界的 `@v/list`；
+若进程环境或 Go 用户环境文件配置了模块源，osdk 用受管 Go 的
+`go list -m -json` 查版本，并把同一组白名单内的源设置传给 `go install`。
+分隔符的回退语义、私有模块匹配和直连均由 Go 处理。仅配置私有规则时直接查版本控制
+系统。受管进程仍使用清空后的环境，不会加载整个 Go 环境文件或转发凭据。模块缓存
+按原生策略指纹分开。
+
+未配置原生源时，`latest` 请求使用候选 module 的 `@latest` endpoint；前缀请求读取有界的 `@v/list`；
 精确请求必须由匹配的 `.info` 响应证明。module proxy 转义遵循 Go 的大写字母 `!x` 规则。
 嵌套 command 会优先尝试最长 module 候选，并在每个候选内按来源排序依次尝试，避免较短
 module 因 proxy 更快而遮蔽实际存在的较长 module。
@@ -82,6 +88,9 @@ provider 成功后，osdk 删除私有 workspace，写入有界 `go-resolution.j
 与受管 Go 依赖。
 
 ## Lock schema 4
+
+使用原生源时，`source` 记录 `native:<sha256>` 策略指纹。在线重放要求当前策略一致。
+
 
 Go 工具使用共享的类型化 `native` 子表：
 

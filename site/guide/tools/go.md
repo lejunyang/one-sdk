@@ -85,7 +85,13 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 以便沿用 osdk 元数据请求的网络路径。这些传输设置不会替换选中的 `GOPROXY`
 模块来源，也不会取消构建环境隔离。
 
-内置候选为 `https://proxy.golang.org` 与 `https://goproxy.cn`。它们遵循通用的 `auto`、
+可以在环境变量里设置 `GOPROXY`、`GOPRIVATE` 或 `GONOPROXY`，也可以用
+`go env -w` 保存这些设置。`go:` 会沿用它们查版本和安装，保留代理链的顺序、
+逗号或竖线以及 `direct`、`off`。仅配置私有模块规则时，独立 `go:` 工具会直接走
+版本控制系统。代理 URL 不得内嵌凭据。用原生源列出或锁定版本前，先安装受管 Go
+运行时；修改原生源后重新生成锁文件。
+
+未配置原生 Go 源时，内置候选为 `https://proxy.golang.org` 与 `https://goproxy.cn`。它们遵循通用的 `auto`、
 `ordered` 和 pin 来源策略；auto 会先探测并缓存排序，再解析 metadata。精确版本仍通过
 选中 proxy 的 `.info` endpoint 验证。
 
@@ -101,7 +107,7 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 `go test`）拉取依赖是另一条通道：`[sources.go]` 只决定 Go 工具链归档的下载来源，
 模块下载由 go 命令自己按 `GOPROXY` 进行，因此镜像归档并不会让模块也走镜像。
 
-受管 go 的 `exec_env` 会注入一份排好序的 `GOPROXY`，候选集在配置里用 `go-modules`
+没有原生源策略时，受管 go 会收到一份排好序的 `GOPROXY`，候选集在配置里用 `go-modules`
 这个独立名字管理（默认为 `proxy.golang.org`、`goproxy.cn`、`mirrors.aliyun.com/goproxy`，
 末尾追加 `direct`）。这里只做配置层排序、不做网络探测：这段代码在 shim 里每次命令
 调用都会执行，一次探测往返会直接计入交互延迟；实时测速仍留在安装路径。
@@ -110,7 +116,7 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 下一个，连接超时被视为终止错误，于是首个不可达的 proxy 就会让整条链失效 —— 而这
 恰好是需要镜像的场景。逗号带来的 gatekeeper 语义（私有 proxy 返回 403 时停止查找，
 避免把 module path 泄漏给下一个来源）在这里不适用，因为这组候选全是同一批公开模块
-的公开镜像。用户自己设过 `GOPROXY`（含 `off`、`direct`）时不会被覆盖。
+的公开镜像。受管 Go 会保留进程环境和 Go 环境文件中的代理与私有模块设置。
 
 `go-modules` 不是 backend，因此进不了 registry；但它和 `self`（osdk 自身的发布下载）
 一样携带 per-tool source 配置，所以 `canonical_source_tool` 显式放行它，`osdk source`
