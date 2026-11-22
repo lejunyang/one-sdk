@@ -420,14 +420,15 @@ pub(crate) async fn use_project_npm(
         })?;
 
     apply_source_override(app, &request.backend);
-    let backend = app.registry.get(&request.backend)?;
-    let mut effective = expand_request_alias(app, backend.as_ref(), &request)?;
+    let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
+        .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?;
+    let mut effective = expand_request_alias(app, &backend, &request)?;
     effective.options.insert(
         osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
         node_version.version.clone(),
     );
     let mut version = backend
-        .resolve_version(&app.ctx, &effective)
+        .resolve_delegated_version(&app.ctx, &effective)
         .await
         .with_context(|| format!("resolving {}@{}", request.backend, request.spec))?;
     bind_dynamic_request_options(&effective, &mut version);
@@ -480,9 +481,7 @@ pub(crate) async fn use_project_npm(
             }
         }
 
-        osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
-            .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?
-            .validate_project_package_bins(&project.root, &version.version)?;
+        backend.validate_project_package_bins(&project.root, &version.version)?;
         let installed_project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
             .ok_or_else(|| anyhow!("project package.json disappeared during npm install"))?;
         let native_lock = installed_project.native_lock.ok_or_else(|| {

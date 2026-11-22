@@ -53,6 +53,10 @@ osdk install --include-lazy        # 连同 lazy 工具一起安装
 
 `install --force` 会在持有安装锁时清除精确解析出的动态安装身份的完成标记，使 Go/Cargo 原生工具真正重建，而不是静默复用旧产物。
 
+`npm:<包名>` 的合成项目读取用户 npmrc 的 `registry`，匿名用于版本查询、锁图
+与未锁定安装。用户凭据留在原配置里。没有原生 registry 时用工具的 `[sources]`。
+原生源不能匿名访问时，可添加自定义源并通过 `--source <id>` 选择。
+
 项目隔离的原生 npm 安装同样保留 NODE_EXTRA_CA_CERTS，并在切换到临时项目目录之前解析其文件路径；其他环境 npm 配置仍保持隔离。
 
 ## 已存在的环境变量告警

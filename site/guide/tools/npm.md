@@ -278,7 +278,11 @@ activation、shim 分发、`where`、`uninstall` 与 `reshim` 都从活动请求
 
 ## Source 与共享存储
 
-动态 npm 版本 metadata 使用常规 npm source 选择，在 npmmirror 与 npmjs 之间选择。
+`osdk install npm:<包名>`、`osdk exec --tool npm:<包名>` 与合成项目的 `osdk lock`
+都会使用用户 npmrc 声明的 `registry`。版本查询、生成依赖图及未锁定安装只访问
+该源，仍使用空的用户和全局 npm 配置。源不可匿名访问时，添加 `[sources]`
+自定义源后用 `--source <id>` 显式选择。未配置 npmrc registry 时，版本 metadata
+仍用常规 npm source 选择，包括 npmmirror 和 npmjs。
 它与受管原生 npm 或 pnpm 进程启动前执行的 `[registries.npm]` 预检不同。项目委托保留
 文档约定的显式 Registry 优先级；全局委托在 osdk 控制的前缀中匿名安装。
 用户 npmrc 或环境变量中仅存在认证信息（例如 npmjs 登录 token）不会阻止安装公共包，

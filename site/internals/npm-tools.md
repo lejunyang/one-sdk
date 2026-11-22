@@ -167,6 +167,10 @@ osdk 自己发起的 npm metadata 请求和 source probe 会使用显式 `Source
 preflight 针对用户随后运行的
 npm/pnpm/Yarn/Bun/Deno 命令，每次调用独立判断，不能与这里的 TTL cache 等同。
 
+合成项目调用同一套原生配置判定。只把选中的匿名 registry 加入工具源列表。
+版本查询、精确版本的 integrity 校验、锁图生成与 npm 子进程都使用该源。
+没有原生声明时，仍沿用工具自己的 `[sources]` 策略。
+
 ## 构建脚本策略与结构化配置
 
 对隔离和全局安装，默认 `BuildPolicy::Deny` 都会通过向受管 npm 子进程传入

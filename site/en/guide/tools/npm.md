@@ -339,7 +339,12 @@ generation, not by these fingerprinted install roots.
 
 ## Sources and shared storage
 
-Dynamic npm version metadata uses the normal npm source selection across
+`osdk install npm:<package>`, `osdk exec --tool npm:<package>`, and synthetic
+project `osdk lock` use the registry declared in the user's npmrc. Version
+lookup, graph generation, and unlocked installation use that registry alone.
+The installer receives empty user and global npm configuration. If anonymous
+access fails, add a custom `[sources]` entry and select it with `--source <id>`.
+With no registry in npmrc, version metadata uses normal source selection across
 npmmirror and npmjs. This is distinct from the `[registries.npm]` preflight used
 before a managed native npm or pnpm process starts. Project delegates retain the
 documented explicit registry precedence. Global delegates run with isolated

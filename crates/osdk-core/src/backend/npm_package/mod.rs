@@ -25,6 +25,7 @@ const GLOBAL_INSTALL_NAMESPACE: &str = "npm-global";
 const PROJECT_DIR: &str = "project";
 const NPM_DIR: &str = "npm";
 const NPM_CACHE_VERSION: &str = "v1";
+const NATIVE_NPMRC_SOURCE: &str = "npmrc";
 const CACHE_DIR: &str = "cache";
 const NPM_LOCKFILE_NAME: &str = "package-lock.json";
 /// Installer recorded by isolated (synthetic-project) installs.
@@ -227,6 +228,62 @@ struct IdentityPackage {
 }
 
 impl NpmPackageBackend {
+    #[cfg(feature = "install")]
+    pub async fn resolve_delegated_version(
+        &self,
+        ctx: &Ctx,
+        req: &ToolRequest,
+    ) -> Result<ToolVersion> {
+        self.resolve_with_sources(ctx, req, true).await
+    }
+
+    #[cfg(feature = "install")]
+    async fn resolve_with_sources(
+        &self,
+        ctx: &Ctx,
+        req: &ToolRequest,
+        delegated: bool,
+    ) -> Result<ToolVersion> {
+        crate::backend::dynamic::validate_options(self.id(), &req.options)?;
+        let sources = if delegated {
+            // Native project and global delegates decide their own registry policy.
+            let sources = crate::source::select::effective_sources(ctx, self);
+            crate::source::select::ranked_source_candidates(ctx, self, sources).await?
+        } else {
+            crate::source::select::ranked_source_list(ctx, self).await?
+        };
+        let mut version = self.registry_result(
+            &sources,
+            crate::npm::resolve_package_version(ctx, &sources, &self.package, self.id(), req).await,
+        )?;
+        let scope = self
+            .selected_scope(ctx, &version)?
+            .unwrap_or(ToolScope::Project);
+        if let Some(node_version) = selected_node_version_for(ctx, scope) {
+            version
+                .options
+                .entry(LOCKED_NPM_NODE_VERSION_OPTION.into())
+                .or_insert(node_version);
+        }
+        Ok(version)
+    }
+
+    fn registry_result<T>(&self, sources: &[Source], result: Result<T>) -> Result<T> {
+        result.map_err(|error| {
+            if sources.iter().any(|source| {
+                source.kind == crate::source::SourceKind::Mirror && source.id == NATIVE_NPMRC_SOURCE
+            }) {
+                Error::other(format!(
+                    "{}: anonymous npmrc registry access failed: {error}. \
+                     Add an anonymous custom registry in `[sources]` and select it with `--source`",
+                    self.id
+                ))
+            } else {
+                error
+            }
+        })
+    }
+
     pub fn from_id(id: &str) -> Option<Self> {
         let id = crate::inventory::canonical_dynamic_id(id).ok()?;
         let package = id.strip_prefix("npm:")?.to_string();
@@ -1084,10 +1141,11 @@ impl NpmPackageBackend {
             );
         }
         let _ = std::fs::remove_file(&lockfile_path);
-        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+        let error = last_error.unwrap_or_else(|| Error::NoUsableSource {
             tool: self.id().to_string(),
             tried: sources.len(),
-        }))
+        });
+        self.registry_result(&sources, Err(error))
     }
 
     fn write_project_npmrc(project_dir: &Path, url: Option<&str>) -> Result<()> {
@@ -1279,9 +1337,41 @@ impl Backend for NpmPackageBackend {
     }
 
     #[cfg(feature = "install")]
+    fn restrict_sources(&self, ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
+        // Like the global preflight, resolve user configuration outside the
+        // invoking project. The synthetic project's own npmrc is written later.
+        let cwd = ctx.dirs.data.join("npm-registry-preflight");
+        let native = crate::package_registry::isolated_native_npm_registry(ctx, &cwd);
+        if matches!(&native, Ok(None)) {
+            return Ok(sources);
+        }
+        let pin = ctx
+            .config
+            .tool_sources(self.id())
+            .and_then(|cfg| cfg.pin.as_deref());
+        if let Some(custom) = sources.iter().find(|source| {
+            Some(source.id.as_str()) == pin && source.kind == crate::source::SourceKind::Custom
+        }) {
+            return Ok(vec![custom.clone()]);
+        }
+        match native {
+            Ok(Some(url)) => Ok(vec![Source::mirror(NATIVE_NPMRC_SOURCE, &url, 0)]),
+            Ok(None) => Ok(sources),
+            Err(error) => Err(Error::config(format!(
+                "{}: cannot use native npm configuration in an isolated install ({error}). \
+                 Add an anonymous custom registry in `[sources]` and select it with `--source`",
+                self.id
+            ))),
+        }
+    }
+
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let versions = crate::npm::list_versions(ctx, &sources, &self.package).await?;
+        let versions = self.registry_result(
+            &sources,
+            crate::npm::list_versions(ctx, &sources, &self.package).await,
+        )?;
         Ok(versions
             .into_iter()
             .map(|version| VersionInfo {
@@ -1294,21 +1384,11 @@ impl Backend for NpmPackageBackend {
 
     #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
-        crate::backend::dynamic::validate_options(self.id(), &req.options)?;
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let mut version =
-            crate::npm::resolve_package_version(ctx, &sources, &self.package, self.id(), req)
-                .await?;
-        let scope = self
-            .selected_scope(ctx, &version)?
-            .unwrap_or(ToolScope::Project);
-        if let Some(node_version) = selected_node_version_for(ctx, scope) {
-            version
-                .options
-                .entry(LOCKED_NPM_NODE_VERSION_OPTION.into())
-                .or_insert(node_version);
-        }
-        Ok(version)
+        let delegated = req
+            .options
+            .get(LOCKED_NPM_SCOPE_OPTION)
+            .is_some_and(|scope| scope == ToolScope::Global.as_str());
+        self.resolve_with_sources(ctx, req, delegated).await
     }
 
     #[cfg(feature = "install")]
@@ -1359,7 +1439,10 @@ impl Backend for NpmPackageBackend {
         }
         let unlocked_resolution = if locked_graph.is_none() {
             let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-            let dist = crate::npm::resolve_dist(ctx, &sources, &self.package, &tv.version).await?;
+            let dist = self.registry_result(
+                &sources,
+                crate::npm::resolve_dist(ctx, &sources, &self.package, &tv.version).await,
+            )?;
             let root_checksum = dist.checksum.ok_or_else(|| {
                 Error::other(crate::t!(
                     "err.npm_package_sri_missing",
@@ -1432,7 +1515,7 @@ impl Backend for NpmPackageBackend {
             }
             if let Some(error) = last_error {
                 let _ = std::fs::remove_dir_all(&install_root);
-                return Err(error);
+                return self.registry_result(&resolution.sources, Err(error));
             }
         }
 

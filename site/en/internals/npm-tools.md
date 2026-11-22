@@ -223,6 +223,11 @@ Registry preflight in `package_registry.rs`
 applies to npm/pnpm/Yarn/Bun/Deno commands that users run later, evaluates each
 invocation independently, and must not be described as using this TTL cache.
 
+Synthetic projects share the native configuration checks. The tool source list
+contains only the resulting anonymous registry. Version lookup, exact-version
+integrity checks, lock graph generation, and the npm subprocess use it.
+With no native declaration the tool retains its own `[sources]` policy.
+
 ## Build-script policy and structured configuration
 
 For isolated and global installs, the default `BuildPolicy::Deny` disables root

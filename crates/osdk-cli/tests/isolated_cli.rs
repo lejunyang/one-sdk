@@ -4877,6 +4877,145 @@ fn write_fake_managed_npm(root: &Path, version: &str, script: &str) {
 }
 
 #[cfg(unix)]
+fn isolated_npm_registry_fixture(native: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let fallback = format!("http://{address}/fallback/");
+    let private = format!("http://{address}/private/");
+    let (base, path) = if native {
+        (&private, "/private/")
+    } else {
+        (&fallback, "/fallback/")
+    };
+    let tarball = format!("{base}fixture-tool/-/fixture-tool-1.2.3.tgz");
+    let integrity = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let server = std::thread::spawn({
+        let tarball = tarball.clone();
+        move || {
+            for (suffix, body) in [
+                (
+                    "",
+                    r#"{"dist-tags":{"latest":"1.2.3"},"versions":{"1.2.3":{}}}"#.to_string(),
+                ),
+                (
+                    "/1.2.3",
+                    serde_json::json!({ "dist": { "tarball": tarball, "integrity": integrity } })
+                        .to_string(),
+                ),
+            ] {
+                let mut stream = accept_fixture_connection(&listener, "synthetic npm registry");
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(
+                    request.starts_with(&format!("GET {path}fixture-tool{suffix} ")),
+                    "{request}"
+                );
+                assert!(!request.to_ascii_lowercase().contains("\r\nauthorization:"));
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        }
+    });
+    std::fs::create_dir(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        format!(
+            r#"
+[tools]
+node = "20.0.0"
+[sources]
+selection = "{selection}"
+[sources."npm:fixture-tool"]
+disable = ["npm", "npmmirror"]
+[[sources."npm:fixture-tool".custom]]
+id = "fallback"
+kind = "custom"
+download_url = "{fallback}"
+index_url = "{fallback}probe"
+"#,
+            selection = if native { "auto" } else { "ordered" }
+        ),
+    )
+    .unwrap();
+    let npmrc = format!("registry={private}\n//{address}/private/:_authToken=fixture-no-copy\n");
+    if native {
+        std::fs::create_dir(root.join("home")).unwrap();
+        std::fs::write(root.join("home/.npmrc"), &npmrc).unwrap();
+    }
+    write_fake_managed_npm(
+        root,
+        "20.0.0",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+test ! -s "$NPM_CONFIG_USERCONFIG"
+test ! -s "$NPM_CONFIG_GLOBALCONFIG"
+test -z "${{NPM_TOKEN:-}}"
+selected=
+for arg do
+  if [ "$arg" = '--registry={base}' ]; then selected=yes; fi
+done
+test "$selected" = yes
+/usr/bin/grep -Fx 'registry={base}' .npmrc
+mkdir -p node_modules/.bin node_modules/fixture-tool
+printf '%s' '{{"name":"fixture-tool","version":"1.2.3","bin":{{"fixture-tool":"cli.js"}}}}' > node_modules/fixture-tool/package.json
+printf '#!/bin/sh\nexit 0\n' > node_modules/fixture-tool/cli.js
+chmod +x node_modules/fixture-tool/cli.js
+ln -s ../fixture-tool/cli.js node_modules/.bin/fixture-tool
+printf '%s' '{{"lockfileVersion":3,"packages":{{"node_modules/fixture-tool":{{"version":"1.2.3","resolved":"{tarball}","integrity":"{integrity}"}}}}}}' > package-lock.json
+"#
+        ),
+    );
+    let installed = run_isolated_in_with_env(
+        root,
+        root,
+        &["install", "npm:fixture-tool@1"],
+        &[("PATH", "/usr/bin:/bin"), ("NPM_TOKEN", "fixture-no-copy")],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    server.join().unwrap();
+    let installer_config = walkdir::WalkDir::new(root.join("installs/npm/fixture-tool"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name() == ".npmrc")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(installer_config.path())
+            .unwrap()
+            .trim(),
+        format!("registry={base}")
+    );
+    if native {
+        assert_eq!(
+            std::fs::read_to_string(root.join("home/.npmrc")).unwrap(),
+            npmrc
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_npm_uses_native_registry_for_lookup_and_install_without_credentials() {
+    isolated_npm_registry_fixture(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_npm_without_native_registry_uses_osdk_sources() {
+    isolated_npm_registry_fixture(false);
+}
+
+#[cfg(unix)]
 #[test]
 fn node_package_migration_dry_run_uses_managed_npm_and_filters_packages() {
     let temp = tempfile::tempdir().unwrap();

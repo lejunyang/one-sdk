@@ -581,6 +581,31 @@ where
     plan_with_auth_policy(ctx, cwd, manager, executable_alias, args, getenv, true).await
 }
 
+/// Reuse isolated npm's native configuration policy without probing the
+/// separate application-registry mirrors. Synthetic tools fall back to
+/// their own `[sources]` list when there is no npmrc registry.
+#[cfg(feature = "install")]
+pub(crate) fn isolated_native_npm_registry(ctx: &Ctx, cwd: &Path) -> Result<Option<String>> {
+    let getenv = |name: &str| {
+        // The synthetic npm child already preserves an extra trust root.
+        if name == "NODE_EXTRA_CA_CERTS" {
+            None
+        } else {
+            std::env::var(name).ok()
+        }
+    };
+    let manager = PackageManager::Npm;
+    let decision = if let Some(name) = explicit_registry_env(manager, getenv) {
+        NativeDecision::PassThrough(format!("native environment {name} has invocation priority"))
+    } else {
+        native_registry_candidates_with_auth_policy(ctx, cwd, manager, getenv, true)?
+    };
+    match decision {
+        NativeDecision::Candidates(urls) => Ok(urls.into_iter().next()),
+        NativeDecision::PassThrough(reason) => Err(Error::config(reason)),
+    }
+}
+
 async fn plan_with_auth_policy<F>(
     ctx: &Ctx,
     cwd: &Path,

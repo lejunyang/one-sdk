@@ -403,6 +403,10 @@ registry routing remains unsupported for this isolated path. To pick the registr
 global installs yourself, set `[registries.npm] default` with
 `[settings.precedence] npm = "osdk"` in your user configuration.
 
+Isolated `osdk install npm:<package>` also uses the registry in your npmrc
+anonymously for lookup and installation. Add a custom osdk source if the
+registry requires a login.
+
 Prefix a package with `npm:` to distinguish it from the npm package manager. In
 a Node project, `use` adds the package to the nearest `package.json`, keeps an
 existing dependency section (or defaults to `devDependencies`), and makes its

@@ -386,6 +386,9 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 用户 npmrc 里的 `registry`（包括公司内网源）照原地址使用，不换成公共源；源要求登录时安装会失败并说明原因。
 该隔离路径仍不支持 scope 路由。要给全局安装单独指定源，在用户配置里写 `[registries.npm] default` 并设 `[settings.precedence] npm = "osdk"`。
 
+`osdk install npm:<包名>` 的项目隔离安装也会匿名使用 npmrc 里的 registry
+查版本和安装。源要求登录时，可显式指定 osdk 自定义源。
+
 直接调用托管 npm、未加载 shell 激活时，也默认使用共享目录。升级后运行一次
 `osdk reshim` 可更新已有 Node/npm 安装的默认值；仍支持显式覆盖 npm prefix。
 
