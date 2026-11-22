@@ -931,7 +931,7 @@ checksum/attestation verification fails, an archive cannot be unpacked, or its r
 missing. The receipt records the source whose artifact actually passed. Model sync likewise falls
 through after one source exhausts its attempts; exhaustion of every source remains terminal.
 
-If pip or uv is configured with a single index, `pypi:` uses it for version lookup and installation. Without a native index, set `[registries.python].urls` to choose the mirrors osdk can use. `go:` uses your native Go module proxy and privacy settings, including values saved by `go env -w`. Managed `go` commands also keep these settings, including command-level `GOPROXY` overrides after activation.
+If pip or uv is configured with a single index, `pypi:` uses it for version lookup and installation. If uv combines multiple indexes from project, user, or system configuration, `pypi:` reports an error before lookup or installation. Without a native index, set `[registries.python].urls` to choose the mirrors osdk can use. `go:` uses your native Go module proxy and privacy settings, including values saved by `go env -w`. Managed `go` commands also keep these settings, including command-level `GOPROXY` overrides after activation.
 
 A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,
 `npm_config_registry`, and the like) is validated and then raced against osdk's

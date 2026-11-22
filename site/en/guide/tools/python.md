@@ -234,7 +234,10 @@ version discovery and installation. It reads pip's `PIP_INDEX_URL` and
 `pip.conf` / `pip.ini`, including a file selected by `PIP_CONFIG_FILE`. It also
 reads uv's index environment variables and its project, user, system, or
 explicit configuration file. When both installers have a source, the chosen
-installer's source takes precedence. A single uv index is used as the default
+installer's source takes precedence. For uv, additional indexes from project,
+user, and system configuration are combined before checking for a single index.
+When the combined settings name different indexes, osdk reports an error before
+querying a version or starting an install. A single uv index is used as the default
 index, which keeps an implicit PyPI fallback out of that install.
 
 Native index discovery makes an anonymous request to the configured origin.

@@ -59,4 +59,4 @@ osdk install --include-lazy        # 连同 lazy 工具一起安装
 
 安装工具时，osdk 会检查该工具相关的环境变量是否已**持久**设置在用户/系统环境里（Windows 上读注册表 User/Machine 级，不看当前 shell 的临时 `Process` 变量；其他平台只看持久配置）。若已存在，会打印 warning，说明该变量会被 osdk 受管值覆盖，建议你清除它；或用 `[settings.<tool>] override_env = true`（顶层 `override_tools_env = true` 则对所有工具生效）显式让 osdk 忽略并覆盖这些已存在的可重定向变量。
 
-`pypi:` 优先从 pip 或 uv 配置的单个原生索引查版本和安装。需要匿名可读的版本列表时，可先用 `osdk list-remote pypi:<project>` 检查。
+`pypi:` 优先从 pip 或 uv 配置的单个原生索引查版本和安装。uv 会合并项目、用户、系统配置里的额外索引。合并后存在多个索引时，`pypi:` 会在查询或安装前报错。需要匿名可读的版本列表时，可先用 `osdk list-remote pypi:<project>` 检查。

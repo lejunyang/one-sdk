@@ -1,7 +1,7 @@
 //! Native index settings that a standalone pypi tool can use for both
 //! anonymous version discovery and installer execution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::pypi::EnvCreator;
@@ -189,103 +189,149 @@ fn uv_index(
             "uv configures an environment file or a non-index source",
         ));
     }
-    let mut defaults = UV_DEFAULT.iter().find_map(|key| value(getenv, key));
-    let mut extras = UV_EXTRA.iter().find_map(|key| value(getenv, key));
-    if !value(getenv, "UV_NO_CONFIG").is_some_and(|v| enabled(&v)) {
-        let files = if let Some(explicit) = value(getenv, "UV_CONFIG_FILE") {
-            vec![(PathBuf::from(explicit), false)]
-        } else {
-            uv_config_files(cwd, home, getenv)
-        };
-        for (path, pyproject) in files {
-            let Some(text) = read_config(&path)? else {
-                if value(getenv, "UV_CONFIG_FILE").is_some() {
-                    return Err(index_error("UV_CONFIG_FILE could not be read"));
-                }
-                continue;
-            };
-            let parsed: toml::Value = match toml::from_str(&text) {
-                Ok(parsed) => parsed,
-                Err(_) if pyproject => return Err(index_error("invalid pyproject.toml")),
-                Err(_) => return Err(index_error("invalid uv.toml")),
-            };
-            let config = if pyproject {
-                let Some(config) = parsed.get("tool").and_then(|tool| tool.get("uv")) else {
-                    continue;
-                };
-                config
-            } else {
-                &parsed
-            };
-            let pip = config.get("pip");
-            let setting = |key| {
-                pip.and_then(|value| value.get(key))
-                    .or_else(|| config.get(key))
-            };
-            if setting("no-index").and_then(toml::Value::as_bool) == Some(true)
-                || setting("find-links").is_some()
-            {
-                return Err(index_error("uv configures a non-index source"));
-            }
-            defaults = defaults.or_else(|| {
-                setting("index-url")
-                    .and_then(toml::Value::as_str)
-                    .map(str::to_owned)
-            });
-            extras = extras.or_else(|| {
-                setting("extra-index-url").and_then(|value| {
-                    value.as_str().map(str::to_owned).or_else(|| {
-                        value.as_array().map(|items| {
-                            items
-                                .iter()
-                                .filter_map(toml::Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        })
-                    })
-                })
-            });
-            if let Some(indexes) = config.get("index").and_then(toml::Value::as_array) {
-                for index in indexes {
-                    let Some(url) = index.get("url").and_then(toml::Value::as_str) else {
-                        return Err(index_error("uv configures an index without a URL"));
-                    };
-                    if index.get("explicit").and_then(toml::Value::as_bool) == Some(true) {
-                        return Err(index_error("uv configures package-specific indexes"));
-                    }
-                    extras = Some(match extras {
-                        Some(extra) if extra != url => format!("{extra} {url}"),
-                        _ => url.to_string(),
-                    });
-                }
-            }
+    let options = uv_config(cwd, home, getenv)?;
+    let options = options.pip.with_fallback(options.top_level);
+    if options.no_index == Some(true) || !options.find_links.is_empty() {
+        return Err(index_error("uv configures a non-index source"));
+    }
+
+    let mut default = UV_DEFAULT.iter().find_map(|key| value(getenv, key));
+    let mut named = BTreeSet::new();
+    let mut urls = BTreeSet::new();
+    for key in UV_EXTRA {
+        if let Some(indexes) = value(getenv, key) {
+            urls.extend(indexes.split_whitespace().map(str::to_owned));
         }
     }
-    match (defaults, extras) {
-        (Some(default), Some(extra)) if default != extra => {
-            Err(index_error("uv configures multiple indexes"))
+    for index in options.index {
+        if index.name.is_some_and(|name| !named.insert(name)) {
+            continue;
         }
-        (default, extra) => Ok(default.or(extra)),
+        if index.explicit {
+            return Err(index_error("uv configures package-specific indexes"));
+        }
+        if index.format.as_deref() == Some("flat") {
+            return Err(index_error("uv configures a non-index source"));
+        }
+        if index.default {
+            default.get_or_insert(index.url);
+        } else {
+            urls.insert(index.url);
+        }
+    }
+    urls.extend(options.extra_index_url);
+    urls.extend(default.or(options.index_url));
+    if urls.len() > 1 {
+        return Err(index_error("uv configures multiple indexes"));
+    }
+    // The caller promotes a lone additional index to the default, preventing
+    // uv's implicit PyPI fallback when no explicit default was configured.
+    Ok(urls.into_iter().next())
+}
+
+#[derive(Default, serde::Deserialize)]
+struct UvConfig {
+    #[serde(flatten)]
+    top_level: UvIndexOptions,
+    #[serde(default)]
+    pip: UvIndexOptions,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct UvIndexOptions {
+    index_url: Option<String>,
+    no_index: Option<bool>,
+    find_links: Vec<String>,
+    extra_index_url: Vec<String>,
+    index: Vec<UvIndex>,
+}
+
+#[derive(serde::Deserialize)]
+struct UvIndex {
+    url: String,
+    name: Option<String>,
+    format: Option<String>,
+    #[serde(default)]
+    explicit: bool,
+    #[serde(default)]
+    default: bool,
+}
+
+impl UvIndexOptions {
+    fn with_fallback(mut self, lower: Self) -> Self {
+        self.index_url = self.index_url.or(lower.index_url);
+        self.no_index = self.no_index.or(lower.no_index);
+        self.find_links.extend(lower.find_links);
+        self.extra_index_url.extend(lower.extra_index_url);
+        self.index.extend(lower.index);
+        self
     }
 }
 
-fn uv_config_files(
+fn uv_config(
     cwd: &Path,
     home: Option<&Path>,
     getenv: &impl Fn(&str) -> Option<String>,
-) -> Vec<(PathBuf, bool)> {
-    let mut files = Vec::new();
+) -> Result<UvConfig> {
+    if let Some(explicit) = value(getenv, "UV_CONFIG_FILE") {
+        return read_uv_config(Path::new(&explicit), false)?
+            .ok_or_else(|| index_error("UV_CONFIG_FILE could not be read"));
+    }
+    if value(getenv, "UV_NO_CONFIG").is_some_and(|v| enabled(&v)) {
+        return Ok(UvConfig::default());
+    }
+
+    let mut merged = UvConfig::default();
     for dir in cwd.ancestors() {
-        let uv = dir.join("uv.toml");
-        if uv.is_file() {
-            files.push((uv, false));
+        if let Some(project) = read_uv_config(&dir.join("uv.toml"), false)? {
+            merged = project;
             break;
         }
-        let pyproject = dir.join("pyproject.toml");
-        if pyproject.is_file() {
-            files.push((pyproject, true));
+        if let Some(project) = read_uv_config(&dir.join("pyproject.toml"), true)? {
+            merged = project;
+            break;
         }
     }
+    // uv combines each section across files, before combining [pip] with the
+    // top-level settings. Scalars take the higher value and arrays concatenate.
+    for path in uv_user_and_system_files(home, getenv) {
+        if let Some(lower) = read_uv_config(&path, false)? {
+            merged.top_level = merged.top_level.with_fallback(lower.top_level);
+            merged.pip = merged.pip.with_fallback(lower.pip);
+        }
+    }
+    Ok(merged)
+}
+
+fn read_uv_config(path: &Path, pyproject: bool) -> Result<Option<UvConfig>> {
+    let Some(text) = read_config(path)? else {
+        return Ok(None);
+    };
+    let invalid = || {
+        index_error(if pyproject {
+            "invalid pyproject.toml"
+        } else {
+            "invalid uv.toml"
+        })
+    };
+    if !pyproject {
+        return toml::from_str(&text).map(Some).map_err(|_| invalid());
+    }
+    let mut parsed: toml::Table = toml::from_str(&text).map_err(|_| invalid())?;
+    let uv = parsed
+        .get_mut("tool")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|tool| tool.remove("uv"));
+    uv.map(|config| config.try_into().map_err(|_| invalid()))
+        .transpose()
+}
+
+fn uv_user_and_system_files(
+    home: Option<&Path>,
+    getenv: &impl Fn(&str) -> Option<String>,
+) -> Vec<PathBuf> {
+    let mut files = Vec::new();
     let user = if cfg!(windows) {
         value(getenv, "APPDATA").map(PathBuf::from)
     } else {
@@ -293,7 +339,10 @@ fn uv_config_files(
             .map(PathBuf::from)
             .or_else(|| home.map(|dir| dir.join(".config")))
     };
-    files.extend(user.map(|dir| (dir.join("uv/uv.toml"), false)));
+    files.extend(user.map(|dir| dir.join("uv/uv.toml")));
+    if value(getenv, "UV_NO_SYSTEM_CONFIG").is_some_and(|v| enabled(&v)) {
+        return files;
+    }
     let system = if cfg!(windows) {
         value(getenv, "PROGRAMDATA")
             .into_iter()
@@ -309,8 +358,7 @@ fn uv_config_files(
         system
             .into_iter()
             .map(|dir| dir.join("uv/uv.toml"))
-            .find(|path| path.is_file())
-            .map(|path| (path, false)),
+            .find(|path| path.is_file()),
     );
     files
 }
@@ -409,6 +457,92 @@ mod tests {
             .as_deref(),
             Some(url)
         );
+    }
+
+    #[test]
+    fn uv_merges_project_user_and_system_index_arrays_before_checking_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let user = root.path().join("user");
+        let system = root.path().join("system");
+        for dir in [&project, &user.join("uv"), &system.join("uv")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let project_config = project.join("uv.toml");
+        let user_config = user.join("uv/uv.toml");
+        let system_config = system.join("uv/uv.toml");
+        let a = "https://project.example/simple";
+        let b = "https://user.example/simple";
+        let config_home = if cfg!(windows) {
+            "APPDATA"
+        } else {
+            "XDG_CONFIG_HOME"
+        };
+        let config_dirs = if cfg!(windows) {
+            "PROGRAMDATA"
+        } else {
+            "XDG_CONFIG_DIRS"
+        };
+        let getenv = |key: &str| match key {
+            key if key == config_home => Some(user.display().to_string()),
+            key if key == config_dirs => Some(system.display().to_string()),
+            _ => None,
+        };
+        let resolve = || uv_index(&project, None, &getenv);
+        std::fs::write(&system_config, "").unwrap();
+        assert_eq!(resolve().unwrap(), None);
+        std::fs::write(&project_config, format!("extra-index-url = [{a:?}]\n")).unwrap();
+        assert_eq!(resolve().unwrap().as_deref(), Some(a));
+
+        std::fs::write(&user_config, format!("extra-index-url = [{b:?}]\n")).unwrap();
+        assert!(resolve()
+            .unwrap_err()
+            .to_string()
+            .contains("multiple indexes"));
+        std::fs::write(&user_config, format!("extra-index-url = [{a:?}]\n")).unwrap();
+        assert_eq!(resolve().unwrap().as_deref(), Some(a));
+
+        // uv merges both sections' arrays, then uses the pip-specific scalar
+        // over the top-level scalar, even if it came from a lower-priority file.
+        std::fs::write(&project_config, format!("index-url = {b:?}\n")).unwrap();
+        std::fs::write(&user_config, format!("[pip]\nindex-url = {a:?}\n")).unwrap();
+        assert_eq!(resolve().unwrap().as_deref(), Some(a));
+        std::fs::write(&system_config, format!("extra-index-url = [{b:?}]\n")).unwrap();
+        assert!(resolve()
+            .unwrap_err()
+            .to_string()
+            .contains("multiple indexes"));
+        let without_system = uv_index(&project, None, &|key| {
+            if key == "UV_NO_SYSTEM_CONFIG" {
+                Some("1".into())
+            } else {
+                getenv(key)
+            }
+        });
+        assert_eq!(without_system.unwrap().as_deref(), Some(a));
+
+        // An explicit file replaces all discovered configuration.
+        let explicit = uv_index(&project, None, &|key| {
+            if key == "UV_CONFIG_FILE" {
+                Some(user_config.display().to_string())
+            } else {
+                getenv(key)
+            }
+        });
+        assert_eq!(explicit.unwrap().as_deref(), Some(a));
+        // Choosing a default through the environment still leaves the arrays
+        // from the configured files in effect.
+        let with_env = uv_index(&project, None, &|key| {
+            if key == "UV_DEFAULT_INDEX" {
+                Some(a.into())
+            } else {
+                getenv(key)
+            }
+        });
+        assert!(with_env
+            .unwrap_err()
+            .to_string()
+            .contains("multiple indexes"));
     }
 
     #[test]
