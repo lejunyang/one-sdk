@@ -126,6 +126,12 @@ fn run_isolated_in_with_env(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Output {
+    let mut command = isolated_command(root, cwd, &osdk());
+    command.args(args).envs(env.iter().copied());
+    run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT)
+}
+
+fn isolated_command(root: &Path, cwd: &Path, program: &Path) -> Command {
     let home = root.join("home");
     let data = root.join("data");
     let cache = root.join("cache");
@@ -134,9 +140,8 @@ fn run_isolated_in_with_env(
     let installs = root.join("installs");
     std::fs::create_dir_all(&home).unwrap();
 
-    let mut command = Command::new(osdk());
+    let mut command = Command::new(program);
     command
-        .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", &home)
@@ -147,10 +152,7 @@ fn run_isolated_in_with_env(
         .env("OSDK_CONFIG_DIR", &config)
         .env("OSDK_STORE_DIR", &store)
         .env("OSDK_INSTALL_DIR", &installs);
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT)
+    command
 }
 
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
@@ -4151,6 +4153,93 @@ EOF
 
 #[cfg(unix)]
 #[test]
+fn activated_go_honors_command_proxy_and_off_in_lookup_and_execution() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[tools]\ngo = \"1.24.0\"\n").unwrap();
+    let runtime = root.join("installs/go/1.24.0");
+    let chain = "http://127.0.0.1:1/proxy/,off";
+    write_executable(
+        &runtime.join("bin/go"),
+        &r#"#!/bin/sh
+set -eu
+case "$1" in
+    env) printf '%s\n' "${GOPROXY:-}" ;;
+    list)
+        case "${GOPROXY:-}" in
+            'FIXTURE_CHAIN') version=v1.2.3 ;;
+            off) printf 'module lookup disabled by GOPROXY=off\n' >&2; exit 1 ;;
+            *) version=v9.0.0 ;;
+        esac
+        printf '{"Path":"example.com/acme/tool","Version":"%s","Versions":["%s"]}\n' "$version" "$version"
+        ;;
+    *) exit 2 ;;
+esac
+"#
+        .replace("FIXTURE_CHAIN", chain),
+    );
+    complete_go_fixture(&runtime);
+
+    let mut command = isolated_command(root, root, Path::new("/bin/bash"));
+    command
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"
+set -eu
+eval "$("$OSDK_TEST_BIN" activate bash)"
+case "$GOPROXY" in https://*'|direct') ;; *) exit 10 ;; esac
+[[ "$("$OSDK_TEST_BIN" exec -- go env GOPROXY)" == "$GOPROXY" ]]
+(
+    eval "$("$OSDK_TEST_BIN" deactivate bash)"
+    [[ -z "${GOPROXY+x}" && -z "${OSDK_APPLIED_GOPROXY+x}" ]]
+)
+# An unmodified activation value must defer to a Go env file added later.
+printf 'GOPROXY=off\n' > "$GOENV"
+tool=go:example.com/acme/tool
+result=$(GOPROXY="$FIXTURE_CHAIN" "$OSDK_TEST_BIN" list-remote "$tool")
+[[ "$result" == 1.2.3 ]]
+if result=$(GOPROXY=off "$OSDK_TEST_BIN" list-remote "$tool" 2>&1); then exit 11; fi
+[[ "$result" == *'module lookup disabled by GOPROXY=off'* ]]
+[[ "$(GOPROXY=off "$OSDK_TEST_BIN" exec -- go env GOPROXY)" == off ]]
+[[ "$(GOPROXY="$FIXTURE_CHAIN" "$OSDK_TEST_BIN" exec -- go env GOPROXY)" == "$FIXTURE_CHAIN" ]]
+[[ -z "$("$OSDK_TEST_BIN" exec -- go env GOPROXY)" ]]
+export GOPROXY="$FIXTURE_CHAIN"
+(
+    eval "$("$OSDK_TEST_BIN" deactivate bash)"
+    [[ "$GOPROXY" == "$FIXTURE_CHAIN" && -z "${OSDK_APPLIED_GOPROXY+x}" ]]
+)
+_osdk_hook
+[[ "$GOPROXY" == "$FIXTURE_CHAIN" && -z "${OSDK_APPLIED_GOPROXY+x}" ]]
+"#,
+        ])
+        .env("GOENV", root.join("go.env"))
+        .env("OSDK_TEST_BIN", osdk())
+        .env("FIXTURE_CHAIN", chain);
+    let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+    assert!(
+        output.status.success(),
+        "status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn complete_go_fixture(runtime: &Path) {
+    write_executable(&runtime.join("bin/gofmt"), "#!/bin/sh\nexit 0\n");
+    write_executable(&runtime.join("pkg/tool/compile"), "#!/bin/sh\nexit 0\n");
+    std::fs::create_dir_all(runtime.join("src/runtime")).unwrap();
+    std::fs::write(runtime.join("src/runtime/runtime.go"), "package runtime\n").unwrap();
+    std::fs::write(runtime.join("VERSION"), "go1.24.0\n").unwrap();
+    std::fs::write(runtime.join("go.env"), "GOTOOLCHAIN=local\n").unwrap();
+    std::fs::write(runtime.join(".osdk-complete"), "").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn go_native_file_policy_reaches_version_lookup_install_and_shim() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
@@ -4191,18 +4280,13 @@ esac
         goenv.display()
     );
     write_executable(&runtime.join("bin/go"), &script);
-    write_executable(&runtime.join("bin/gofmt"), "#!/bin/sh\nexit 0\n");
-    write_executable(&runtime.join("pkg/tool/compile"), "#!/bin/sh\nexit 0\n");
-    std::fs::create_dir_all(runtime.join("src/runtime")).unwrap();
-    std::fs::write(runtime.join("src/runtime/runtime.go"), "package runtime\n").unwrap();
-    std::fs::write(runtime.join("VERSION"), "go1.24.0\n").unwrap();
-    std::fs::write(runtime.join("go.env"), "GOTOOLCHAIN=local\n").unwrap();
-    std::fs::write(runtime.join(".osdk-complete"), "").unwrap();
+    complete_go_fixture(&runtime);
 
     let env = [
         ("GOENV", goenv.to_str().unwrap()),
         // The public proxy left by a prior activation must not replace GOENV.
         ("GOPROXY", "https://proxy.golang.org|direct"),
+        ("OSDK_APPLIED_GOPROXY", "https://proxy.golang.org|direct"),
         ("OSDK_MANAGED_ENV", "GOPROXY"),
         ("OSDK_ORIG_GOPROXY_SET", "1"),
         ("OSDK_ORIG_GOPROXY_PRESENT", "0"),
@@ -4255,8 +4339,10 @@ esac
         "{}",
         String::from_utf8_lossy(&removed.stderr)
     );
-    std::fs::write(&goenv, "GOPROXY=off\n").unwrap();
-    let replay = run_isolated_in_with_env(root, root, &["install"], &env);
+    // Replay must calculate the fingerprint from this command's override.
+    let mut override_env = env.to_vec();
+    override_env.push(("GOPROXY", "off"));
+    let replay = run_isolated_in_with_env(root, root, &["install"], &override_env);
     assert!(!replay.status.success());
     let error = String::from_utf8_lossy(&replay.stderr);
     assert!(

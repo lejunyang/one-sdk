@@ -819,7 +819,7 @@ Last-Modified，通过 `Range` + `If-Range` 断点续传；服务端忽略或返
 存在后才会被选中；任一步失败都会继续下一个排序来源，receipt 记录真正通过验证的来源。
 模型在某个来源耗尽尝试后同样会继续下一个排序来源；所有来源都耗尽后才终止。
 
-pip 或 uv 已配置单一索引时，`pypi:` 用它查版本和安装。没有配置原生索引时，可以通过 `[registries.python].urls` 指定 osdk 可用的镜像。`go:` 安装和受管 `go` 命令会保留 Go 原生模块代理与私有模块设置，包括用 `go env -w` 保存的值。
+pip 或 uv 已配置单一索引时，`pypi:` 用它查版本和安装。没有配置原生索引时，可以通过 `[registries.python].urls` 指定 osdk 可用的镜像。`go:` 安装和受管 `go` 命令会保留 Go 原生模块代理与私有模块设置，包括用 `go env -w` 保存的值和激活后为单条命令指定的 `GOPROXY`。
 
 环境变量里已经设置的镜像（`RUSTUP_DIST_SERVER`、`GOPROXY`、`npm_config_registry`
 等）会先经过校验，再与 osdk 内置镜像一起参与测速竞争，因此过期或不可用的值不会

@@ -204,7 +204,7 @@ impl Backend for GoBackend {
         // by priority) and involves no network: this runs in the shim on every
         // command invocation, where a probe round-trip would be charged to
         // interactive latency. Live probing stays in the install path.
-        let original_proxy = super::go_env::original_goproxy();
+        let original_proxy = super::go_env::process_value("GOPROXY");
         if let Some(proxy) = self.preferred_module_proxy(ctx, &super::go_env::process_value)? {
             env.insert("GOPROXY".to_string(), proxy);
         } else if original_proxy != std::env::var("GOPROXY").ok() {

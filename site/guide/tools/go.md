@@ -89,7 +89,9 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 `go env -w` 保存这些设置。`go:` 会沿用它们查版本和安装，保留代理链的顺序、
 逗号或竖线以及 `direct`、`off`。仅配置私有模块规则时，独立 `go:` 工具会直接走
 版本控制系统。代理 URL 不得内嵌凭据。用原生源列出或锁定版本前，先安装受管 Go
-运行时；修改原生源后重新生成锁文件。
+运行时；修改原生源后重新生成锁文件。激活后仍可用 `GOPROXY=off go list -m`
+或 `GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
+为单条命令指定代理策略。
 
 未配置原生 Go 源时，内置候选为 `https://proxy.golang.org` 与 `https://goproxy.cn`。它们遵循通用的 `auto`、
 `ordered` 和 pin 来源策略；auto 会先探测并缓存排序，再解析 metadata。精确版本仍通过

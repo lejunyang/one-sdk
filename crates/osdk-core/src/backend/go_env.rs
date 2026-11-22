@@ -32,13 +32,9 @@ pub(crate) fn config_file(getenv: &impl Fn(&str) -> Option<String>) -> Option<Pa
     base.map(|path| path.join("go/env"))
 }
 
-pub(super) fn original_goproxy() -> Option<String> {
-    crate::execution::original_env("GOPROXY").and_then(|value| value.into_string().ok())
-}
-
 pub(super) fn process_value(key: &str) -> Option<String> {
     if key == "GOPROXY" {
-        original_goproxy()
+        crate::execution::original_env(key).and_then(|value| value.into_string().ok())
     } else {
         std::env::var(key).ok()
     }

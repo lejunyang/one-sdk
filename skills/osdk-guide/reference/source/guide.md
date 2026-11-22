@@ -36,7 +36,7 @@ Maven/Kotlin 也使用有效 source 列表，而不是固定只用内置首项�
 
 委托型安装不会一概在命令失败后重跑：Cargo 会在选定 sparse index 前探测精确 crate
 制品。配置原生源时，`pypi:` 使用单一 pip/uv 索引，`go:` 保留环境变量或
-`go env -w` 保存的代理链和私有模块设置。未配置原生源时，`pypi:` 探测实际项目页，
+`go env -w` 保存的代理链和私有模块设置。激活后，命令前设置的 `GOPROXY`（含 `off`）会同时用于 `go:` 查版本及受管 `go`。未配置原生源时，`pypi:` 探测实际项目页，
 `go:` 把排序候选连成 `GOPROXY` 回退链。普通项目依赖命令可能已经执行 lifecycle script，因此
 仍只运行一次。
 

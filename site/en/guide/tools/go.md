@@ -101,7 +101,9 @@ proxy chain, including `direct` or `off`. With only privacy settings configured,
 standalone `go:` tools fetch directly from VCS. Use a proxy URL without embedded
 credentials. A managed Go runtime must be installed before listing or locking
 versions with a native source. Recreate the lock if you change the native source
-settings.
+settings. After activation, an override such as `GOPROXY=off go list -m` or
+`GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
+applies to that command.
 
 Without native Go source settings, the built-in candidates are `https://proxy.golang.org` and
 `https://goproxy.cn`. The normal `auto`, `ordered`, and pinned source policies

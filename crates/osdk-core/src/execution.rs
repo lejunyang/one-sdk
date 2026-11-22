@@ -68,15 +68,23 @@ fn adapter(tool: &str) -> Option<(&'static [&'static str], Option<&'static str>)
     })
 }
 
+pub(crate) const APPLIED_GOPROXY: &str = "OSDK_APPLIED_GOPROXY";
+
 /// An osdk activation's locator is output, not an ambient system choice.
 ///
 /// So a variable the activation manages reads as the value it captured before
 /// setting it -- `None` when there was none -- rather than its own output.
+/// For GOPROXY, an explicit change since activation is a native source choice.
 pub fn original_env(key: &str) -> Option<OsString> {
+    let current = std::env::var_os(key);
     if std::env::var("OSDK_MANAGED_ENV")
         .unwrap_or_default()
         .split(',')
         .any(|k| k == key)
+        && (key != "GOPROXY"
+            || current
+                .as_ref()
+                .is_some_and(|value| std::env::var_os(APPLIED_GOPROXY).as_ref() == Some(value)))
     {
         return (std::env::var(format!("OSDK_ORIG_{key}_PRESENT"))
             .ok()
@@ -85,7 +93,7 @@ pub fn original_env(key: &str) -> Option<OsString> {
         .then(|| std::env::var_os(format!("OSDK_ORIG_{key}")))
         .flatten();
     }
-    std::env::var_os(key)
+    current
 }
 
 /// `PATH` without the entries an activation prepended.
