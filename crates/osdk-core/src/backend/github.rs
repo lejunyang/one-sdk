@@ -2372,7 +2372,9 @@ mod tests {
             kind: crate::source::SourceKind::Custom,
             ..Source::mirror("corp", "https://relay.example.test/", 0)
         };
-        let attestation = backend.attestation(&ctx, &[custom.clone()]).unwrap();
+        let attestation = backend
+            .attestation(&ctx, std::slice::from_ref(&custom))
+            .unwrap();
         assert_eq!(attestation.sources[0].id, custom.id);
     }
 
