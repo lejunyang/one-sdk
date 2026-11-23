@@ -606,7 +606,9 @@ pub(crate) fn isolated_native_npm_registry(ctx: &Ctx, cwd: &Path) -> Result<Opti
     let managed = getenv("OSDK_NPM_REGISTRY");
     for key in ["npm_config_registry", "NPM_CONFIG_REGISTRY"] {
         if let Some(value) = getenv(key).filter(|v| !v.is_empty()) {
-            if (exported && key == "npm_config_registry") || managed.as_ref() == Some(&value) {
+            if (exported && (cfg!(windows) || key == "npm_config_registry"))
+                || managed.as_ref() == Some(&value)
+            {
                 continue;
             }
             return normalize_registry_url(&value).map(Some);
