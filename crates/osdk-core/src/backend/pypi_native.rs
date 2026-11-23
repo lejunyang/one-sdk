@@ -15,23 +15,6 @@ pub(super) fn index(creator: EnvCreator) -> Result<Option<String>> {
     let home = crate::python_index::home_directory();
     let getenv = |key: &str| std::env::var(key).ok();
     let native = native_index(creator, &cwd, home.as_deref(), &getenv)?;
-    if native.is_none() {
-        let names = std::env::vars_os()
-            .filter_map(|(key, _)| key.into_string().ok())
-            .collect::<Vec<_>>();
-        if crate::python_index::credential_configuration(getenv, &names, None).is_some()
-            || value(&getenv, "NETRC").is_some()
-            || home.is_some_and(|home| {
-                [".netrc", "_netrc"]
-                    .iter()
-                    .any(|name| home.join(name).is_file())
-            })
-        {
-            return Err(index_error(
-                "native credentials are configured without a usable index",
-            ));
-        }
-    }
     native.map(|url| anonymous_url(&url)).transpose()
 }
 

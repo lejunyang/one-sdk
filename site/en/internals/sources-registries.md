@@ -115,3 +115,5 @@ Explicit canonical overrides use the shared adapter across exec, shim and deps. 
 
 
 Tool source ordering, conflict handling, per-ecosystem overrides and uv discovery boundaries are defined in [package-manager precedence](../guide/tools/package-managers#configurable-declaration-precedence). Explain output reuses tool selection evidence; fingerprint input files are not an effective native discovery chain.
+
+PyPI native discovery is triggered by index declarations only. Credential files and keyring settings do not select a source when no index is configured.

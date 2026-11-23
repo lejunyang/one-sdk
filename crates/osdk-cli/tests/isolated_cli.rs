@@ -4079,6 +4079,49 @@ fn install_without_arguments_consumes_matching_platform_lock() {
 
 #[cfg(unix)]
 #[test]
+fn pypi_credentials_without_index_do_not_block_managed_install() {
+    for credential in [
+        "netrc",
+        "NETRC",
+        "PIP_KEYRING_PROVIDER",
+        "UV_KEYRING_PROVIDER",
+        "UV_INDEX_INTERNAL_USERNAME",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::create_dir(root.join("home")).unwrap();
+        std::fs::write(
+            root.join("osdk.toml"),
+            "[registries.python]\nurls = [\"https://127.0.0.1:1/simple/\"]\n",
+        )
+        .unwrap();
+        let python = root.join("installs/python/3.12.0");
+        write_executable(&python.join("bin/python3"), "#!/bin/sh\nexit 0\n");
+        std::fs::write(python.join(".osdk-complete"), "").unwrap();
+        let netrc = root.join("home/.netrc");
+        std::fs::write(&netrc, "machine github.com login fixture\n").unwrap();
+        let value = if credential == "NETRC" {
+            netrc.to_str().unwrap()
+        } else {
+            "auto"
+        };
+        let mut env = if credential == "netrc" {
+            vec![]
+        } else {
+            vec![(credential, value)]
+        };
+        env.push(("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()));
+        let output = run_isolated_in_with_env(root, root, &["install", "pypi:fixture@1.2.3"], &env);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("no configured Python index is reachable"),
+            "{credential}: {output:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn pypi_private_pip_index_serves_latest_and_reaches_installer() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

@@ -46,3 +46,5 @@ Node 会合并所有可达版本 index；经典 CPython 会合并同一 release 
 
 `npm:<package>` 的未锁定安装和 `osdk lock` graph-only 阶段会逐 source 重建隔离项目；
 后者固定禁用脚本，所以可安全回退。已有原生 lock 的 frozen 重放不会切换来源。
+
+`pypi:` 没有原生索引时，忽略独立的 .netrc/NETRC/keyring 凭据配置，继续走默认源或显式 registries.python.urls。

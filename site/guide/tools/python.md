@@ -252,3 +252,5 @@ osdk 只暴露工具**自己的**命令。环境里的 `python`、`pip`、`activ
 ## 原生 pip、pipx 与 uv tool
 
 裸 pip 安装仍属于对应解释器/virtualenv。pipx、uv tool 环境也可能依赖特定 Python 安装；它们不会跨版本共享 site-packages，也不会在切换 Python 时自动迁移。删除解释器前应保留它或重建原生工具环境，详见[原生全局安装边界](./package-managers#native-global-boundaries)。
+
+未配置原生索引时，`.netrc`、`NETRC` 或 keyring 凭据不影响默认镜像选择。仍可通过 `osdk config set registries.python.urls URL` 指定源。
