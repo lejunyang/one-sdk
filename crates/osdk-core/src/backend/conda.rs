@@ -826,6 +826,10 @@ impl CondaBackend {
         ctx: &Ctx,
         candidates: Vec<Source>,
     ) -> Result<(Vec<Source>, Option<NativeChannels>)> {
+        let native = NativeChannels::load();
+        if native.as_ref().is_ok_and(Option::is_none) {
+            return Ok((candidates, None));
+        }
         if let Some(pin) = ctx
             .config
             .tool_sources(self.id())
@@ -834,10 +838,6 @@ impl CondaBackend {
             if let Some(source) = candidates.iter().find(|source| source.id == pin) {
                 return Ok((vec![source.clone()], None));
             }
-        }
-        let native = NativeChannels::load();
-        if native.as_ref().is_ok_and(Option::is_none) {
-            return Ok((candidates, None));
         }
         Ok((candidates, native?))
     }

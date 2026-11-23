@@ -41,9 +41,14 @@ Source selection first checks the user's Cargo home for crates.io replacement.
 An eligible native sparse index enters selection as the only candidate. Online
 resolution checks its `config.json` for `auth-required`. The provider receives
 the selected index in a private Cargo config, leaving the original config and
-credentials in place. An explicitly selected osdk custom source can override
-the native declaration. Nonstandard indexes use a source build to keep private
-crate names out of `cargo-binstall` asset discovery.
+credentials in place. Explicit built-in/custom pins override native routing; absent
+native configuration retains main's pin/fallback order. Source list/pin manage
+candidates; installation and refresh apply native restrictions. Managed data/cargo
+and cache/pkg/cargo restore user home, while genuine user homes remain authoritative.
+Source.registry and registries.index use the same sparse validation; known public
+git mirrors warn and retain defaults. Exact locked indexes require the same index
+in local native/osdk candidates, otherwise replay asks for configuration or relocking.
+Nonstandard indexes use a source build to keep private crate names out of asset discovery.
 
 Registry resolution asks the normal ranked-source selector for Cargo metadata.
 Every candidate computes the crate-name shard path in its standard sparse index

@@ -140,6 +140,7 @@ fn run_isolated_in_with_env(
         .current_dir(cwd)
         .env_clear()
         .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("PATH", "")
         .env("LANG", "C")
         .env("OSDK_DATA_DIR", &data)
@@ -617,6 +618,78 @@ download_url = "{endpoint}/relay/"
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1.2.3"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn github_token_custom_catalog_and_artifact_are_requested_without_authorization() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let artifact = b"#!/bin/sh\nexit 0\n";
+    let checksum =
+        osdk_core::pipeline::verify::hash_bytes(artifact, osdk_core::pipeline::HashAlgo::Sha256);
+    let catalog = serde_json::json!({"schema":1,"releases":[{"tag":"v1.2.3","prerelease":false,"assets":[{"name":"fixture-tool","url":format!("{endpoint}/artifact"),"checksum":format!("sha256:{checksum}"),"os":"linux","arch":"x64","libc":"gnu"}]}]}).to_string();
+    let digest = osdk_core::pipeline::verify::hash_bytes(
+        catalog.as_bytes(),
+        osdk_core::pipeline::HashAlgo::Sha256,
+    );
+    let server = std::thread::spawn(move || {
+        for expected in ["/catalog", "/artifact"] {
+            let mut stream = accept_fixture_connection(&listener, "token catalog");
+            let mut bytes = Vec::new();
+            let mut byte = [0];
+            while !bytes.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+            }
+            let request = String::from_utf8(bytes).unwrap();
+            assert!(
+                request.starts_with(&format!("GET {expected} ")),
+                "{request}"
+            );
+            assert!(!request.to_ascii_lowercase().contains("\r\nauthorization:"));
+            let body = if expected == "/catalog" {
+                catalog.as_bytes()
+            } else {
+                artifact.as_slice()
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+    let location = format!("catalog-url={endpoint}/catalog");
+    let digest = format!("catalog-sha256={digest}");
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &[
+            "install",
+            "github:fixture/tool@latest",
+            "-o",
+            &location,
+            "-o",
+            &digest,
+        ],
+        &[("GITHUB_TOKEN", "fixture-token")],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    assert!(walkdir::WalkDir::new(root.join("installs"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_type().is_file()
+            && std::fs::read(entry.path()).is_ok_and(|bytes| bytes == artifact)));
 }
 
 #[cfg(not(windows))]
@@ -5127,7 +5200,7 @@ fn write_fake_managed_npm(root: &Path, version: &str, script: &str) {
 }
 
 #[cfg(unix)]
-fn isolated_npm_registry_fixture(native: bool) {
+fn isolated_npm_registry_fixture_with_policy(native: bool, policy: Option<&str>) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5194,6 +5267,10 @@ index_url = "{fallback}probe"
     )
     .unwrap();
     let npmrc = format!("registry={private}\n//{address}/private/:_authToken=fixture-no-copy\n");
+    if let Some(policy) = policy {
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::write(root.join("home/.npmrc"), policy).unwrap();
+    }
     if native {
         std::fs::create_dir(root.join("home")).unwrap();
         std::fs::write(root.join("home/.npmrc"), &npmrc).unwrap();
@@ -5255,14 +5332,27 @@ printf '%s' '{{"lockfileVersion":3,"packages":{{"node_modules/fixture-tool":{{"v
 
 #[cfg(unix)]
 #[test]
+fn synthetic_npm_policy_only_keeps_default_install_route() {
+    for policy in [
+        "@scope:registry=https://scope.example.test/\n",
+        "proxy=http://proxy.example.test\n",
+        "cafile=/private/ca.pem\n",
+        "strict-ssl=false\n",
+    ] {
+        isolated_npm_registry_fixture_with_policy(false, Some(policy));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn synthetic_npm_uses_native_registry_for_lookup_and_install_without_credentials() {
-    isolated_npm_registry_fixture(true);
+    isolated_npm_registry_fixture_with_policy(true, None);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_npm_without_native_registry_uses_osdk_sources() {
-    isolated_npm_registry_fixture(false);
+    isolated_npm_registry_fixture_with_policy(false, None);
 }
 
 #[cfg(unix)]

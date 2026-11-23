@@ -29,8 +29,12 @@ feature 会经过校验、排序和去重；默认值 `default-features=true` �
 源选择先读取用户 Cargo home 的 crates.io 替换配置。原生 sparse 源以
 单候选进入选择器，在线先读取 `config.json` 检查 `auth-required`。安装阶段
 只将选定 index 写入私有 Cargo 配置，原生配置与凭据不会复制给 provider。
-显式选择的 osdk 自定义源可以覆盖该声明；自定义 index 走源码安装，
-避免 `cargo-binstall` 为私有 crate 发现外部资产。
+显式 pin 的 osdk 内置或自定义源覆盖原生声明。没有原生声明时保留 main 的 pin 与回退顺序。
+source list/pin 只处理可管理候选，安装和 refresh 才施加原生限制。
+受管 data/cargo 与 cache/pkg/cargo 会还原用户 home；真正用户指定的 home 保留。
+source.registry 和 registries.index 两种替换目标共用 sparse 校验，已知公开 git 镜像告警回退。
+旧锁 exact index 回放要求本机有效原生或 osdk 候选中存在相同 index，否则要求配置或重锁。
+自定义 index 走源码安装，避免 `cargo-binstall` 为私有 crate 发现外部资产。
 
 Registry 解析向常规 ranked-source selector 请求 Cargo metadata。每个候选都从其标准
 sparse index 按 crate 名长度计算分片路径，并读取逐行 JSON 记录；crates.io 与 rsproxy

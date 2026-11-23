@@ -1340,6 +1340,11 @@ impl Backend for NpmPackageBackend {
     fn restrict_sources(&self, ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
         // Like the global preflight, resolve user configuration outside the
         // invoking project. The synthetic project's own npmrc is written later.
+        let cwd = ctx.dirs.data.join("npm-registry-preflight");
+        let native = crate::package_registry::isolated_native_npm_registry(ctx, &cwd);
+        if matches!(&native, Ok(None)) {
+            return Ok(sources);
+        }
         if let Some(pin) = ctx
             .config
             .tool_sources(self.id())
@@ -1348,11 +1353,6 @@ impl Backend for NpmPackageBackend {
             if let Some(source) = sources.iter().find(|source| source.id == pin) {
                 return Ok(vec![source.clone()]);
             }
-        }
-        let cwd = ctx.dirs.data.join("npm-registry-preflight");
-        let native = crate::package_registry::isolated_native_npm_registry(ctx, &cwd);
-        if matches!(&native, Ok(None)) {
-            return Ok(sources);
         }
         match native {
             Ok(Some(url)) => Ok(vec![Source::mirror(NATIVE_NPMRC_SOURCE, &url, 0)]),

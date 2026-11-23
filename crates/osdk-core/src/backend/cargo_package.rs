@@ -149,7 +149,16 @@ fn is_public_git_registry(index: &str) -> bool {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_CARGO_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn user_cargo_home(ctx: &Ctx, getenv: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_CARGO_HOME.with(|value| value.borrow().clone()) {
+        return Some(home);
+    }
     let current = getenv("CARGO_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -448,6 +457,10 @@ impl CargoPackageBackend {
         let Some(cargo_home) = cargo_home else {
             return Ok(sources);
         };
+        let index = native_registry_index(cargo_home, self.id());
+        if matches!(&index, Ok(None)) {
+            return Ok(sources);
+        }
         if let Some(pin) = ctx
             .config
             .tool_sources(self.id())
@@ -456,10 +469,6 @@ impl CargoPackageBackend {
             if let Some(source) = sources.iter().find(|source| source.id == pin) {
                 return Ok(vec![source.clone()]);
             }
-        }
-        let index = native_registry_index(cargo_home, self.id());
-        if matches!(&index, Ok(None)) {
-            return Ok(sources);
         }
         let Some(index) = index? else {
             unreachable!("no replacement was handled above");
@@ -1717,6 +1726,11 @@ mod tests {
     use crate::store::Cas;
 
     fn context(root: &Path, offline: bool) -> Ctx {
+        TEST_CARGO_HOME.with(|value| {
+            *value.borrow_mut() = std::env::var_os("OSDK_NATIVE_CARGO_TEST_CHILD")
+                .is_none()
+                .then(|| root.join("user-cargo"))
+        });
         let dirs = Dirs::resolve_from(|key| match key {
             "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
             "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
@@ -2106,6 +2120,7 @@ mod tests {
     fn managed_cargo_homes_restore_user_configuration() {
         let temp = tempfile::tempdir().unwrap();
         let ctx = context(temp.path(), false);
+        TEST_CARGO_HOME.with(|value| *value.borrow_mut() = None);
         let original = temp.path().join("personal-cargo");
         for managed in [
             ctx.dirs.cargo_home(),
@@ -2217,6 +2232,11 @@ mod tests {
             }
         }
         let output = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("running 1 test") && stdout.contains("1 passed"),
+            "{stdout}"
+        );
         assert!(
             output.status.success(),
             "isolated Cargo test failed:\nstdout:\n{}\nstderr:\n{}",
@@ -2391,6 +2411,36 @@ mod tests {
         assert!(error.contains("requires authentication"), "{error}");
         assert!(error.contains("[sources]"), "{error}");
         assert_eq!(server.requests(), ["/config.json"]);
+    }
+
+    #[tokio::test]
+    async fn locked_private_index_requires_matching_local_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = context(temp.path(), true);
+        let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
+        let mut request = ToolRequest::parse("cargo:ripgrep@14.1.1").unwrap();
+        let index = "sparse+https://corp.example.test/index/";
+        request
+            .options
+            .insert(LOCKED_CARGO_INDEX_OPTION.into(), index.into());
+        assert!(backend
+            .resolve_version(&ctx, &request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not configured"));
+        let home = temp.path().join("user-cargo");
+        std::fs::create_dir_all(&home).unwrap();
+        for (configured, success) in [
+            (index, true),
+            ("sparse+https://other.example.test/index/", false),
+        ] {
+            std::fs::write(home.join("config.toml"), format!("[source.crates-io]\nreplace-with='corp'\n[registries.corp]\nindex='{configured}'\n")).unwrap();
+            assert_eq!(
+                backend.resolve_version(&ctx, &request).await.is_ok(),
+                success
+            );
+        }
     }
 
     #[tokio::test]
