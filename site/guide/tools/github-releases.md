@@ -96,9 +96,9 @@ HTTP catalog 在线时以摘要缓存，offline 从缓存读取；本地文件�
 ## GitHub 访问、回退与 token
 
 令牌优先级是 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN`、`GH_TOKEN`。设置令牌时，
-Release 元数据、制品、校验文件和 attestation 都走 GitHub 直连。Authorization
-仅发给官方 HTTPS API `api.github.com`。直连失败会报错，避免把私有仓库名传给
-第三方镜像。带令牌时，远程静态 catalog 及其制品 URL 也须指向 GitHub。
+Release 默认绕过内置镜像，走 GitHub 直连。显式自定义 `[sources]` relay 仍按配置访问，
+远程静态 catalog 及制品也可位于非 GitHub 地址。Authorization 仅发给官方 HTTPS API
+`api.github.com`，不会发送给 relay、catalog 或其他制品主机。
 GitHub Enterprise 的自定义 API 地址目前未支持。
 
 匿名请求仍使用 `github`、`ghproxy` 等来源并可按排序回退。Releases API 最多读

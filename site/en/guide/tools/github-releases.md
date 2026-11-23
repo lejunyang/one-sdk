@@ -115,11 +115,11 @@ download cache does not change this configuration.
 ## GitHub access, failover, and tokens
 
 Token priority is `OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, then `GH_TOKEN`.
-With a token, release metadata, assets, checksum files, and attestations use
-direct GitHub URLs. Authorization goes only to the official HTTPS API at
-`api.github.com`. If the direct connection fails, the operation stops to keep
-private repository names away from third-party mirrors. Remote static catalogs
-and their assets also require GitHub URLs in this mode. GitHub Enterprise
+With a token, default release routing bypasses built-in mirrors and uses GitHub
+directly. Explicit custom `[sources]` relays remain configured routes, and remote
+static catalogs/assets may use non-GitHub hosts. Authorization goes only to the
+official HTTPS API `api.github.com`, never to relays, catalogs or other asset hosts.
+GitHub Enterprise
 custom API addresses are currently unsupported.
 
 Anonymous requests retain ranked source fallback, including `github` and

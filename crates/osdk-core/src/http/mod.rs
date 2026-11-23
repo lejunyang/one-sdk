@@ -815,6 +815,14 @@ pub(crate) fn github_release_url_candidates(
     if github_token().is_none() {
         return Ok(github_url_candidates(sources, original));
     }
+    let explicit = sources
+        .iter()
+        .filter(|source| source.kind == crate::source::SourceKind::Custom)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !explicit.is_empty() {
+        return Ok(github_url_candidates(&explicit, original));
+    }
     Ok(vec![github_direct_release_url(sources, original)?])
 }
 
@@ -824,29 +832,6 @@ pub(crate) fn github_direct_release_url(sources: &[Source], original: &str) -> R
     let direct = canonical
         .strip_prefix("https://gh-proxy.com/")
         .unwrap_or(&canonical);
-    let trusted = reqwest::Url::parse(direct).is_ok_and(|url| {
-        url.scheme() == "https"
-            && url.port_or_known_default() == Some(443)
-            && url.username().is_empty()
-            && url.password().is_none()
-            && matches!(
-                url.host_str(),
-                Some(
-                    "github.com"
-                        | "api.github.com"
-                        | "raw.githubusercontent.com"
-                        | "gist.githubusercontent.com"
-                        | "release-assets.githubusercontent.com"
-                        | "objects.githubusercontent.com"
-                        | "codeload.github.com"
-                )
-            )
-    });
-    if !trusted {
-        return Err(Error::config(
-            "GitHub release operations with a token require a direct GitHub HTTPS URL",
-        ));
-    }
     Ok(direct.into())
 }
 
@@ -1363,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_github_releases_normalize_old_proxy_urls_and_refuse_foreign_hosts() {
+    fn authenticated_github_releases_normalize_old_proxy_urls_and_preserve_foreign_hosts() {
         let asset = "https://github.com/private-owner/private-repo/releases/download/v1/tool";
         let proxy = Source::mirror(
             "custom-proxy",
@@ -1392,10 +1377,8 @@ mod tests {
             "http://github.com/private-owner/private-repo",
             "https://github.com:8080/private-owner/private-repo",
         ] {
-            assert!(
-                github_direct_release_url(&[], foreign).is_err(),
-                "{foreign}"
-            );
+            assert_eq!(github_direct_release_url(&[], foreign).unwrap(), foreign);
+            assert!(!should_send_github_token(foreign));
         }
     }
 

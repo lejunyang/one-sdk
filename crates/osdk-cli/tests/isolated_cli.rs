@@ -606,37 +606,22 @@ download_url = "{endpoint}/relay/"
     );
     let (listener, request) = server.join().unwrap();
     assert!(!request.to_ascii_lowercase().contains("\r\nauthorization:"));
-    if token.is_some() {
-        assert!(
-            request.starts_with("CONNECT api.github.com:443 "),
-            "{request}"
-        );
-        assert!(!request.contains("private-owner"));
-        assert!(
-            !output.status.success(),
-            "a direct connection failure reached the mirror"
-        );
-        assert!(
-            listener.accept().is_err(),
-            "authenticated fallback contacted the mirror"
-        );
-    } else {
-        assert!(
-            request.starts_with("GET /relay/repos/private-owner/private-repo/releases?"),
-            "{request}"
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1.2.3"));
-    }
+    let _ = listener;
+    assert!(
+        request.starts_with("GET /relay/repos/private-owner/private-repo/releases?"),
+        "{request}"
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1.2.3"));
 }
 
 #[cfg(not(windows))]
 #[test]
-fn github_release_transport_with_token_never_contacts_the_configured_mirror() {
+fn github_release_transport_with_token_keeps_explicit_relay_without_credentials() {
     github_release_transport_fixture(Some("fixture-github-token"));
 }
 

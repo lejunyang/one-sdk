@@ -51,9 +51,9 @@ env_force = false
   `CONDA_CHANNELS` 选择频道，工具 `channels` 选项优先。默认列表合并去重，映射按名覆盖。
   相关合并指令告警后按普通优先级处理，无关指令不拦。匿名 HTTP(S) 原生频道独占查询、
   求解与下载。复杂路由或认证地址明确报错；可用自定义源加 `--source <id>` 覆盖。
-- `github:owner/repo` 在设置 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN` 时只用
-  GitHub 直连 URL。令牌只发给官方 HTTPS API，直连失败即报错。匿名请求仍允许镜像。
-  GitHub Enterprise 自定义 API 地址目前未支持。
+- `github:owner/repo` 设置 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN` 时
+  默认绕过内置镜像，保留显式 custom relay 和非 GitHub catalog/artifact 地址。
+  令牌只发官方 HTTPS API，不发给非 GitHub 主机。GitHub Enterprise 自定义 API 未支持。
 - `forward_credentials` 只对明确允许的自定义端点转发 provider 凭据。
 - 特殊 key：`self` 管 osdk 自升级，`go-modules` 管 `GOPROXY`。
 

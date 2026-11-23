@@ -443,17 +443,9 @@ impl GithubBackend {
                     ))
                 })?
             } else {
-                // Explicit catalog URLs already bypass anonymous mirror
-                // selection. With a token, enforce the same direct policy.
-                let url = if http::github_token().is_some() {
-                    let sources = crate::source::select::effective_sources(ctx, self);
-                    http::github_direct_release_url(&sources, source)?
-                } else {
-                    source.clone()
-                };
                 let bytes = ctx
                     .client
-                    .get(url)
+                    .get(source)
                     .send()
                     .await?
                     .error_for_status()?

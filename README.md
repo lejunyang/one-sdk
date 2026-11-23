@@ -642,8 +642,9 @@ Guide: [Go developer tools](site/en/guide/tools/go.md)
 
 ## Scenario: install a GitHub Release with a token
 
-`osdk install github:owner/repo` uses direct GitHub URLs when
-`OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is set. See
+`osdk install github:owner/repo` bypasses built-in mirrors when
+`OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is set. Explicit custom relays
+and catalog/artifact hosts remain usable without receiving the token. See
 [GitHub Releases](site/en/guide/tools/github-releases.md).
 
 ## Scenario: work in each language ecosystem
