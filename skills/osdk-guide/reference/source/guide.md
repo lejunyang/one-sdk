@@ -52,3 +52,5 @@ Node 会合并所有可达版本 index；经典 CPython 会合并同一 release 
 不要将 osdk env/exec/run/shim 输出的 GOPROXY 再解释为用户原生源；osdk 会随代理链导出来源标记，用户显式覆盖仍生效。
 
 全局 pypi 工具只发现 uv 用户/系统/显式文件，不发现项目目录。explicit 索引忽略；追加索引保留 PyPI 默认源。
+
+无关 UV_OFFLINE/ENV_FILE/FIND_LINKS/NO_INDEX 不拦 pypi 源发现；UV_INDEX 可用 name=URL。

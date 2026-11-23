@@ -300,3 +300,5 @@ The `pypi:` tool backend above retains its existing anonymous mirror policy. Pro
 Bare pip installs remain tied to their interpreter/virtualenv. pipx and uv tool environments may also depend on a particular Python installation; they are not shared site-packages or automatically migrated on a Python switch. Keep the interpreter or recreate the native tool environment before removing it. See [native global-install boundaries](./package-managers#native-global-boundaries).
 
 With no native index, `.netrc`, `NETRC`, or keyring credentials do not affect default mirror selection. Use `osdk config set registries.python.urls URL` to select a source.
+
+UV_OFFLINE, UV_ENV_FILE, UV_FIND_LINKS, and UV_NO_INDEX are not index addresses and do not block pypi source discovery. The uv installer still applies its execution settings. UV_INDEX accepts name=https://index.example/simple/.

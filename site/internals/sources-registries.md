@@ -100,3 +100,5 @@ registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sd
 工具来源排序、冲突处理、分生态覆盖及 uv 配置边界见[包管理器优先级](../guide/tools/package-managers#可配置的声明优先级)。explain 复用工具选择证据；freshness 输入文件不等于原生有效配置发现链。
 
 PyPI 原生发现只由索引声明触发；没有索引时，凭据文件和 keyring 设置不参与源选择。
+
+uv 源发现仅提取索引地址；运行模式由安装器处理。命名索引的 name= 前缀在地址解析边界去除。

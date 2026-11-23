@@ -194,27 +194,19 @@ fn uv_index(
     home: Option<&Path>,
     getenv: &impl Fn(&str) -> Option<String>,
 ) -> Result<Option<NativeIndex>> {
-    if value(getenv, "UV_ENV_FILE").is_some()
-        || value(getenv, "UV_OFFLINE").is_some_and(|v| enabled(&v))
-        || value(getenv, "UV_NO_INDEX").is_some_and(|v| enabled(&v))
-        || value(getenv, "UV_FIND_LINKS").is_some()
-    {
-        return Err(index_error(
-            "uv configures an environment file or a non-index source",
-        ));
-    }
     let options = uv_config(cwd, home, getenv)?;
     let options = options.pip.with_fallback(options.top_level);
-    if options.no_index == Some(true) || !options.find_links.is_empty() {
-        return Err(index_error("uv configures a non-index source"));
-    }
-
     let mut default = UV_DEFAULT.iter().find_map(|key| value(getenv, key));
     let mut named = BTreeSet::new();
     let mut urls = Vec::new();
     for key in UV_EXTRA {
         if let Some(indexes) = value(getenv, key) {
-            urls.extend(indexes.split_whitespace().map(str::to_owned));
+            urls.extend(indexes.split_whitespace().map(|index| {
+                index
+                    .split_once('=')
+                    .map_or(index, |(_, url)| url)
+                    .to_owned()
+            }));
         }
     }
     for index in options.index {
@@ -448,6 +440,33 @@ mod tests {
             .as_deref(),
             Some("https://env.example/simple")
         );
+    }
+
+    #[test]
+    fn unrelated_uv_variables_do_not_select_or_reject_indexes() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["UV_OFFLINE", "UV_ENV_FILE", "UV_FIND_LINKS", "UV_NO_INDEX"] {
+            assert_eq!(
+                uv_index(root.path(), None, &|key| {
+                    (key == name).then(|| "1".into())
+                })
+                .unwrap(),
+                None,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_uv_indexes_keep_their_url_and_default() {
+        let root = tempfile::tempdir().unwrap();
+        let index = uv_index(root.path(), None, &|key| {
+            (key == "UV_INDEX").then(|| "corp=https://private.example/simple/".into())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(index.extra, vec!["https://private.example/simple/"]);
+        assert_eq!(index.default, crate::python_index::PYPI);
     }
 
     #[test]
