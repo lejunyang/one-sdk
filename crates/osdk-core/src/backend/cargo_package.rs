@@ -481,6 +481,25 @@ impl CargoPackageBackend {
         ])
     }
 
+    fn validate_replay_source(&self, ctx: &Ctx, options: &BTreeMap<String, String>) -> Result<()> {
+        let Some(index) = options.get(LOCKED_CARGO_INDEX_OPTION) else {
+            return Ok(());
+        };
+        validate_registry_index(index)?;
+        let sources = self.sources_from_cargo_home(
+            ctx,
+            crate::source::select::effective_sources(ctx, self),
+            user_cargo_home(ctx, |name| std::env::var_os(name)).as_deref(),
+        )?;
+        if !sources
+            .iter()
+            .any(|source| registry_index(source).is_ok_and(|configured| configured == *index))
+        {
+            return Err(native_registry_error(self.id(), "locked Cargo registry is not configured on this machine; configure the same registry in Cargo or osdk [sources], or relock"));
+        }
+        Ok(())
+    }
+
     pub fn from_id(id: &str) -> Option<Self> {
         let id = ToolId::parse(id).ok()?;
         if id.namespace() != Some("cargo") {
@@ -1444,20 +1463,7 @@ impl Backend for CargoPackageBackend {
                     VersionSpec::Exact(version)
                         if req.options.contains_key(LOCKED_CARGO_INDEX_OPTION) =>
                     {
-                        let index = req
-                            .options
-                            .get(LOCKED_CARGO_INDEX_OPTION)
-                            .expect("checked above");
-                        validate_registry_index(index)?;
-                        let candidates = self.restrict_sources(
-                            ctx,
-                            crate::source::select::effective_sources(ctx, self),
-                        )?;
-                        if !candidates.iter().any(|source| {
-                            registry_index(source).is_ok_and(|configured| configured == *index)
-                        }) {
-                            return Err(native_registry_error(self.id(), "locked Cargo registry is not configured on this machine; configure the same registry in Cargo or osdk [sources], or relock"));
-                        }
+                        self.validate_replay_source(ctx, &req.options)?;
                         (version.clone(), None)
                     }
                     VersionSpec::Exact(version) if ctx.config.settings.offline => (
@@ -1547,6 +1553,10 @@ impl Backend for CargoPackageBackend {
         };
         lifecycle.uninstall().await?;
         Ok(())
+    }
+
+    fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        self.validate_replay_source(ctx, &tv.options)
     }
 
     fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
@@ -2429,6 +2439,9 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not configured"));
+        let mut version = ToolVersion::new(backend.id(), "14.1.1");
+        version.options = request.options.clone();
+        assert!(backend.ensure_post_install(&ctx, &version).is_err());
         let home = temp.path().join("user-cargo");
         std::fs::create_dir_all(&home).unwrap();
         for (configured, success) in [
@@ -2440,6 +2453,7 @@ mod tests {
                 backend.resolve_version(&ctx, &request).await.is_ok(),
                 success
             );
+            assert_eq!(backend.ensure_post_install(&ctx, &version).is_ok(), success);
         }
     }
 
