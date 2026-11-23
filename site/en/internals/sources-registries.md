@@ -123,3 +123,5 @@ uv source discovery extracts index addresses only; execution modes belong to the
 The global Python tool Managed install branch overrides inherited PIP_EXTRA_INDEX_URL, UV_INDEX, and UV_EXTRA_INDEX_URL. Discovery and installation share the controlled default index without clearing unrelated execution variables.
 
 The installer boundary refuses to translate uv first-index sets into pip extra-index search. stdlib accepts a single default only; native uv multi-index sets require uv.
+
+uv environment and file indexes merge as one ordered definition list by name. Name, URL and default/explicit survive until replacement is complete, so overridden endpoints cannot reappear during flattening.

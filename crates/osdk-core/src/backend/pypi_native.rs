@@ -210,19 +210,27 @@ fn uv_index(
     let options = uv_config(cwd, home, getenv)?;
     let options = options.pip.with_fallback(options.top_level);
     let mut default = UV_DEFAULT.iter().find_map(|key| value(getenv, key));
-    let mut named = BTreeSet::new();
-    let mut urls = Vec::new();
+    let mut indexes = Vec::new();
     for key in UV_EXTRA {
-        if let Some(indexes) = value(getenv, key) {
-            urls.extend(indexes.split_whitespace().map(|index| {
-                index
+        if let Some(values) = value(getenv, key) {
+            indexes.extend(values.split_whitespace().map(|value| {
+                let (name, url) = value
                     .split_once('=')
-                    .map_or(index, |(_, url)| url)
-                    .to_owned()
+                    .map_or((None, value), |(name, url)| (Some(name.to_owned()), url));
+                UvIndex {
+                    name,
+                    url: url.to_owned(),
+                    format: None,
+                    explicit: false,
+                    default: false,
+                }
             }));
         }
     }
-    for index in options.index {
+    indexes.extend(options.index);
+    let mut named = BTreeSet::new();
+    let mut urls = Vec::new();
+    for index in indexes {
         if index.name.is_some_and(|name| !named.insert(name)) {
             continue;
         }
@@ -510,6 +518,41 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn named_uv_overrides_preserve_attributes_until_merge() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("uv.toml");
+        let env = |key: &str| match key {
+            "UV_CONFIG_FILE" => Some(file.display().to_string()),
+            "UV_INDEX" => Some("corp=https://new.example/simple/".into()),
+            "UV_DEFAULT_INDEX" => Some("https://default.example/simple/".into()),
+            _ => None,
+        };
+        for attribute in ["default=true", "explicit=true", ""] {
+            std::fs::write(&file, format!("[[index]]\nname=\"corp\"\nurl=\"https://old.example/simple/\"\n{attribute}\n[[index]]\nname=\"other\"\nurl=\"https://other.example/simple/\"\n")).unwrap();
+            let index = uv_index(root.path(), None, &env).unwrap().unwrap();
+            assert_eq!(
+                index.extra,
+                [
+                    "https://new.example/simple/",
+                    "https://other.example/simple/"
+                ]
+            );
+            assert_eq!(index.default, "https://default.example/simple/");
+        }
+        std::fs::write(&file, "[[index]]\nname=\"corp\"\nurl=\"https://higher.example/simple/\"\nexplicit=true\n[[index]]\nname=\"corp\"\nurl=\"https://old.example/simple/\"\n").unwrap();
+        let index = uv_index(root.path(), None, &|key| {
+            if key == "UV_INDEX" {
+                None
+            } else {
+                env(key)
+            }
+        })
+        .unwrap()
+        .unwrap();
+        assert!(index.extra.is_empty());
     }
 
     #[test]

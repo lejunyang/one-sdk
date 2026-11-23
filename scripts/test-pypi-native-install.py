@@ -192,7 +192,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(bins), 1)
         result = subprocess.run([str(bins[0])], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        receipt = json.loads((bins[0].parent.parent / ".osdk-env.json").read_text()) if (bins[0].parent.parent / ".osdk-env.json").exists() else None
+        receipt = json.loads((bins[0].parent.parent / ".osdk-pypi-env.json").read_text()) if (bins[0].parent.parent / ".osdk-pypi-env.json").exists() else None
         return json.loads(result.stdout), receipt
 
     def managed_case(self, installer, private_auth):
@@ -246,6 +246,43 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(origin, {"top": "native", "dep": "native"})
         self.assertEqual(second.requests, [], "uv consulted a lower index for duplicate names")
         self.evidence.append({"test": self.id(), "primary_requests": first.requests, "default_requests": second.requests, "origin": origin})
+
+    def test_named_uv_environment_override_excludes_old_source(self):
+        root, env = self.state()
+        self.bootstrap_uv(root, env)
+        new, new_url = self.server({})
+        old, old_url = self.server({TOP: [wheel(TOP, "1.0.0", "old", dependency=True)], DEP: [wheel(DEP, "1.0.0", "old")]})
+        default, default_url = self.server({TOP: [wheel(TOP, "2.0.0", "default", dependency=True)], DEP: [wheel(DEP, "2.0.0", "default")]})
+        config = root / "home/.config/uv/uv.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(f'[[index]]\nname="corp"\nurl={json.dumps(old_url)}\n')
+        (root / "osdk.toml").write_text("")
+        env.update(UV_INDEX="corp=" + new_url, UV_DEFAULT_INDEX=default_url)
+        # Real uv is the oracle for native named-index replacement.
+        oracle = root / "oracle"
+        subprocess.run([self.python, "-m", "venv", str(oracle)], env=env, check=True, capture_output=True)
+        direct = subprocess.run([self.uv, "pip", "install", "--python", str(oracle / "bin/python"), TOP], cwd=root, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(direct.returncode, 0, direct.stderr)
+        self.assertEqual(old.requests, [])
+        oracle_origin = subprocess.check_output([str(oracle / "bin/python"), "-c", "import osdk_source_fixture;print(osdk_source_fixture.ORIGIN)"], text=True).strip()
+        self.assertEqual(oracle_origin, "default")
+        for server in [new, old, default]:
+            server.requests.clear()
+        listed = self.run_osdk(root, env, "list-remote", f"pypi:{TOP}")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout.strip(), "2.0.0")
+        self.assertEqual(old.requests, [], "version lookup resurrected an overridden index")
+        result = self.run_osdk(root, env, "install", f"pypi:{TOP}@latest")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        origin, _ = self.installed_origin(root)
+        self.assertEqual(origin, {"top": "default", "dep": "default"})
+        self.assertEqual(old.requests, [], "install resurrected an overridden index")
+        self.assertTrue(new.requests)
+        self.assertTrue(default.requests)
+        install = next(path for path in (root / "installs/pypi" / TOP).glob("*/b3-v2-*") if path.is_dir())
+        receipt = json.loads((install / ".osdk-pypi-env.json").read_text())
+        self.assertEqual(receipt["creator"], "uv")
+        self.evidence.append({"test": self.id(), "new_requests": new.requests, "old_requests": old.requests, "default_requests": default.requests, "origin": origin, "creator": receipt["creator"]})
 
     def test_managed_pip_auth_index_gets_zero_requests(self):
         self.managed_case("pip", True)

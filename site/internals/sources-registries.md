@@ -106,3 +106,5 @@ uv 源发现仅提取索引地址；运行模式由安装器处理。命名索�
 全局 Python 工具的 Managed 安装分支覆盖继承的 PIP_EXTRA_INDEX_URL、UV_INDEX、UV_EXTRA_INDEX_URL；版本查询与安装使用同一受控默认索引，其他运行变量不清空。
 
 安装器选择边界禁止将 uv first-index 多索引集合翻译为 pip extra-index；stdlib 仅接受单个默认索引，多个原生 uv 索引要求 uv。
+
+uv 环境和配置文件索引以同一有序定义列表按名字合并。名字、URL与default/explicit保留至覆盖完成，被覆盖旧地址不会在扁平化时复活。

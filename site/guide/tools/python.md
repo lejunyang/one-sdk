@@ -261,3 +261,5 @@ UV_OFFLINE、UV_ENV_FILE、UV_FIND_LINKS、UV_NO_INDEX 不属于索引地址，�
 PIP_EXTRA_INDEX_URL="" 取消 pip 配置文件的额外索引。macOS 用户配置在 Library/Application Support 存在时从其 pip/pip.conf 读取。
 
 原生 uv 配置有追加索引时，必须有受管 uv。pip 会合并各索引候选，无法保持 uv first-index，osdk 因而在查询或安装前报错。可先 `osdk install pypi:uv`，或设置 registries.python.urls 与 python=osdk 改用 osdk 单源策略。单个默认索引仍可由 pip 执行。
+
+UV_INDEX 的 name=URL 会覆盖用户/系统文件中同名索引；旧地址不再参与查询或安装。不同名称保持声明顺序；同名覆盖先完成，再处理 default/explicit 属性。
