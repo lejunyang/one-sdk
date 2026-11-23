@@ -89,8 +89,8 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 `go env -w` 保存这些设置。`go:` 会沿用它们查版本和安装，保留代理链的顺序、
 逗号或竖线以及 `direct`、`off`。仅配置私有模块规则时，独立 `go:` 工具会直接走
 版本控制系统。代理 URL 不得内嵌凭据。用原生源列出或锁定版本前，先安装受管 Go
-运行时。在线 `osdk install` 即使命中已有完整安装也会核对锁定的源策略。修改原生源后
-重新生成锁文件，已有且精确匹配的完整安装仍可离线复用。激活后仍可用 `GOPROXY=off go list -m`
+运行时。锁记录模块和精确版本，不绑定本机源策略；修改 GOPROXY/GOPRIVATE 无需重新锁定。
+已有且精确匹配的完整安装仍可离线复用。激活后仍可用 `GOPROXY=off go list -m`
 或 `GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
 为单条命令指定代理策略。命令路径匹配生效的 `GONOPROXY` 规则时，查版本也只在规则
 覆盖范围内尝试父模块。Go 默认使用 `GOPRIVATE` 作为 `GONOPROXY`，显式设置

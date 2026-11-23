@@ -39,6 +39,7 @@ pub const LOCKED_GO_PROXY_OPTION: &str = "__osdk_go_proxy";
 pub const LOCKED_GO_MODULE_OPTION: &str = "__osdk_go_module";
 const GO_PROXY_FALLBACKS_OPTION: &str = "__osdk_go_proxy_fallbacks";
 const NATIVE_SOURCE_PREFIX: &str = "native:";
+const NATIVE_SOURCE: &str = "native";
 static NEXT_METADATA_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,20 +282,9 @@ impl GoPackageBackend {
     fn check_replay_source(
         &self,
         options: &BTreeMap<String, String>,
-        native: Option<&NativeGoSource>,
+        _native: Option<&NativeGoSource>,
     ) -> Result<()> {
-        let source = options.get(LOCKED_GO_PROXY_OPTION);
-        let matches = match native {
-            Some(native) => source == Some(&native.identity),
-            None => source.is_none_or(|source| !source.starts_with(NATIVE_SOURCE_PREFIX)),
-        };
-        if !matches {
-            return Err(Error::config(format!(
-                "the locked Go source for `{}` differs from the active native policy; restore the original Go settings or regenerate osdk.lock",
-                self.id
-            )));
-        }
-        Ok(())
+        self.proxy(options).map(|_| ())
     }
 
     fn materials(&self, tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
@@ -561,12 +551,7 @@ impl GoPackageBackend {
         }))
     }
 
-    async fn ranked_proxy_sources(&self, ctx: &Ctx) -> Result<Vec<Source>> {
-        if ctx.config.sources.mode == crate::source::env::SourceMode::Env {
-            return Err(Error::config(
-                "Go source mode env requires native GOPROXY, GOPRIVATE or GONOPROXY settings",
-            ));
-        }
+    fn proxy_sources(&self, ctx: &Ctx) -> Result<Vec<Source>> {
         let mut sources = crate::source::select::effective_sources(ctx, self);
         if let Some(config) = ctx.config.tool_sources(self.id()) {
             if !config.custom.is_empty() {
@@ -584,7 +569,16 @@ impl GoPackageBackend {
         for source in &sources {
             validate_go_source(source)?;
         }
-        crate::source::select::ranked_source_candidates(ctx, self, sources).await
+        Ok(sources)
+    }
+
+    async fn ranked_proxy_sources(&self, ctx: &Ctx) -> Result<Vec<Source>> {
+        if ctx.config.sources.mode == crate::source::env::SourceMode::Env {
+            return Err(Error::config(
+                "Go source mode env requires native GOPROXY, GOPRIVATE or GONOPROXY settings",
+            ));
+        }
+        crate::source::select::ranked_source_candidates(ctx, self, self.proxy_sources(ctx)?).await
     }
 
     fn managed_go(
@@ -682,7 +676,17 @@ impl GoPackageBackend {
                 .map(|(key, value)| (key.into(), value.into())),
             );
         } else {
-            env.insert("GOPROXY".into(), self.proxy_chain(&tv.options)?.into());
+            let proxy = self.proxy(&tv.options)?;
+            let chain = if proxy == NATIVE_SOURCE || proxy.starts_with(NATIVE_SOURCE_PREFIX) {
+                self.proxy_sources(ctx)?
+                    .into_iter()
+                    .map(|source| source.download_url)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            } else {
+                self.proxy_chain(&tv.options)?.to_owned()
+            };
+            env.insert("GOPROXY".into(), chain.into());
         }
         if let Some(values) = tv.options.get("env") {
             for assignment in values.split(';') {
@@ -967,7 +971,7 @@ impl Backend for GoPackageBackend {
                 spec: req.spec.to_string(),
                 hint: Some("the native Go source returned no matching module version".into()),
             })?;
-            options.insert(LOCKED_GO_PROXY_OPTION.into(), native.identity);
+            options.insert(LOCKED_GO_PROXY_OPTION.into(), NATIVE_SOURCE.into());
             options.insert(LOCKED_GO_MODULE_OPTION.into(), module);
             options.insert(LOCKED_NATIVE_REPLAY_OPTION.into(), "version-only".into());
             let mut resolved = ToolVersion::new(&self.id, version);
@@ -1339,9 +1343,12 @@ pub fn validate_go_proxy(value: &str) -> Result<()> {
     Ok(())
 }
 
-/// A lock or receipt may refer to a selected osdk proxy or to a fingerprint of
-/// the native policy. The latter is never passed to Go as a URL.
+/// Native policy is local execution input, not a portable lock fingerprint.
+/// Legacy fingerprints remain readable, but new locks use the `native` marker.
 pub fn validate_go_source_identity(value: &str) -> Result<()> {
+    if value == NATIVE_SOURCE {
+        return Ok(());
+    }
     if let Some(digest) = value.strip_prefix(NATIVE_SOURCE_PREFIX) {
         if digest.len() == 64
             && digest
@@ -1750,6 +1757,21 @@ mod tests {
             (LOCKED_GO_MODULE_OPTION.into(), backend.command_path.clone()),
         ]));
         version
+    }
+
+    #[test]
+    fn locked_go_proxy_replays_under_different_native_settings() {
+        let backend = GoPackageBackend::from_id("go:example.com/acme/tool").unwrap();
+        let tv = selected(&backend, "1.24.0");
+        for settings in [
+            BTreeMap::from([("GOPROXY".into(), "http://127.0.0.1:12345,direct".into())]),
+            BTreeMap::from([("GOPRIVATE".into(), "private.example".into())]),
+        ] {
+            let native = NativeGoSource::from_settings(settings).unwrap().unwrap();
+            backend
+                .check_replay_source(&tv.options, Some(&native))
+                .unwrap();
+        }
     }
 
     #[derive(Clone)]

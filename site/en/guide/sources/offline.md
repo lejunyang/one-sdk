@@ -35,7 +35,7 @@ osdk --offline model sync qwen
   offline install or repair is unsupported because neither the Cargo native lock
   nor `osdk.lock` contains the complete source graph;
 - `go:` tools can likewise reuse only an exact complete installation. Their
-  schema-4 lock records the selected Go proxy or native policy fingerprint, discovered module root, public
+  schema-4 lock records the selected Go proxy or portable `native` marker, discovered module root, public
   build options, and exact managed Go identity, but not the transitive module
   graph needed for a cold offline build;
 - `attestations=required` additionally needs the proof bundle cached by artifact SHA-256; lock evidence cannot replace verification.

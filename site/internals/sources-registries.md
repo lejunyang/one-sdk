@@ -51,7 +51,7 @@ Go command 工具有更严格的边界：存在 custom source 时只对这些 cu
 显式 pin 的 candidate）排序，避免把私有 module path 发往公开默认 proxy。自定义 header
 会被拒绝，因为 `go install` 无法执行 osdk 的逐请求转发策略。全新解析会把首选及其余
 候选组成 `|` 分隔的 GOPROXY，让 Go 自己在一次 provider 运行中处理下载回退；lock 重放
-恢复记录的首选 proxy，或校验原生源策略指纹。配置原生源时，由 Go 处理查版本和下载安装。Cargo Registry 则在确定 source 身份前读取 sparse `config.json`
+在没有原生设置时恢复记录的首选 proxy，有原生设置时沿用本机策略，不比较指纹。配置原生源时，由 Go 处理查版本和下载安装。Cargo Registry 则在确定 source 身份前读取 sparse `config.json`
 并探测精确 `.crate` URL，避免在 build script 可能启动后重跑。`pypi:` 优先使用原生配置中的单个索引做匿名查版本，并把它传给安装器。uv 先合并项目、用户和系统配置，其中额外索引数组拼接、标量按优先级取值。
 版本查询和安装共用同一个单索引检查。未配置原生源时才探测实际
 project 页面，并把结果注入 uv/pip 的 default index。

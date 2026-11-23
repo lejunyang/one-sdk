@@ -122,7 +122,7 @@ same identity, receipt, seal, binary content, and managed Go dependency.
 
 ## Lock schema 4
 
-Native-source locks store a `native:<sha256>` policy fingerprint in `source`. Online replay requires the same active policy.
+Native-source locks store the portable `native` marker, never a machine's policy fingerprint. Legacy `native:<sha256>` values remain readable. Online replay keeps the module and exact version while using the current native settings, or osdk's source candidates when no native settings exist.
 
 
 Go tools use the shared typed `native` table:
@@ -157,6 +157,6 @@ represent this dependency and reject `go:` entries.
 and source identity but no transitive module graph or source payload. Cold
 offline installation and repair therefore fail before provider execution; only
 a complete, exactly matching installation can be reused offline.
-An online lock replay compares the current source policy fingerprint before
-looking for a complete install, including on the path that skips version
-resolution. Offline reuse continues to validate the locked install identity.
+Online replay does not compare local source-policy fingerprints. Source differences
+leave the locked module and version unchanged. Offline reuse continues to validate
+the locked install identity.

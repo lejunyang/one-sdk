@@ -4373,7 +4373,7 @@ esac
     );
     let lock = std::fs::read_to_string(root.join("osdk.lock")).unwrap();
     assert!(lock.contains("version = \"1.2.3\""), "{lock}");
-    assert!(lock.contains("source = \"native:"), "{lock}");
+    assert!(lock.contains("source = \"native\""), "{lock}");
     assert!(
         lock.contains("module = \"private.example/acme/cli\""),
         "{lock}"
@@ -4399,12 +4399,7 @@ esac
     let original_goenv = std::fs::read_to_string(&goenv).unwrap();
     std::fs::write(&goenv, "GOPROXY=off\nGOPRIVATE=private.example\n").unwrap();
     let changed_policy = replay(&["install"]);
-    assert!(!changed_policy.status.success(), "{changed_policy:?}");
-    let error = String::from_utf8_lossy(&changed_policy.stderr);
-    assert!(
-        error.contains("differs from the active native policy"),
-        "{error}"
-    );
+    assert!(changed_policy.status.success(), "{changed_policy:?}");
     let offline_reuse = replay(&["--offline", "install"]);
     assert!(offline_reuse.status.success(), "{offline_reuse:?}");
     assert_eq!(
@@ -4432,16 +4427,14 @@ esac
         "{}",
         String::from_utf8_lossy(&removed.stderr)
     );
-    // Replay must calculate the fingerprint from this command's override.
+    // A changed policy reaches the provider; it is not rejected by lock identity.
     let mut override_env = env.to_vec();
     override_env.push(("GOPROXY", "off"));
     let replay = run_isolated_in_with_env(root, root, &["install"], &override_env);
     assert!(!replay.status.success());
-    let error = String::from_utf8_lossy(&replay.stderr);
-    assert!(
-        error.contains("differs from the active native policy"),
-        "{error}"
-    );
+    assert!(std::fs::read_to_string(&provider_calls)
+        .unwrap()
+        .ends_with("install private.example/acme/cli/cmd/cli@v1.2.3\n"));
 }
 
 #[cfg(unix)]
@@ -4613,6 +4606,39 @@ download_url = {endpoint:?}
         String::from_utf8_lossy(&uninstall.stderr)
     );
     assert!(!install_root.exists());
+    for policy in ["GOPRIVATE", "GOPROXY"] {
+        let value = if policy == "GOPROXY" {
+            "http://127.0.0.1:1|direct"
+        } else {
+            "private.example"
+        };
+        let replay = run_isolated_in_with_env(
+            temporary.path(),
+            &project,
+            &["install"],
+            &[
+                (policy, value),
+                ("PATH", "/usr/bin:/bin"),
+                ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+            ],
+        );
+        assert!(replay.status.success(), "{replay:?}");
+        assert_eq!(
+            std::fs::read_to_string(project.join("osdk.lock")).unwrap(),
+            lock
+        );
+        let uninstall = run_isolated_in_with_env(
+            temporary.path(),
+            &project,
+            &[
+                "--yes",
+                "uninstall",
+                "go:example.com/acme/tool/cmd/tool@1.2.3",
+            ],
+            &[("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap())],
+        );
+        assert!(uninstall.status.success(), "{uninstall:?}");
+    }
 }
 
 #[cfg(unix)]
