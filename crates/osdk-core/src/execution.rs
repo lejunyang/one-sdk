@@ -77,6 +77,17 @@ pub(crate) const APPLIED_GOPROXY: &str = "OSDK_APPLIED_GOPROXY";
 /// For GOPROXY, an explicit change since activation is a native source choice.
 pub fn original_env(key: &str) -> Option<OsString> {
     let current = std::env::var_os(key);
+    if key == "GOPROXY"
+        && current
+            .as_ref()
+            .is_some_and(|value| std::env::var_os(APPLIED_GOPROXY).as_ref() == Some(value))
+        && !std::env::var("OSDK_MANAGED_ENV")
+            .unwrap_or_default()
+            .split(',')
+            .any(|key| key == "GOPROXY")
+    {
+        return None;
+    }
     if std::env::var("OSDK_MANAGED_ENV")
         .unwrap_or_default()
         .split(',')

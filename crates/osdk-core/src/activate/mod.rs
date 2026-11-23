@@ -899,7 +899,7 @@ pub fn render_hook_env(shell: Shell, delta: &EnvDelta) -> String {
 
     let mut managed = Vec::new();
     for (k, v) in &delta.set_vars {
-        if valid_env_name(k) {
+        if valid_env_name(k) && k != crate::execution::APPLIED_GOPROXY {
             if k == "GOPROXY" {
                 // An empty override from the Go backend asks the child to
                 // consult GOENV. In a hook, release the stale shell value.
@@ -989,6 +989,9 @@ pub fn render_env_exports(shell: Shell, delta: &EnvDelta) -> String {
     for (key, value) in &delta.set_vars {
         if valid_env_name(key) {
             render_set_var(shell, key, value, &mut out);
+            if key == "GOPROXY" {
+                render_set_var(shell, crate::execution::APPLIED_GOPROXY, value, &mut out);
+            }
         }
     }
     out
@@ -1009,6 +1012,9 @@ pub fn env_assignments(
         .filter(|(key, _)| valid_env_name(key))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    if let Some(proxy) = vars.get("GOPROXY").cloned() {
+        vars.insert(crate::execution::APPLIED_GOPROXY.into(), proxy);
+    }
     let path = std::env::join_paths(
         delta
             .path_prepend

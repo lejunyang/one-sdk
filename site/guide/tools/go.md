@@ -188,3 +188,5 @@ osdk reshim
 
 runtime 身份、stage、provider 和 lock schema 的细节见
 [Go 开发工具实现](../../internals/go-tools)。
+
+osdk 导出的代理链在 `env`、direnv/CI 环境和 exec/run/shim 子进程中带来源标记。嵌套运行 osdk 不会把该值当成用户原生 GOPROXY；显式命令级覆盖仍优先。

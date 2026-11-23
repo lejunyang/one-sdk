@@ -227,3 +227,5 @@ the exact one through `osdk.lock` instead of allowing an ambiguous activation.
 
 For runtime identity, staging, provider, and lock-schema details, see
 [Go developer tool implementation](../../internals/go-tools).
+
+osdk marks proxy chains in env, direnv/CI exports, and exec/run/shim children. Nested osdk calls do not treat that value as a native GOPROXY choice; command-level overrides still win.

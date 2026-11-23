@@ -160,3 +160,5 @@ a complete, exactly matching installation can be reused offline.
 Online replay does not compare local source-policy fingerprints. Source differences
 leave the locked module and version unchanged. Offline reuse continues to validate
 the locked install identity.
+
+GoBackend.exec_env and standalone exports emit OSDK_APPLIED_GOPROXY. original_env recognizes an unchanged managed value, while hooks retain their pre-activation snapshot.

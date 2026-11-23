@@ -206,6 +206,7 @@ impl Backend for GoBackend {
         // interactive latency. Live probing stays in the install path.
         let original_proxy = super::go_env::process_value("GOPROXY");
         if let Some(proxy) = self.preferred_module_proxy(ctx, &super::go_env::process_value)? {
+            env.insert(crate::execution::APPLIED_GOPROXY.to_string(), proxy.clone());
             env.insert("GOPROXY".to_string(), proxy);
         } else if original_proxy != std::env::var("GOPROXY").ok() {
             // Go interprets the empty value as unset and consults its env file.

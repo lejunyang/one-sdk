@@ -4233,6 +4233,35 @@ fn public_go_lookup_with_only_privacy_needs_no_runtime() {
 
 #[cfg(unix)]
 #[test]
+fn env_exports_identify_managed_go_proxy_for_nested_lookup() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[tools]\ngo = \"1.24.0\"\n").unwrap();
+    let runtime = root.join("installs/go/1.24.0");
+    write_executable(
+        &runtime.join("bin/go"),
+        "#!/bin/sh\nprintf '%s' \"${OSDK_APPLIED_GOPROXY:-missing}\"\n",
+    );
+    complete_go_fixture(&runtime);
+    let mut command = isolated_command(root, root, Path::new("/bin/bash"));
+    command
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"set -eu
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+[ "$OSDK_APPLIED_GOPROXY" = "$GOPROXY" ]
+[ "$("$OSDK_TEST_BIN" exec -- go env GOPROXY)" = "$GOPROXY" ]
+"#,
+        ])
+        .env("OSDK_TEST_BIN", osdk());
+    let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
 fn activated_go_honors_command_proxy_and_off_in_lookup_and_execution() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

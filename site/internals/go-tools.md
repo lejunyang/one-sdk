@@ -128,3 +128,5 @@ module = "golang.org/x/tools/gopls"
 或 source payload。因此全新离线安装与修复会在 provider 启动前失败；只有完整且身份精确
 匹配的既有安装可离线复用。在线重放不会比较本机源策略指纹；来源差异不改变锁定的模块与版本。
 离线复用仍会核验锁定的安装身份。
+
+GoBackend.exec_env 与所有独立导出同时输出 OSDK_APPLIED_GOPROXY。original_env 在值仍等于标记时识别 osdk 输出，hook 则继续保留激活前快照。
