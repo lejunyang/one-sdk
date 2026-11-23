@@ -192,3 +192,5 @@ runtime 身份、stage、provider 和 lock schema 的细节见
 osdk 导出的代理链在 `env`、direnv/CI 环境和 exec/run/shim 子进程中带来源标记。嵌套运行 osdk 不会把该值当成用户原生 GOPROXY；显式命令级覆盖仍优先。
 
 设置 `[settings.precedence] go = "osdk"` 可显式选择 osdk 源而不删除原生配置。工具源用 `[sources."go:<module>"]`，受管 Go 命令用 `[sources."go-modules"]`。
+
+GOENV 文件不可读或指向目录时会警告并忽略，环境里的有效源设置仍生效；修正文件路径或设置 GOENV=off。

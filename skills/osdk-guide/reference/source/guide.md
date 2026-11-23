@@ -56,3 +56,5 @@ Node 会合并所有可达版本 index；经典 CPython 会合并同一 release 
 无关 UV_OFFLINE/ENV_FILE/FIND_LINKS/NO_INDEX 不拦 pypi 源发现；UV_INDEX 可用 name=URL。
 
 Go/PyPI 原生源发现遵守 settings.precedence 的 go/python 或 packages 继承；osdk 策略使用 sources/registries 声明，不要求清除原生文件。
+
+空 PIP_EXTRA_INDEX_URL 可取消文件中的额外索引；不可读 GOENV 警告并忽略，不阻断 Go 命令。

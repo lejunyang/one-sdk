@@ -304,3 +304,5 @@ With no native index, `.netrc`, `NETRC`, or keyring credentials do not affect de
 UV_OFFLINE, UV_ENV_FILE, UV_FIND_LINKS, and UV_NO_INDEX are not index addresses and do not block pypi source discovery. The uv installer still applies its execution settings. UV_INDEX accepts name=https://index.example/simple/.
 
 To use osdk indexes without deleting native configuration, set `[settings.precedence] python = "osdk"` and `[registries.python].urls`.
+
+PIP_EXTRA_INDEX_URL="" clears extra indexes from pip configuration. On macOS, user discovery uses Library/Application Support/pip/pip.conf when Application Support exists.
