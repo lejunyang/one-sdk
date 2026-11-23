@@ -482,6 +482,49 @@ download_url = "{endpoint}/fallback"
         .any(|entry| entry.file_type().is_file() && entry.path().ends_with("bin/fixture-tool")));
 }
 
+#[test]
+fn native_source_configuration_does_not_hide_pin_candidates() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".cargo")).unwrap();
+    std::fs::write(
+        home.join(".cargo/config.toml"),
+        "[source.crates-io]\nreplace-with='corp'\n[source.corp]\ndirectory='/unsupported'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".condarc"),
+        "channel_alias: https://user:secret@example.test\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".npmrc"),
+        "registry=https://user:secret@example.test\n",
+    )
+    .unwrap();
+    let mut errors = Vec::new();
+    for (tool, builtin) in [
+        ("cargo:ripgrep", "crates-io"),
+        ("conda:ripgrep", "anaconda"),
+        ("npm:prettier", "npm"),
+    ] {
+        for args in [
+            vec!["source", "list", tool],
+            vec!["source", "pin", tool, builtin],
+        ] {
+            let output = run_isolated(root, &args);
+            if !output.status.success() {
+                errors.push(format!(
+                    "{args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+    }
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
 #[cfg(not(windows))]
 #[test]
 fn native_condarc_routes_version_queries_and_verified_install() {

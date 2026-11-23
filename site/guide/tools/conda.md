@@ -75,7 +75,8 @@ osdk 工具安装，只有 `channels: [defaults]` 时仍使用 conda-forge 与�
 版本查询、依赖求解和包下载都使用这个配置，失败时不会尝试 osdk 的公共镜像。
 请使用匿名 HTTP(S) 地址。遇到带凭据的 URL、`custom_multichannels` 等
 不支持的配置时，osdk 会提示并停止。也可以用 `osdk source add conda:<包名>`
-添加自定义源，再用 `--source <id>` 显式选择它。
+添加自定义源，再用 `--source <id>` 或 `osdk source pin conda:<包名> <id>` 选择它。
+内置与自定义 pin 都优先于原生配置；`source list` 不受原生配置限制，取消 pin 恢复原生来源。
 
 ## 镜像与加速
 

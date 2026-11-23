@@ -400,20 +400,18 @@ impl CargoPackageBackend {
         let Some(cargo_home) = cargo_home else {
             return Ok(sources);
         };
+        if let Some(pin) = ctx
+            .config
+            .tool_sources(self.id())
+            .and_then(|cfg| cfg.pin.as_deref())
+        {
+            if let Some(source) = sources.iter().find(|source| source.id == pin) {
+                return Ok(vec![source.clone()]);
+            }
+        }
         let index = native_registry_index(cargo_home, self.id());
         if matches!(&index, Ok(None)) {
             return Ok(sources);
-        }
-        let pin = ctx
-            .config
-            .tool_sources(self.id())
-            .and_then(|cfg| cfg.pin.as_deref());
-        // An explicit custom source is also the escape hatch for unsupported
-        // native declarations. Keep its selection exclusive if native config exists.
-        if let Some(custom) = sources.iter().find(|source| {
-            Some(source.id.as_str()) == pin && source.kind == crate::source::SourceKind::Custom
-        }) {
-            return Ok(vec![custom.clone()]);
         }
         let Some(index) = index? else {
             unreachable!("no replacement was handled above");

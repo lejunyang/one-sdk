@@ -826,18 +826,18 @@ impl CondaBackend {
         ctx: &Ctx,
         candidates: Vec<Source>,
     ) -> Result<(Vec<Source>, Option<NativeChannels>)> {
+        if let Some(pin) = ctx
+            .config
+            .tool_sources(self.id())
+            .and_then(|cfg| cfg.pin.as_deref())
+        {
+            if let Some(source) = candidates.iter().find(|source| source.id == pin) {
+                return Ok((vec![source.clone()], None));
+            }
+        }
         let native = NativeChannels::load();
         if native.as_ref().is_ok_and(Option::is_none) {
             return Ok((candidates, None));
-        }
-        let pin = ctx
-            .config
-            .tool_sources(self.id())
-            .and_then(|cfg| cfg.pin.as_deref());
-        if let Some(custom) = candidates.iter().find(|source| {
-            Some(source.id.as_str()) == pin && source.kind == crate::source::SourceKind::Custom
-        }) {
-            return Ok((vec![custom.clone()], None));
         }
         Ok((candidates, native?))
     }

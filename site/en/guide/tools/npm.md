@@ -422,6 +422,9 @@ do not block installation. Registry exports from npm scripts or `osdk exec npm` 
 not new user declarations. `[settings.precedence] npm="osdk"` with `[registries.npm] default`
 overrides the native default; offline skips native preflight. An explicitly selected
 default that cannot be used anonymously fails with an osdk configuration alternative.
+`osdk source pin npm:<package> <id>` or `--source <id>` overrides native routing with
+one explicit built-in/custom source. `source list` always shows manageable osdk sources;
+unpin restores native selection.
 
 `osdk exec --tool npm:... -- <command>` resolves the published command name from
 the selected install inventory, even when its target has a different filename

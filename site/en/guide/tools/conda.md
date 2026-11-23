@@ -87,7 +87,9 @@ Version lookup, dependency solving, and package downloads use these channels
 exclusively. Use anonymous HTTP(S) URLs. URLs with credentials and unsupported
 settings such as `custom_multichannels` stop the operation with a warning.
 To override, add a custom source with `osdk source add conda:<package>` and
-select it with `--source <id>`.
+select it with `--source <id>` or `osdk source pin conda:<package> <id>`.
+Built-in and custom pins override native routing; `source list` remains manageable
+regardless of native configuration. Unpin restores native routing.
 
 ## Mirrors
 

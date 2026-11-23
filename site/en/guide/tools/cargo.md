@@ -78,7 +78,9 @@ When `[source.crates-io].replace-with` in `$CARGO_HOME/config.toml` (default
 that registry exclusively for lookup and installation. The legacy file name
 `config` takes priority when both files exist. Git, directory, and authenticated
 replacements raise an error. Add an osdk source as below, then select it with
-`osdk --source corp install cargo:ripgrep`. Locked installs use the recorded index.
+`osdk --source corp install cargo:ripgrep` or persist it with `osdk source pin cargo:ripgrep corp`.
+Explicit built-in or custom selections override native configuration; `source list`
+always shows manageable osdk candidates. Locked installs use the recorded index.
 
 For a custom Cargo mirror, `--index-url` is the sole authoritative sparse index:
 osdk strips `sparse+` to read version metadata, while Cargo consumes the original

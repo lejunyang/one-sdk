@@ -31,7 +31,10 @@ env_force = false
 
 - `mode = "auto"`：环境镜像与内置候选一起探测排序。
 - `mode = "env"`：只遵循环境镜像；缺失或不可用即失败。
-- `pin` 是优先尝试，不是禁用其他回退源。
+- `pin` 是优先尝试，不是禁用其他回退源。对 Cargo/Conda/npm 原生来源覆盖，显式 pin
+  （内置或自定义）优先于原生配置，并仅使用所选源，避免把私有包名送到无关源。
+  `source list` 始终展示可管理的 osdk 候选；`source test` 使用安装的有效候选。
+  用 `osdk source pin <tool> <id>` 持久固定，`source unpin <tool>` 恢复原生选择。
 - probe 成功只影响排序；osdk 直连产物在校验、解包或必需文件检查失败时仍会换下一个源。
 - 委托安装器使用安全的目标级策略：Rust 逐源执行 rustup，Cargo 预检精确 crate URL，
   `pypi:` 探测实际项目页，`go:` 在全新解析时生成 `|` 分隔的 GOPROXY 回退链。

@@ -70,7 +70,9 @@ crate 分片条目完成探测、metadata 获取与缓存；镜像不需要实�
 `[source.crates-io].replace-with` 指向匿名 sparse HTTPS registry，版本查询和安装
 只使用这个源。旧文件名 `config` 仍有效，两个文件同时存在时优先读取它。
 Git、目录或要求登录的替换源会报错。可以按下例添加 osdk 自定义源，
-再用 `osdk --source corp install cargo:ripgrep` 显式选择它。锁定安装使用锁中记录的源。
+再用 `osdk --source corp install cargo:ripgrep` 显式选择它，或 `osdk source pin cargo:ripgrep corp`
+持久固定。内置源与自定义源的显式选择优先于原生配置；`source list` 始终可见 osdk 候选。
+锁定安装使用锁中记录的源。
 
 自定义 Cargo 镜像时，`--index-url` 是唯一权威的 sparse index；osdk 去掉 `sparse+`
 后读取版本元数据，Cargo 则直接使用原值。通用 `source add` 当前仍要求

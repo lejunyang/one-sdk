@@ -150,8 +150,6 @@ fn dynamic_mirror_upstream_pairs() -> Vec<(String, String)> {
 
 pub fn effective_sources_with_env(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
     let sources = effective_sources(ctx, backend);
-    #[cfg(feature = "install")]
-    let sources = backend.restrict_sources(ctx, sources)?;
     let Some(mirror) = backend.env_mirror() else {
         // A backend with no native mirror variable has nothing to reconcile, and
         // `--source-mode env` cannot apply to it.
@@ -223,7 +221,10 @@ pub async fn active_source(ctx: &Ctx, backend: &dyn Backend) -> Result<Source> {
 ///
 /// A config pin (or one-shot `--source`) moves that source to the front.
 pub async fn ranked_source_list(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
-    ranked_source_candidates(ctx, backend, effective_sources_with_env(ctx, backend)?).await
+    let sources = effective_sources_with_env(ctx, backend)?;
+    #[cfg(feature = "install")]
+    let sources = backend.restrict_sources(ctx, sources)?;
+    ranked_source_candidates(ctx, backend, sources).await
 }
 
 /// Rank an already-filtered effective source set with the same pin, cache,
@@ -526,6 +527,8 @@ pub async fn refresh(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<ProbeResult
     // otherwise `source test` would measure a different set than `install` uses
     // and the cached fingerprint would never match.
     let sources = effective_sources_with_env(ctx, backend)?;
+    #[cfg(feature = "install")]
+    let sources = backend.restrict_sources(ctx, sources)?;
     refresh_for(ctx, backend.id(), sources, |ctx, source| {
         backend.probe_url(ctx, source)
     })
