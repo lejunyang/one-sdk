@@ -1,0 +1,82 @@
+{
+  "binary": "/data00/home/lejunyang/.omem/workspaces/one-sdk/3/target/qa/baseline-build/debug/osdk",
+  "results": [
+    {
+      "name": "pypi_netrc",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "installing pypi:fixture@1.2.3 ...\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\nerror: config error: native credentials are configured without a usable index; set a single anonymous Python index in pip/uv, or clear the native source settings and set [registries.python].urls\n"
+    },
+    {
+      "name": "pypi_project_uv",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "installing pypi:fixture@1.2.3 ...\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\nerror: config error: uv configures package-specific indexes; set a single anonymous Python index in pip/uv, or clear the native source settings and set [registries.python].urls\n"
+    },
+    {
+      "name": "pypi_uv_vars",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "installing pypi:fixture@1.2.3 ...\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\nerror: config error: uv configures an environment file or a non-index source; set a single anonymous Python index in pip/uv, or clear the native source settings and set [registries.python].urls\n"
+    },
+    {
+      "name": "pypi_uv_extra",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "installing pypi:fixture@1.2.3 ...\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\nerror: external command `/tmp/osdk-source-regression-s0z8u7di/installs/pypi/fixture/1.2.3/b3-v2-466a00b9a74b5ccec0061e172abc4b9fe93da54dd0ed48755629f3d3d87f7da8/bin/python -m pip install --only-binary=:all: fixture==1.2.3` failed with status exit status: 12:\n\nnote: osdk installs pypi tools from wheels only, because building a source distribution runs the package's own code. If `fixture` publishes no wheel for this platform, set `allow_builds = true` on its `[tools]` entry; the project then needs `osdk trust`.\n"
+    },
+    {
+      "name": "pypi_uv_named",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "installing pypi:fixture@1.2.3 ...\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\nerror: config error: invalid native Python index URL; set a single anonymous Python index in pip/uv, or clear the native source settings and set [registries.python].urls\n"
+    },
+    {
+      "name": "pypi_pip_empty",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "installing pypi:fixture@1.2.3 ...\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\nerror: config error: pip configures multiple indexes or a non-index source; set a single anonymous Python index in pip/uv, or clear the native source settings and set [registries.python].urls\n"
+    },
+    {
+      "name": "pypi_precedence",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "installing pypi:fixture@1.2.3 ...\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\nerror: config error: native Python index requires HTTPS and a URL without credentials, query, or fragment; set a single anonymous Python index in pip/uv, or clear the native source settings and set [registries.python].urls\n"
+    },
+    {
+      "name": "go_public_privacy_no_runtime",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "error: config error: native Go module lookup requires a managed Go runtime; run `osdk install go` first\n"
+    },
+    {
+      "name": "go_locked_proxy_different_native",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "go@1.24.0 already installed\n",
+      "stderr": "warning: osdk-shim binary not found; skipping shim generation\nerror: config error: the locked Go source for `go:example.com/tool` differs from the active native policy; restore the original Go settings or regenerate osdk.lock\n"
+    },
+    {
+      "name": "go_env_nested_lookup",
+      "passed": false,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "name": "go_unreadable_goenv",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "go-env-ok\n",
+      "stderr": ""
+    }
+  ]
+}
