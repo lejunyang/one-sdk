@@ -6328,6 +6328,50 @@ fn exec_runs_with_exact_managed_tool_environment() {
     assert!(stdout.contains("node:hello"));
 }
 
+#[test]
+fn exec_with_managed_rust_preserves_explicit_cargo_registry_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let cargo_home = root.join("personal-cargo");
+    std::fs::create_dir(&cargo_home).unwrap();
+    std::fs::write(
+        cargo_home.join("config.toml"),
+        "[source.crates-io]\nreplace-with = 'personal'\n[source.personal]\ndirectory = 'vendor'\n",
+    )
+    .unwrap();
+    let marker = root.join("installs/rust/1.91.1");
+    std::fs::create_dir_all(&marker).unwrap();
+    std::fs::write(marker.join(".osdk-complete"), b"").unwrap();
+    let toolchain = root.join("data/rustup/toolchains/1.91.1/bin");
+    std::fs::create_dir_all(&toolchain).unwrap();
+    for name in ["cargo", "rustc"] {
+        let executable = toolchain.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(executable, b"fixture").unwrap();
+    }
+    let binary = osdk();
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &[
+            "exec",
+            "--tool",
+            "rust@1.91.1",
+            "--",
+            binary.to_str().unwrap(),
+            "--offline",
+            "list-remote",
+            "cargo:fixture-tool",
+        ],
+        &[("CARGO_HOME", cargo_home.to_str().unwrap())],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Cargo replacement requires a direct registry"),
+        "{stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {

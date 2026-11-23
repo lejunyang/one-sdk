@@ -499,12 +499,33 @@ pub async fn exec_cmd(
         resolve_native_global_for_exec(app, &managed_program, &hosts, &managed_paths, &mut env)?
             .unwrap_or(managed_program);
     apply_package_registry_plan(app, &resolved, program, args, &mut env).await?;
-    let status = command_for_program(&managed_program)
+    let mut child = command_for_program(&managed_program);
+    preserve_user_cargo_home(app, &mut child, env.contains_key("CARGO_HOME"));
+    let status = child
         .args(&managed_args)
         .envs(env)
         .status()
         .with_context(|| format!("running {}", managed_program.display()))?;
     Ok(Some(status))
+}
+
+/// Keep the original registry configuration visible to a nested osdk while
+/// the child still uses the selected Rust toolchain's Cargo home.
+pub(super) fn preserve_user_cargo_home(
+    app: &App,
+    child: &mut std::process::Command,
+    replaces: bool,
+) {
+    if !replaces {
+        return;
+    }
+    if let Some(home) =
+        osdk_core::backend::cargo_package::user_cargo_home_override(&app.ctx, |key| {
+            std::env::var_os(key)
+        })
+    {
+        child.env("OSDK_ORIG_CARGO_HOME", home);
+    }
 }
 
 /// `osdk exec -- <command>` without `--tool`: run under the directory's own
@@ -535,6 +556,7 @@ fn exec_in_project_environment(app: &App, command: &[String]) -> Result<std::pro
             None => child.env_remove(key),
         };
     }
+    preserve_user_cargo_home(app, &mut child, env.contains_key("CARGO_HOME"));
     let status = child
         .args(args)
         .envs(&env)

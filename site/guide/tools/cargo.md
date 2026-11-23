@@ -72,8 +72,9 @@ crate 分片条目完成探测、metadata 获取与缓存；镜像不需要实�
 支持 `[source.<名称>].registry` 和 `[registries.<名称>].index` 两种替换目标。
 公开 git 索引白名单（USTC crates.io-index、TUNA git/crates.io-index.git、
 GitHub rust-lang/crates.io-index、rsproxy crates.io-index）告警后沿用 osdk 默认源。
-其他 Git、目录或要求登录的替换源明确报错。受管 shell/exec 导出的 CARGO_HOME 不遮蔽
-用户 Cargo 配置。可以按下例添加 osdk 自定义源，
+其他 Git、目录或要求登录的替换源明确报错。即使在受管 shell 或 `osdk exec --tool rust@…`
+中调用 osdk，`cargo:<包名>` 仍读取进入该环境前的 `CARGO_HOME`，默认读取 `~/.cargo`。
+可以按下例添加 osdk 自定义源，
 再用 `osdk --source corp install cargo:ripgrep` 显式选择它，或 `osdk source pin cargo:ripgrep corp`
 持久固定。内置源与自定义源的显式选择优先于原生配置；`source list` 始终可见 osdk 候选。
 锁定安装回放源前会核对本机 Cargo 或 osdk 有相同 index，缺失或不同则明确报错并要求配置或重锁。

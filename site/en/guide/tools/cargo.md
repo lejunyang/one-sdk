@@ -80,8 +80,9 @@ that registry exclusively for lookup and installation. The legacy file name
 `[registries.<name>].index` replacement targets are supported. Public git indexes
 on the USTC crates.io-index, TUNA git/crates.io-index.git, GitHub rust-lang/crates.io-index
 and rsproxy crates.io-index allowlist warn and retain osdk default sources. Other Git,
-directory and authenticated replacements raise an error. Managed shell/exec CARGO_HOME
-does not hide user Cargo configuration. Add an osdk source as below, then select it with
+directory and authenticated replacements raise an error. Inside a managed shell or
+`osdk exec --tool rust@…`, `cargo:<crate>` still reads the caller's original
+`CARGO_HOME`, defaulting to `~/.cargo`. Add an osdk source as below, then select it with
 `osdk --source corp install cargo:ripgrep` or persist it with `osdk source pin cargo:ripgrep corp`.
 Explicit built-in or custom selections override native configuration; `source list`
 always shows manageable osdk candidates. Replaying a locked index requires a matching

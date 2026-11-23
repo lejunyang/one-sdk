@@ -154,25 +154,32 @@ thread_local! {
     static TEST_CARGO_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+/// The caller's explicit Cargo home, including one replaced by osdk.
+pub fn user_cargo_home_override(
+    ctx: &Ctx,
+    getenv: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let current = getenv("CARGO_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    if current == ctx.dirs.cargo_home()
+        || current == crate::cache::downstream_root(&ctx.dirs.cache).join("cargo")
+    {
+        getenv("OSDK_ORIG_CARGO_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    } else {
+        Some(current)
+    }
+}
+
 fn user_cargo_home(ctx: &Ctx, getenv: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(home) = TEST_CARGO_HOME.with(|value| value.borrow().clone()) {
         return Some(home);
     }
-    let current = getenv("CARGO_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    let managed = current.as_ref().is_some_and(|path| {
-        path == &ctx.dirs.cargo_home()
-            || path == &crate::cache::downstream_root(&ctx.dirs.cache).join("cargo")
-    });
-    if managed {
-        return getenv("OSDK_ORIG_CARGO_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::home_dir().map(|home| home.join(".cargo")));
-    }
-    current.or_else(|| std::env::home_dir().map(|home| home.join(".cargo")))
+    user_cargo_home_override(ctx, getenv)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".cargo")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

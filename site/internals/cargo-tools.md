@@ -31,7 +31,8 @@ feature 会经过校验、排序和去重；默认值 `default-features=true` �
 只将选定 index 写入私有 Cargo 配置，原生配置与凭据不会复制给 provider。
 显式 pin 的 osdk 内置或自定义源覆盖原生声明。没有原生声明时保留 main 的 pin 与回退顺序。
 source list/pin 只处理可管理候选，安装和 refresh 才施加原生限制。
-受管 data/cargo 与 cache/pkg/cargo 会还原用户 home；真正用户指定的 home 保留。
+受管 `data/cargo` 与 `cache/pkg/cargo` 用于 Rust 命令运行。shell 激活和 exec 子进程保留
+原来的 Cargo home，供内层 osdk 解析源配置。
 source.registry 和 registries.index 两种替换目标共用 sparse 校验，已知公开 git 镜像告警回退。
 旧锁 exact index 回放要求本机有效原生或 osdk 候选中存在相同 index，否则要求配置或重锁。
 自定义 index 走源码安装，避免 `cargo-binstall` 为私有 crate 发现外部资产。

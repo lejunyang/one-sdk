@@ -42,7 +42,8 @@ env_force = false
   crates.io 替换源。匿名 sparse HTTPS 源独占版本查询和安装，不导入登录凭据。
   旧文件名 `config` 优先，支持 source.registry 和 registries.index 替换目标。
   USTC/TUNA/GitHub rust-lang/rsproxy 的已知公开 git 索引告警后沿用默认源；未知Git、
-  目录、认证源仍报错。受管 CARGO_HOME 回到用户配置。锁回放要求本机配置同一 index，
+  目录、认证源仍报错。受管 shell 和 `osdk exec --tool rust@…` 内的 osdk 仍读取用户原来的
+  `CARGO_HOME`（默认 `~/.cargo`）。锁回放要求本机配置同一 index，
   缺失/不同报错并要求配置或重锁。
 - `conda:<包名>` 遵循 `CONDARC`、`~/.condarc` 等配置的 `channel_alias`、
   `default_channels`、`custom_channels`，这些字段才启用原生来源。文件 `channels`

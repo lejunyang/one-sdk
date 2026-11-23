@@ -227,10 +227,13 @@ pub(super) async fn try_exec(
                 .map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v))),
         );
     }
-    let status = command_for_program(&executable)
+    let replaces_cargo_home = child_env.get(std::ffi::OsStr::new("CARGO_HOME"))
+        != std::env::var_os("CARGO_HOME").as_ref();
+    let mut child = command_for_program(&executable);
+    child.env_clear().envs(child_env);
+    super::install::preserve_user_cargo_home(app, &mut child, replaces_cargo_home);
+    let status = child
         .args(final_args)
-        .env_clear()
-        .envs(child_env)
         .status()
         .with_context(|| format!("running {}", executable.display()))?;
     Ok(Some(status))

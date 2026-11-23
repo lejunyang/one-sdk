@@ -43,8 +43,9 @@ resolution checks its `config.json` for `auth-required`. The provider receives
 the selected index in a private Cargo config, leaving the original config and
 credentials in place. Explicit built-in/custom pins override native routing; absent
 native configuration retains main's pin/fallback order. Source list/pin manage
-candidates; installation and refresh apply native restrictions. Managed data/cargo
-and cache/pkg/cargo restore user home, while genuine user homes remain authoritative.
+candidates; installation and refresh apply native restrictions. Rust commands use the
+managed `data/cargo` or `cache/pkg/cargo` home. Shell activation and exec child processes
+carry the caller's original home so nested osdk invocations can resolve its registry.
 Source.registry and registries.index use the same sparse validation; known public
 git mirrors warn and retain defaults. Exact locked indexes require the same index
 in local native/osdk candidates, otherwise replay asks for configuration or relocking.
