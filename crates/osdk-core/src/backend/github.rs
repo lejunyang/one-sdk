@@ -164,8 +164,13 @@ impl GithubBackend {
             repo: self.repo.clone(),
             policy,
             sources: if http::github_token().is_some() {
-                // Attestation APIs build their own canonical GitHub URLs.
-                Vec::new()
+                // Explicit relays remain usable; built-in proxies do not receive
+                // private repository paths and token attachment stays host-bound.
+                sources
+                    .iter()
+                    .filter(|source| source.kind == crate::source::SourceKind::Custom)
+                    .cloned()
+                    .collect()
             } else {
                 sources.to_vec()
             },
@@ -2355,6 +2360,20 @@ mod tests {
         let versions = backend.list_remote_versions(&ctx).await.unwrap();
         assert!(versions.iter().any(|version| version.version == "2.0.0"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn attestation_preserves_custom_routes_without_builtin_proxy() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temp.path());
+        ctx.config.settings.attestations = crate::config::AttestationPolicy::Required;
+        let backend = GithubBackend::from_id("github:fixture/tool").unwrap();
+        let custom = Source {
+            kind: crate::source::SourceKind::Custom,
+            ..Source::mirror("corp", "https://relay.example.test/", 0)
+        };
+        let attestation = backend.attestation(&ctx, &[custom.clone()]).unwrap();
+        assert_eq!(attestation.sources[0].id, custom.id);
     }
 
     #[tokio::test]
