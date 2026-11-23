@@ -81,16 +81,13 @@ impl NativeGoSource {
         )?)
     }
 
-    fn from_settings(mut settings: BTreeMap<String, String>) -> Result<Option<Self>> {
+    fn from_settings(settings: BTreeMap<String, String>) -> Result<Option<Self>> {
         if !super::go_env::has_module_policy(&settings) {
             return Ok(None);
         }
-        // A privacy-only setup has not named a proxy that we can send module
-        // paths to. Use VCS directly, including when testing parent module roots.
-        let chain = settings
-            .entry("GOPROXY".into())
-            .or_insert_with(|| "direct".into());
-        validate_native_proxy_chain(chain)?;
+        if let Some(chain) = settings.get("GOPROXY") {
+            validate_native_proxy_chain(chain)?;
+        }
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
         for (name, value) in &settings {
@@ -161,6 +158,22 @@ impl GoPackageBackend {
             command_path: id.subject().to_string(),
             id: id.to_string(),
         })
+    }
+
+    fn native_source(&self, _ctx: &Ctx) -> Result<Option<NativeGoSource>> {
+        let Some(native) = NativeGoSource::discover()? else {
+            return Ok(None);
+        };
+        let patterns = native
+            .settings
+            .get("GONOPROXY")
+            .or_else(|| native.settings.get("GOPRIVATE"));
+        let private = patterns
+            .map(|patterns| super::go_env::private_query_prefix(&self.command_path, patterns))
+            .transpose()?
+            .flatten()
+            .is_some();
+        Ok((native.settings.contains_key("GOPROXY") || private).then_some(native))
     }
 
     fn runtime_version<'a>(&self, options: &'a BTreeMap<String, String>) -> Result<&'a str> {
@@ -659,6 +672,15 @@ impl GoPackageBackend {
         ]);
         if let Some(native) = native {
             env.remove(OsStr::new("GONOPROXY"));
+            if !native.settings.contains_key("GOPROXY") {
+                env.insert(
+                    "GOPROXY".into(),
+                    super::go::GoBackend
+                        .preferred_module_proxy(ctx, &|_| None)?
+                        .unwrap_or_else(|| "https://proxy.golang.org,direct".into())
+                        .into(),
+                );
+            }
             env.extend(
                 native
                     .settings
@@ -790,7 +812,7 @@ impl GoPackageBackend {
                 self.id
             )));
         }
-        let native = NativeGoSource::discover()?;
+        let native = self.native_source(ctx)?;
         self.check_replay_source(&tv.options, native.as_ref())?;
         let lifecycle = self.lifecycle(ctx, tv)?;
         let NativeToolPreparation::Staged(stage) = lifecycle.prepare(&ctx.dirs).await? else {
@@ -895,7 +917,7 @@ impl Backend for GoPackageBackend {
 
     #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        if let Some(native) = NativeGoSource::discover()? {
+        if let Some(native) = self.native_source(ctx)? {
             if ctx.config.settings.offline {
                 return Err(Error::config(
                     "native Go module lookup is unavailable offline",
@@ -936,7 +958,7 @@ impl Backend for GoPackageBackend {
         let native = if locked && ctx.config.settings.offline {
             None
         } else {
-            NativeGoSource::discover()?
+            self.native_source(ctx)?
         };
         if locked {
             if !ctx.config.settings.offline {
@@ -1084,7 +1106,7 @@ impl Backend for GoPackageBackend {
     #[cfg(feature = "install")]
     fn validate_install_reuse(&self, ctx: &Ctx, req: &ToolRequest) -> Result<()> {
         if !ctx.config.settings.offline && Self::has_locked_resolution(&req.options) {
-            let native = NativeGoSource::discover()?;
+            let native = self.native_source(ctx)?;
             self.check_replay_source(&req.options, native.as_ref())?;
         }
         Ok(())
@@ -1772,6 +1794,17 @@ mod tests {
                 .check_replay_source(&tv.options, Some(&native))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn privacy_only_policy_does_not_force_public_modules_direct() {
+        let native = NativeGoSource::from_settings(BTreeMap::from([(
+            "GOPRIVATE".into(),
+            "private.example".into(),
+        )]))
+        .unwrap()
+        .unwrap();
+        assert!(!native.settings.contains_key("GOPROXY"));
     }
 
     #[derive(Clone)]

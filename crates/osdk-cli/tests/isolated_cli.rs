@@ -4196,6 +4196,43 @@ EOF
 
 #[cfg(unix)]
 #[test]
+fn public_go_lookup_with_only_privacy_needs_no_runtime() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    std::fs::write(root.join("osdk.toml"), format!("[sources]\nselection = \"ordered\"\n[[sources.\"go:example.com/tool\".custom]]\nid = \"fixture\"\nkind = \"custom\"\ndownload_url = {endpoint:?}\n")).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_fixture_connection(&listener, "public Go module");
+        let mut request = [0; 2048];
+        let n = stream.read(&mut request).unwrap();
+        assert!(
+            String::from_utf8_lossy(&request[..n]).starts_with("GET /example.com/tool/@v/list ")
+        );
+        let body = "v1.2.3\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["list-remote", "go:example.com/tool"],
+        &[
+            ("GOPRIVATE", "private.example"),
+            ("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.2.3");
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn activated_go_honors_command_proxy_and_off_in_lookup_and_execution() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

@@ -97,8 +97,8 @@ metadata requests. These transport settings do not replace the selected
 For private modules, set `GOPROXY`, `GOPRIVATE`, or `GONOPROXY` in the
 environment or with `go env -w`. osdk uses those settings for both version
 lookup and installation. Go keeps the order and separators of the configured
-proxy chain, including `direct` or `off`. With only privacy settings configured,
-standalone `go:` tools fetch directly from VCS. Use a proxy URL without embedded
+proxy chain, including `direct` or `off`. Privacy-only settings affect matching modules;
+public tools retain the default proxy chain and can list versions before Go is installed. Use a proxy URL without embedded
 credentials. A managed Go runtime must be installed before listing or locking
 versions with a native source. Locks keep the module and exact version without
 binding local source settings; changing GOPROXY/GOPRIVATE does not require relocking.

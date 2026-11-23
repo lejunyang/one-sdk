@@ -329,7 +329,7 @@ impl GoBackend {
         getenv: &impl Fn(&str) -> Option<String>,
     ) -> Result<Option<String>> {
         let native = super::go_env::source_settings(getenv)?;
-        if super::go_env::has_module_policy(&native) {
+        if native.contains_key("GOPROXY") {
             return Ok(None);
         }
         let mut endpoints = module_proxy_sources(ctx)

@@ -24,7 +24,7 @@ For version lookup, each native `go list -m` invocation receives a candidate
 module path. If the original command path matches the effective no-proxy
 patterns, osdk limits those candidates to the broadest matching path prefix.
 An empty result or failed lookup cannot extend that search beyond the prefix.
-Setting only privacy rules selects direct VCS lookups. The provider still
+Privacy-only rules delegate matching modules to Go; public modules use osdk proxy metadata. The provider still
 clears its environment and does not load the whole Go env file or forward
 credentials. Native-source module caches are keyed by policy fingerprint.
 
