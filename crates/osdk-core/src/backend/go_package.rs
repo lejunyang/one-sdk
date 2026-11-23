@@ -106,7 +106,7 @@ impl NativeGoSource {
 fn validate_native_proxy_chain(chain: &str) -> Result<()> {
     let error = || {
         Error::config(
-        "native GOPROXY must contain Go proxy URLs without embedded credentials, query or fragment, or Go policies such as direct/off",
+        "native GOPROXY must contain Go proxy URLs without embedded credentials, query or fragment, or Go policies such as direct/off; set [sources.\"go:<module>\"] and [settings.precedence] go = \"osdk\" to use osdk sources",
     )
     };
     let mut has_entry = false;
@@ -160,7 +160,12 @@ impl GoPackageBackend {
         })
     }
 
-    fn native_source(&self, _ctx: &Ctx) -> Result<Option<NativeGoSource>> {
+    fn native_source(&self, ctx: &Ctx) -> Result<Option<NativeGoSource>> {
+        if ctx.config.settings.precedence.package_policy("go")
+            == crate::config::SourcePrecedence::Osdk
+        {
+            return Ok(None);
+        }
         let Some(native) = NativeGoSource::discover()? else {
             return Ok(None);
         };
@@ -1274,7 +1279,7 @@ fn query_native_module(
         .map(|prefix| format!("; search limited to private module paths under `{prefix}`"))
         .unwrap_or_default();
     Err(Error::other(format!(
-        "native Go module lookup failed: {detail}{scope}; check GOPROXY and Go privacy settings"
+        "native Go module lookup failed: {detail}{scope}; check GOPROXY, or set [sources.\"go:<module>\"] and [settings.precedence] go = \"osdk\" and Go privacy settings"
     )))
 }
 

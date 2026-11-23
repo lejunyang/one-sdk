@@ -30,7 +30,12 @@ impl NativeIndex {
     }
 }
 
-pub(super) fn index(creator: EnvCreator) -> Result<Option<NativeIndex>> {
+pub(super) fn index(ctx: &crate::backend::Ctx, creator: EnvCreator) -> Result<Option<NativeIndex>> {
+    if ctx.config.settings.precedence.package_policy("python")
+        == crate::config::SourcePrecedence::Osdk
+    {
+        return Ok(None);
+    }
     let cwd = std::env::current_dir()?;
     let home = crate::python_index::home_directory();
     let getenv = |key: &str| std::env::var(key).ok();
@@ -82,7 +87,7 @@ fn enabled(value: &str) -> bool {
 
 fn index_error(reason: &str) -> Error {
     Error::config(format!(
-        "{reason}; set a single anonymous Python index in pip/uv, or clear the native source settings and set [registries.python].urls"
+        "{reason}; set [registries.python].urls and [settings.precedence] python = \"osdk\" to use an explicit osdk index"
     ))
 }
 

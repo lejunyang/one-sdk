@@ -302,3 +302,5 @@ Bare pip installs remain tied to their interpreter/virtualenv. pipx and uv tool 
 With no native index, `.netrc`, `NETRC`, or keyring credentials do not affect default mirror selection. Use `osdk config set registries.python.urls URL` to select a source.
 
 UV_OFFLINE, UV_ENV_FILE, UV_FIND_LINKS, and UV_NO_INDEX are not index addresses and do not block pypi source discovery. The uv installer still applies its execution settings. UV_INDEX accepts name=https://index.example/simple/.
+
+To use osdk indexes without deleting native configuration, set `[settings.precedence] python = "osdk"` and `[registries.python].urls`.

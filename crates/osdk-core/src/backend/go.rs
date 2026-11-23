@@ -330,7 +330,10 @@ impl GoBackend {
         getenv: &impl Fn(&str) -> Option<String>,
     ) -> Result<Option<String>> {
         let native = super::go_env::source_settings(getenv)?;
-        if native.contains_key("GOPROXY") {
+        if ctx.config.settings.precedence.package_policy("go")
+            == crate::config::SourcePrecedence::Native
+            && native.contains_key("GOPROXY")
+        {
             return Ok(None);
         }
         let mut endpoints = module_proxy_sources(ctx)

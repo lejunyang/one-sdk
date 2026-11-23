@@ -4262,6 +4262,33 @@ eval "$("$OSDK_TEST_BIN" env --format bash)"
 
 #[cfg(unix)]
 #[test]
+fn osdk_precedence_bypasses_native_go_and_python_sources() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[settings.precedence]\ngo = \"osdk\"\npython = \"osdk\"\n[registries.python]\nurls = [\"https://127.0.0.1:1/simple/\"]\n[sources]\nselection = \"ordered\"\n[[sources.\"go:example.com/tool\".custom]]\nid = \"fixture\"\nkind = \"custom\"\ndownload_url = \"http://127.0.0.1:1\"\n").unwrap();
+    let env = [
+        ("GOPROXY", "off"),
+        (
+            "PIP_INDEX_URL",
+            "https://user:secret@private.example/simple",
+        ),
+        ("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()),
+    ];
+    for tool in ["go:example.com/tool", "pypi:fixture"] {
+        let output = run_isolated_in_with_env(root, root, &["list-remote", tool], &env);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(!error.contains("requires a managed Go runtime"), "{error}");
+        assert!(!error.contains("without credentials"), "{error}");
+        assert!(
+            error.contains("127.0.0.1:1") || error.contains("no configured Python index"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn activated_go_honors_command_proxy_and_off_in_lookup_and_execution() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

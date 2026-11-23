@@ -229,3 +229,5 @@ For runtime identity, staging, provider, and lock-schema details, see
 [Go developer tool implementation](../../internals/go-tools).
 
 osdk marks proxy chains in env, direnv/CI exports, and exec/run/shim children. Nested osdk calls do not treat that value as a native GOPROXY choice; command-level overrides still win.
+
+Set `[settings.precedence] go = "osdk"` to select osdk sources without deleting native configuration. Use `[sources."go:<module>"]` for tools and `[sources."go-modules"]` for managed Go commands.

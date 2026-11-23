@@ -428,7 +428,7 @@ impl PypiBackend {
             )));
         }
         let choice = choose_installer(locate_uv(ctx).as_deref(), require_uv(options))?;
-        let versions = if let Some(index) = super::pypi_native::index(choice.creator)? {
+        let versions = if let Some(index) = super::pypi_native::index(ctx, choice.creator)? {
             let mut selected = None;
             for url in index.urls() {
                 match crate::python_index::list_native_versions(url, &self.project).await {
@@ -1170,7 +1170,7 @@ impl Backend for PypiBackend {
         // environment before the installer has even started.
         let index = if ctx.config.settings.offline {
             InstallIndex::Managed(ctx.config.registries().python.urls.first().cloned())
-        } else if let Some(index) = super::pypi_native::index(choice.creator)? {
+        } else if let Some(index) = super::pypi_native::index(ctx, choice.creator)? {
             InstallIndex::Native(index)
         } else {
             InstallIndex::Managed(Some(self.resolved_index(ctx).await?))

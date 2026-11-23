@@ -255,3 +255,5 @@ osdk 只暴露工具**自己的**命令。环境里的 `python`、`pip`、`activ
 未配置原生索引时，`.netrc`、`NETRC` 或 keyring 凭据不影响默认镜像选择。仍可通过 `osdk config set registries.python.urls URL` 指定源。
 
 UV_OFFLINE、UV_ENV_FILE、UV_FIND_LINKS、UV_NO_INDEX 不属于索引地址，不阻断 pypi 源发现；uv 安装器仍按自己的运行设置执行。UV_INDEX 支持 name=https://index.example/simple/。
+
+保留自己的原生配置又要使用 osdk 源时，设置 `[settings.precedence] python = "osdk"` 与 `[registries.python].urls`。无需删除 pip/uv 全局配置。
