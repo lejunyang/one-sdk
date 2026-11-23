@@ -40,10 +40,12 @@ env_force = false
   旧文件名 `config` 优先。Git、目录或需认证的替换会报错；可添加自定义源后用
   `osdk --source <id>` 显式选择。锁文件回放仍使用记录的 index。
 - `conda:<包名>` 遵循 `CONDARC`、`~/.condarc` 等配置的 `channel_alias`、
-  `default_channels`、`custom_channels` 和频道列表。多份配置的频道列表合并并去重，
-  后读文件优先；标量后读覆盖，字典按频道名合并。原生频道只接受匿名 HTTP(S) 地址，
-  独占版本查询、求解与包下载。复杂配置或认证地址会提示并停止；可用自定义源加
-  `--source <id>` 覆盖。
+  `default_channels`、`custom_channels`，这些字段才启用原生来源。文件 `channels`
+  不改变工具安装；局部配置未定义的普通频道仍用公开 alias。`CONDA_CHANNEL_ALIAS`、
+  `CONDA_DEFAULT_CHANNELS`、`CONDA_CUSTOM_CHANNELS` 优先于文件；原生模式下
+  `CONDA_CHANNELS` 选择频道，工具 `channels` 选项优先。默认列表合并去重，映射按名覆盖。
+  相关合并指令告警后按普通优先级处理，无关指令不拦。匿名 HTTP(S) 原生频道独占查询、
+  求解与下载。复杂路由或认证地址明确报错；可用自定义源加 `--source <id>` 覆盖。
 - `github:owner/repo` 在设置 `OSDK_GITHUB_TOKEN`、`GITHUB_TOKEN` 或 `GH_TOKEN` 时只用
   GitHub 直连 URL。令牌只发给官方 HTTPS API，直连失败即报错。匿名请求仍允许镜像。
   GitHub Enterprise 自定义 API 地址目前未支持。

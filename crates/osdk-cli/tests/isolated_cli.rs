@@ -389,7 +389,11 @@ download_url = "{endpoint}/fallback"
     });
 
     let mut env = vec![("CONDARC", condarc.to_str().unwrap())];
-    if merged_field.is_some() {
+    if let Some(field) = merged_field {
+        std::fs::write(&condarc, format!("channel_alias: {endpoint}/private\n")).unwrap();
+        if field == "channels" {
+            env.push(("CONDA_CHANNELS", "tools,deps"));
+        }
         env.push(("CONDA_PREFIX", prefix.to_str().unwrap()));
     }
     let listed = run_isolated_in_with_env(root, root, &["list-remote", "conda:fixture-tool"], &env);

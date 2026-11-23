@@ -66,12 +66,15 @@ spend a probe timeout before failing over.
 
 Conda's system, user, and environment files are loaded in order, with `CONDARC`
 last. Later `channel_alias` values replace earlier ones. `custom_channels` merges
-by channel name, with later values winning for duplicate keys. `channels` and
-`default_channels` merge lists: later files come first, each file's order is
-preserved, and duplicates keep their first occurrence. Empty lists do not clear
-earlier entries. YAML fragments in `condarc.d` are sorted by filename. Conda merge directives and advanced
-routing features such as channel migrations raise a warning and halt native
-routing.
+by channel name, with later values winning for duplicate keys. File `channels`
+does not select tools; only alias/default/custom activates native routing.
+Default lists merge and deduplicate with later entries first. Environment values
+then override scalars and merge lists/maps. `CONDA_CHANNELS` alone does not
+activate native routing; once active it selects channels below tool options.
+Missing named channels use the public alias. YAML fragments are filename-sorted.
+Related merge directives warn without blocking; unrelated keys and quoted text
+are ignored. Advanced routing such as migrations still fails explicitly.
+Tests inject search roots and environment to isolate system configuration.
 
 Resolved native channel URLs go into a single solve, bypassing built-in source
 probes. Downloads use the URLs from that solve without mirror rewriting. With

@@ -71,11 +71,17 @@ osdk reads Conda configuration from `CONDARC`, `~/.condarc`,
 `~/.config/conda/condarc`, and other Conda locations. `channel_alias` supplies
 the base URL for a named channel, `custom_channels` can override the base per
 channel, and `default_channels` defines the channels in `defaults`. When
-`default_channels` is set and `channels` is omitted, osdk uses `defaults`.
-The tool's `channels` option takes precedence over the file's channel list.
-User and environment `channels` and `default_channels` lists merge, so a later
-file does not discard your company channels. Later files' entries take priority,
-and duplicate channels are used once.
+`default_channels` is set and no channels are selected, osdk uses `defaults`.
+Only `channel_alias`, `default_channels`, or `custom_channels` activates native
+routing. File `channels` does not change tool installation: a file containing
+only `channels: [defaults]` retains conda-forge and the original mirrors.
+Unspecified named channels use `https://conda.anaconda.org`.
+`CONDA_CHANNEL_ALIAS`, `CONDA_DEFAULT_CHANNELS`, and `CONDA_CUSTOM_CHANNELS`
+override files. Once native routing is active, comma-separated `CONDA_CHANNELS`
+selects channels; the tool's `channels` option wins. Default channel lists merge
+and deduplicate with environment and later file entries first; maps merge by name.
+Unsupported related `#!final` / `#!top` / `#!bottom` directives warn and use
+normal precedence. Directives on unrelated settings do not affect installation.
 
 Version lookup, dependency solving, and package downloads use these channels
 exclusively. Use anonymous HTTP(S) URLs. URLs with credentials and unsupported

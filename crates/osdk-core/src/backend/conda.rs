@@ -1546,6 +1546,7 @@ mod tests {
     use std::sync::Arc;
 
     fn test_ctx(root: &Path) -> Ctx {
+        channel_config::confine_config(root);
         let dirs = Dirs::resolve_from(|key| match key {
             "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
             "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),

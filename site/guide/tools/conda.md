@@ -62,10 +62,15 @@ prefix 并存，互不覆盖。
 osdk 读取 `CONDARC`、`~/.condarc`、`~/.config/conda/condarc` 等 Conda 配置。
 `channel_alias` 为普通频道名提供基础地址，`custom_channels` 可为指定频道配置
 专用基础地址，`default_channels` 定义 `defaults` 下的频道。配置了
-`default_channels` 而未声明 `channels` 时，会用 `defaults`。工具的
-`channels` 选项优先于文件中的频道列表。用户和环境配置中的 `channels`、
-`default_channels` 会合并，不会因后一份文件声明列表而丢掉公司频道。
-后读配置的条目优先，重复频道只使用一次。
+`default_channels` 而未选择频道时，会用 `defaults`。只有 `channel_alias`、
+`default_channels` 或 `custom_channels` 才启用原生来源；文件里的 `channels` 不改变
+osdk 工具安装，只有 `channels: [defaults]` 时仍使用 conda-forge 与原来的镜像。
+局部配置中未定义的普通频道使用 `https://conda.anaconda.org`。
+`CONDA_CHANNEL_ALIAS`、`CONDA_DEFAULT_CHANNELS`、`CONDA_CUSTOM_CHANNELS` 的优先级高于文件；
+原生来源启用后，`CONDA_CHANNELS`（逗号分隔）选择频道，工具的 `channels` 选项优先。
+`default_channels` 列表合并去重，环境条目与后读文件优先；映射按频道名覆盖。
+不支持的相关 `#!final` / `#!top` / `#!bottom` 指令会告警并采用普通优先级，
+无关设置上的指令不影响安装。
 
 版本查询、依赖求解和包下载都使用这个配置，失败时不会尝试 osdk 的公共镜像。
 请使用匿名 HTTP(S) 地址。遇到带凭据的 URL、`custom_multichannels` 等
