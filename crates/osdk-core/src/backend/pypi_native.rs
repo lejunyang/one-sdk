@@ -67,10 +67,18 @@ fn native_index(
             Some(url) => Ok(Some(url)),
             None => pip(),
         },
-        EnvCreator::Stdlib => match pip()? {
-            Some(url) => Ok(Some(url)),
-            None => uv(),
-        },
+        EnvCreator::Stdlib => {
+            match pip()? {
+                Some(url) => Ok(Some(url)),
+                None => {
+                    let index = uv()?;
+                    if index.as_ref().is_some_and(|index| !index.extra.is_empty()) {
+                        return Err(index_error("native uv multi-index resolution requires uv; run `osdk install pypi:uv`"));
+                    }
+                    Ok(index)
+                }
+            }
+        }
     }
 }
 
@@ -459,6 +467,34 @@ mod tests {
             .as_deref(),
             Some("https://env.example/simple")
         );
+    }
+
+    #[test]
+    fn stdlib_refuses_uv_first_index_set_but_accepts_single_default() {
+        let root = tempfile::tempdir().unwrap();
+        let env = |key: &str| match key {
+            "PIP_CONFIG_FILE" => Some(if cfg!(windows) { "nul" } else { "/dev/null" }.into()),
+            "UV_DEFAULT_INDEX" => Some("https://default.example/simple/".into()),
+            "UV_INDEX" => Some("https://first.example/simple/".into()),
+            "UV_NO_CONFIG" => Some("1".into()),
+            _ => None,
+        };
+        let error = native_index(EnvCreator::Stdlib, root.path(), None, &env).unwrap_err();
+        assert!(error.to_string().contains("requires uv"));
+        assert!(native_index(EnvCreator::Uv, root.path(), None, &env)
+            .unwrap()
+            .is_some());
+        let single = native_index(EnvCreator::Stdlib, root.path(), None, &|key| {
+            if key == "UV_INDEX" {
+                None
+            } else {
+                env(key)
+            }
+        })
+        .unwrap()
+        .unwrap();
+        assert!(single.extra.is_empty());
+        assert_eq!(single.default, "https://default.example/simple/");
     }
 
     #[test]

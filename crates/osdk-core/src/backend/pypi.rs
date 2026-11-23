@@ -331,7 +331,7 @@ impl PypiBackend {
                     env.insert("UV_EXTRA_INDEX_URL".into(), String::new());
                 }
                 EnvCreator::Stdlib => {
-                    env.insert("PIP_EXTRA_INDEX_URL".into(), extra);
+                    env.insert("PIP_EXTRA_INDEX_URL".into(), String::new());
                 }
             }
         } else {

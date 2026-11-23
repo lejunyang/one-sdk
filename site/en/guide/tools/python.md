@@ -306,3 +306,5 @@ UV_OFFLINE, UV_ENV_FILE, UV_FIND_LINKS, and UV_NO_INDEX are not index addresses 
 To use osdk indexes without deleting native configuration, set `[settings.precedence] python = "osdk"` and `[registries.python].urls`. Discovery and installation use the selected osdk index only; inherited pip/uv additional indexes are ignored. Non-source execution variables still belong to the installer.
 
 PIP_EXTRA_INDEX_URL="" clears extra indexes from pip configuration. On macOS, user discovery uses Library/Application Support/pip/pip.conf when Application Support exists.
+
+Native uv additional indexes require managed uv. pip merges candidates across indexes and cannot preserve uv first-index, so osdk fails before lookup or installation. Install pypi:uv, or set registries.python.urls and python=osdk to choose the osdk single-index policy. A single default index may still use pip.

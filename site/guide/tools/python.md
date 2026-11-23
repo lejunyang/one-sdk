@@ -259,3 +259,5 @@ UV_OFFLINE、UV_ENV_FILE、UV_FIND_LINKS、UV_NO_INDEX 不属于索引地址，�
 保留自己的原生配置又要使用 osdk 源时，设置 `[settings.precedence] python = "osdk"` 与 `[registries.python].urls`。查询和安装只使用选中的 osdk 索引，忽略继承的 pip/uv 追加索引；无需删除全局配置。非源运行变量仍由安装器处理。
 
 PIP_EXTRA_INDEX_URL="" 取消 pip 配置文件的额外索引。macOS 用户配置在 Library/Application Support 存在时从其 pip/pip.conf 读取。
+
+原生 uv 配置有追加索引时，必须有受管 uv。pip 会合并各索引候选，无法保持 uv first-index，osdk 因而在查询或安装前报错。可先 `osdk install pypi:uv`，或设置 registries.python.urls 与 python=osdk 改用 osdk 单源策略。单个默认索引仍可由 pip 执行。

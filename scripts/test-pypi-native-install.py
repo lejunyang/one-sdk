@@ -211,6 +211,42 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(origin, {"top": "osdk", "dep": "osdk"})
         self.assertTrue(any(path.endswith(".whl") for path in good.requests))
 
+    def uv_fallback_case(self, version):
+        root, env = self.state()
+        first, primary = self.server({TOP: [wheel(TOP, "1.0.0", "native", dependency=True)], DEP: [wheel(DEP, "1.0.0", "native")]})
+        second, default = self.server({TOP: [wheel(TOP, "2.0.0", "default", dependency=True)], DEP: [wheel(DEP, "9.0.0", "default")]})
+        (root / "osdk.toml").write_text("")
+        env.update(UV_INDEX=primary, UV_DEFAULT_INDEX=default)
+        result = self.run_osdk(root, env, "install", f"pypi:{TOP}@{version}")
+        self.evidence.append({"test": self.id(), "primary_requests": first.requests, "default_requests": second.requests})
+        self.assertNotEqual(result.returncode, 0, "pip silently changed uv first-index semantics")
+        self.assertIn("requires uv", result.stderr)
+        self.assertEqual(first.requests, [])
+        self.assertEqual(second.requests, [])
+        self.assertFalse(list((root / "installs/pypi" / TOP).glob("*/b3-v2-*/bin/source-fixture")))
+
+    def test_uv_extra_without_uv_rejects_top_level_version(self):
+        self.uv_fallback_case("2.0.0")
+
+    def test_uv_extra_without_uv_rejects_dependency_merge(self):
+        self.uv_fallback_case("1.0.0")
+
+    def test_real_uv_preserves_first_index_for_top_and_dependency(self):
+        root, env = self.state()
+        self.bootstrap_uv(root, env)
+        first, primary = self.server({TOP: [wheel(TOP, "1.0.0", "native", dependency=True)], DEP: [wheel(DEP, "1.0.0", "native")]})
+        second, default = self.server({TOP: [wheel(TOP, "2.0.0", "default", dependency=True)], DEP: [wheel(DEP, "9.0.0", "default")]})
+        (root / "osdk.toml").write_text("")
+        env.update(UV_INDEX=primary, UV_DEFAULT_INDEX=default)
+        rejected = self.run_osdk(root, env, "install", f"pypi:{TOP}@2.0.0")
+        self.assertNotEqual(rejected.returncode, 0)
+        installed = self.run_osdk(root, env, "install", f"pypi:{TOP}@1.0.0")
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        origin, _ = self.installed_origin(root)
+        self.assertEqual(origin, {"top": "native", "dep": "native"})
+        self.assertEqual(second.requests, [], "uv consulted a lower index for duplicate names")
+        self.evidence.append({"test": self.id(), "primary_requests": first.requests, "default_requests": second.requests, "origin": origin})
+
     def test_managed_pip_auth_index_gets_zero_requests(self):
         self.managed_case("pip", True)
 
