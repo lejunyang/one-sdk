@@ -47,7 +47,10 @@ pub(crate) fn source_settings(
         Some(path) => match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(Error::io(path, error)),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "ignoring unreadable GOENV; fix its path or use GOENV=off");
+                String::new()
+            }
         },
         None => String::new(),
     };
@@ -173,6 +176,18 @@ mod tests {
             find("corp.example/*nested,corp.example/secret/[malformed"),
             None
         );
+    }
+
+    #[test]
+    fn unreadable_goenv_directory_is_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = source_settings(&|key| match key {
+            "GOENV" => Some(root.path().display().to_string()),
+            "GOPROXY" => Some("https://proxy.golang.org".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(settings["GOPROXY"], "https://proxy.golang.org");
     }
 
     #[test]

@@ -127,10 +127,10 @@ fn pip_index(
                     .map(PathBuf::from)
                     .or_else(|| home.map(|dir| dir.join(".config")));
                 let mac = home
-                    .map(|dir| dir.join("Library/Application Support/pip"))
+                    .map(|dir| dir.join("Library/Application Support"))
                     .filter(|dir| cfg!(target_os = "macos") && dir.is_dir());
                 files.extend(
-                    mac.map(|dir| dir.join("pip.conf"))
+                    mac.map(|dir| dir.join("pip/pip.conf"))
                         .or_else(|| xdg.map(|dir| dir.join("pip/pip.conf"))),
                 );
             }
@@ -174,7 +174,7 @@ fn pip_index(
         }
     }
     let setting = |env, key| {
-        value(getenv, env)
+        getenv(env)
             .or_else(|| {
                 settings
                     .get(&(true, key))
@@ -418,6 +418,20 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn empty_pip_extra_index_clears_file_value() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("pip.conf");
+        std::fs::write(&config, "[global]\nindex-url = https://pypi.org/simple/\nextra-index-url = https://extra.example/simple/\n").unwrap();
+        let index = pip_index(None, &|key| match key {
+            "PIP_CONFIG_FILE" => Some(config.display().to_string()),
+            "PIP_EXTRA_INDEX_URL" => Some(String::new()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(index.as_deref(), Some("https://pypi.org/simple/"));
     }
 
     #[test]
