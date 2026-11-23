@@ -223,10 +223,12 @@ Registry preflight in `package_registry.rs`
 applies to npm/pnpm/Yarn/Bun/Deno commands that users run later, evaluates each
 invocation independently, and must not be described as using this TTL cache.
 
-Synthetic projects share the native configuration checks. The tool source list
-contains only the resulting anonymous registry. Version lookup, exact-version
-integrity checks, lock graph generation, and the npm subprocess use it.
-With no native declaration the tool retains its own `[sources]` policy.
+Synthetic projects parse only the native default registry. Scope-only, proxy and
+TLS settings retain the original tool `[sources]`; a real default must be anonymously
+usable. Offline skips native preflight; `precedence.npm=osdk` uses `[registries.npm] default`.
+The shared process adapter marks injected registry values. Synthetic installs ignore
+matching osdk values and lowercase registry exports from npm lifecycle scripts, then
+reread user configuration. Metadata, integrity, lock graphs and the installer use one source.
 
 ## Build-script policy and structured configuration
 

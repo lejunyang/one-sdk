@@ -337,7 +337,11 @@ lifecycle 操作，`osdk.lock` schema 4 保存与 schema 3 兼容的 npm 选项�
 
 隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他 TLS 覆盖设置仍受隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
 
-项目隔离的原生 npm 安装同样保留 NODE_EXTRA_CA_CERTS，并在切换到临时项目目录之前解析其文件路径；其他环境 npm 配置仍保持隔离。
+项目隔离的原生 npm 安装同样保留 NODE_EXTRA_CA_CERTS，并在切换到临时项目目录之前解析其文件路径。
+合成项目只读取用户默认 `registry`，只有 scope、proxy、cafile、strict-ssl 或相应环境设置
+不会阻断安装，仍沿用原来的工具源。npm 脚本和 `osdk exec npm` 导出的 registry 不被当作
+新的用户配置。`[settings.precedence] npm="osdk"` 配合 `[registries.npm] default` 可覆盖
+原生默认源；离线跳过原生源预检。无法匿名使用的显式默认源会报错并给出 osdk 配置出口。
 
 `osdk exec --tool npm:... -- <命令>` 按所选安装清单中的公开命令名解析目标，
 即使实际文件名不同（例如 `prettier.cjs`）也能执行。显式可执行文件路径保持不变。

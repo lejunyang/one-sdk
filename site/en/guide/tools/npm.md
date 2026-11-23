@@ -415,7 +415,13 @@ activation safety checks, see [npm tool implementation](../../internals/npm-tool
 
 Isolated global npm/pnpm installs preserve `NODE_EXTRA_CA_CERTS` as an absolute file path. The additional trust roots do not disable TLS verification or import user npmrc files. Other custom TLS overrides remain subject to isolation checks; registry probes still require trusted HTTPS connections.
 
-Project-isolated native npm installs also preserve NODE_EXTRA_CA_CERTS, resolving it before changing to the staging directory. Other ambient npm configuration remains isolated.
+Project-isolated native npm installs also preserve NODE_EXTRA_CA_CERTS, resolving it before changing to the staging directory.
+Synthetic projects read only the user's default `registry`. Scope-only, proxy, cafile,
+strict-ssl and corresponding environment settings keep the original tool sources and
+do not block installation. Registry exports from npm scripts or `osdk exec npm` are
+not new user declarations. `[settings.precedence] npm="osdk"` with `[registries.npm] default`
+overrides the native default; offline skips native preflight. An explicitly selected
+default that cannot be used anonymously fails with an osdk configuration alternative.
 
 `osdk exec --tool npm:... -- <command>` resolves the published command name from
 the selected install inventory, even when its target has a different filename

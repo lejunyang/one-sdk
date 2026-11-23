@@ -57,6 +57,7 @@ async fn apply_with_environment(
         return match result {
             RegistryPlan::PassThrough { reason } => Ok(reason),
             RegistryPlan::Selected { url, .. } => {
+                env.insert("OSDK_NPM_REGISTRY".into(), url.clone());
                 for key in package_registry::registry_envs(manager) {
                     env.insert(key.into(), url.clone());
                 }
@@ -823,7 +824,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(env[key], "https://osdk.example/");
-            assert_eq!(env.len(), if program == "pnpm" { 2 } else { 1 });
+            assert_eq!(env.len(), if program == "pnpm" { 3 } else { 2 });
+            assert_eq!(env["OSDK_NPM_REGISTRY"], "https://osdk.example/");
             if program == "pnpm" {
                 assert_eq!(env["npm_config_registry"], "https://osdk.example/");
             }

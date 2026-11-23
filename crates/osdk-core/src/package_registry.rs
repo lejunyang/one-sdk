@@ -586,24 +586,68 @@ where
 /// their own `[sources]` list when there is no npmrc registry.
 #[cfg(feature = "install")]
 pub(crate) fn isolated_native_npm_registry(ctx: &Ctx, cwd: &Path) -> Result<Option<String>> {
-    let getenv = |name: &str| {
-        // The synthetic npm child already preserves an extra trust root.
-        if name == "NODE_EXTRA_CA_CERTS" {
-            None
-        } else {
-            std::env::var(name).ok()
-        }
-    };
-    let manager = PackageManager::Npm;
-    let decision = if let Some(name) = explicit_registry_env(manager, getenv) {
-        NativeDecision::PassThrough(format!("native environment {name} has invocation priority"))
-    } else {
-        native_registry_candidates_with_auth_policy(ctx, cwd, manager, getenv, true)?
-    };
-    match decision {
-        NativeDecision::Candidates(urls) => Ok(urls.into_iter().next()),
-        NativeDecision::PassThrough(reason) => Err(Error::config(reason)),
+    if ctx.config.settings.offline {
+        return Ok(None);
     }
+    if ctx.config.settings.precedence.package_policy("npm") == crate::config::SourcePrecedence::Osdk
+    {
+        return ctx
+            .config
+            .registries()
+            .npm
+            .default
+            .as_ref()
+            .filter(|url| !url.is_empty())
+            .map(|url| normalize_registry_url(url))
+            .transpose();
+    }
+    let getenv = |name: &str| std::env::var(name).ok();
+    let exported = getenv("npm_lifecycle_event").is_some();
+    let managed = getenv("OSDK_NPM_REGISTRY");
+    for key in ["npm_config_registry", "NPM_CONFIG_REGISTRY"] {
+        if let Some(value) = getenv(key).filter(|v| !v.is_empty()) {
+            if (exported && key == "npm_config_registry") || managed.as_ref() == Some(&value) {
+                continue;
+            }
+            return normalize_registry_url(&value).map(Some);
+        }
+    }
+    // Synthetic installs discard unrelated npm policy. Only a default registry
+    // controls this route; ordinary/global npm commands retain their own policy.
+    let mut files = Vec::new();
+    if let Some(path) = ["NPM_CONFIG_USERCONFIG", "npm_config_userconfig"]
+        .iter()
+        .find_map(|key| env_path(cwd, key, getenv))
+    {
+        files.push(path);
+    } else {
+        files.extend(
+            native_home_directories(cwd, getenv, cfg!(windows))
+                .into_iter()
+                .map(|home| home.join(".npmrc")),
+        );
+    }
+    for key in ["NPM_CONFIG_GLOBALCONFIG", "npm_config_globalconfig"] {
+        if let Some(path) = env_path(cwd, key, getenv) {
+            files.push(path);
+        }
+    }
+    files.extend(managed_npm_config_files(ctx));
+    for path in files {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Err(Error::config(
+                    "cannot read native npm default registry configuration",
+                ))
+            }
+        };
+        if let Some(registry) = analyze_npmrc(&text).registry {
+            return normalize_registry_url(&registry).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 async fn plan_with_auth_policy<F>(
@@ -3025,6 +3069,113 @@ npmRegistries:
                 matches!(result, RegistryPlan::Selected { url, probes } if url == NPMJS && probes.is_empty())
             );
         }
+    }
+
+    #[test]
+    fn synthetic_native_npm_regression() {
+        const CHILD: &str = "OSDK_SYNTHETIC_SOURCE_TEST";
+        if let Ok(case) = std::env::var(CHILD) {
+            let root = PathBuf::from(std::env::var_os("HOME").unwrap());
+            isolate_ancestors(&root);
+            let mut ctx = test_ctx(&root, vec![], case == "offline");
+            if case == "precedence" {
+                ctx.config.settings.precedence.packages = crate::config::SourcePrecedence::Osdk;
+                ctx.config.sources.registries.npm.default =
+                    Some("https://registry.npmjs.org/".into());
+            }
+            let actual = isolated_native_npm_registry(&ctx, &root).unwrap();
+            match case.as_str() {
+                "env_registry" => {
+                    assert_eq!(actual.as_deref(), Some("https://registry.npmjs.org/"))
+                }
+                "precedence" => assert_eq!(actual.as_deref(), Some("https://registry.npmjs.org/")),
+                _ => assert!(actual.is_none(), "{case}: {actual:?}"),
+            }
+            return;
+        }
+        let mut failures = Vec::new();
+        for (case, npmrc, extra) in [
+            (
+                "scoped",
+                "@scope:registry=https://scope.example.test/\n",
+                None,
+            ),
+            ("proxy", "proxy=http://proxy.example.test\n", None),
+            ("cafile", "cafile=/private/cert.pem\n", None),
+            ("strict_ssl", "strict-ssl=false\n", None),
+            ("tls_env", "", Some(("NODE_TLS_REJECT_UNAUTHORIZED", "0"))),
+            (
+                "proxy_env",
+                "",
+                Some(("npm_config_proxy", "http://proxy.example.test")),
+            ),
+            (
+                "env_registry",
+                "",
+                Some(("npm_config_registry", "https://registry.npmjs.org/")),
+            ),
+            (
+                "lifecycle",
+                "",
+                Some(("npm_config_registry", "https://registry.npmjs.org/")),
+            ),
+            (
+                "managed",
+                "",
+                Some(("npm_config_registry", "https://registry.npmjs.org/")),
+            ),
+            (
+                "precedence",
+                "registry=https://native.example.test/\n",
+                None,
+            ),
+            ("offline", "registry=https://native.example.test/\n", None),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join(".npmrc"), npmrc).unwrap();
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.env_clear()
+                .args([
+                    "--exact",
+                    "package_registry::tests::synthetic_native_npm_regression",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .env("HOME", temp.path())
+                .env("USERPROFILE", temp.path());
+            if let Some((key, value)) = extra {
+                cmd.env(key, value);
+            }
+            if case == "lifecycle" {
+                cmd.env("npm_lifecycle_event", "build");
+            }
+            if case == "managed" {
+                cmd.env("OSDK_NPM_REGISTRY", "https://registry.npmjs.org/");
+            }
+            #[cfg(windows)]
+            for key in [
+                "SystemRoot",
+                "WINDIR",
+                "WINEPREFIX",
+                "WINELOADER",
+                "WINESERVER",
+                "WINEDEBUG",
+            ] {
+                if let Some(value) = std::env::var_os(key) {
+                    cmd.env(key, value);
+                }
+            }
+            let output = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("running 1 test"), "{case}: {stdout}");
+            if !output.status.success() {
+                failures.push(format!(
+                    "{case}: {stdout}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     fn test_ctx(root: &Path, candidates: Vec<String>, offline: bool) -> Ctx {

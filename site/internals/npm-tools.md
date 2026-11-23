@@ -167,9 +167,11 @@ osdk 自己发起的 npm metadata 请求和 source probe 会使用显式 `Source
 preflight 针对用户随后运行的
 npm/pnpm/Yarn/Bun/Deno 命令，每次调用独立判断，不能与这里的 TTL cache 等同。
 
-合成项目调用同一套原生配置判定。只把选中的匿名 registry 加入工具源列表。
-版本查询、精确版本的 integrity 校验、锁图生成与 npm 子进程都使用该源。
-没有原生声明时，仍沿用工具自己的 `[sources]` 策略。
+合成项目只解析原生默认 registry。仅 scope、代理、TLS 设置不改变工具源，仍沿用
+原有 `[sources]`；真实默认源必须可匿名使用。离线跳过原生预检，`precedence.npm=osdk`
+使用 `[registries.npm] default`。共享进程适配器标记注入的 registry；合成安装忽略匹配的
+osdk 标记值和 npm 生命周期导出的 lowercase registry，重新读取用户原生配置。
+版本查询、精确 integrity、锁图与安装子进程仍使用同一选定源。
 
 ## 构建脚本策略与结构化配置
 

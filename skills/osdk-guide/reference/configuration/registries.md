@@ -24,6 +24,9 @@ proxy = "https://proxy.golang.org,direct"
 - 本次命令行源参数和进程中显式源变量优先；`deps.env` 是本次子进程环境。`packages` 只决定 osdk 显式配置和原生文件之间的顺序，不对认证排序。
 - 自定义 `deps.<provider>.run` 同样经过这组适配器：按这条命令的程序名（`npm`、`pnpm`、`yarn`、`bun`、`deno`、`uv`、`go mod` 等）和它自己的参数判定，规则与内置命令相同——显式源参数（如 `--registry`）、改变目录或原生配置的参数（如 `--dir`、`--config`）、`deps.env` 或进程环境里显式的源变量都直通、不注入；程序不是包管理器的命令（脚本、`make` 等）不注入任何源变量。
 - `packages = "native"` 保留原生源、scope、认证、代理和 TLS 配置链；`"osdk"` 仅覆盖声明的默认源/附加索引，scope 与认证保持原生。缺少覆盖时委托原生配置；自动镜像不得覆盖显式原生配置。uv 的复杂原生表采用保守整组保留，不尝试重写命名索引或包绑定。
+- 合成 `npm:<package>` 安装只读取原生默认 `registry`；仅 scope、代理、TLS 策略不阻断，
+  沿用原工具 `[sources]`。npm lifecycle/osdk 注入的 registry 不算用户指定。`npm="osdk"`
+  配合 `[registries.npm] default` 覆盖原生默认源；离线不预检。真实默认源须可匿名访问。
 - npm、pnpm、Yarn Classic、Yarn Berry、Bun 使用各自变量：`npm_config_registry`、`npm_config_registry` + `pnpm_config_registry`（pnpm 10/11）、`YARN_REGISTRY`、`YARN_NPM_REGISTRY_SERVER`、`BUN_CONFIG_REGISTRY`。Yarn major 必须已知；不会把 Node 版本当作 Yarn major。pnpm 工作区配置委托 pnpm 解析。
 - Python 两种 deps provider 都运行 uv。`default` 是最低优先级默认索引；`indexes` 是按声明顺序排列的显式附加索引，保留 `first-index`，不是请求失败后的镜像 fallback。命名索引、包绑定和认证插值继续放在原生配置。
 - `urls` 仍是只用于默认源的匿名镜像候选；全部明确不可用时在启动包管理器前失败（npm 系只是探测超时的候选仍按顺序使用），不在安装失败后重跑生命周期脚本。离线不探测，原生安装由其离线参数约束。
