@@ -65,9 +65,9 @@ uses current native settings when present, otherwise restoring the recorded prim
 the sparse `config.json` and probes the exact `.crate` URL before fixing source
 identity, avoiding a rerun after build scripts may have started. `pypi:` lists
 versions anonymously on the selected native index when configured. For uv it
-merges the project, user, and system settings first, concatenating additional
-index arrays and applying scalar precedence. The same single-index check runs
-before version lookup and installation. With no native index, it
+merges only user and system settings, concatenating additional indexes with scalar precedence.
+Discovery follows first-index order and installation receives the same default/extra set;
+project and explicit package-only indexes do not participate. With no native index, it
 probes the requested project page and injects the winner as uv/pip's default index.
 
 ## Project registry preflight

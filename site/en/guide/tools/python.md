@@ -232,13 +232,10 @@ artifact and the hash meant to detect the rewrite.
 For a standalone `pypi:<project>` tool, osdk uses a single native index for both
 version discovery and installation. It reads pip's `PIP_INDEX_URL` and
 `pip.conf` / `pip.ini`, including a file selected by `PIP_CONFIG_FILE`. It also
-reads uv's index environment variables and its project, user, system, or
-explicit configuration file. When both installers have a source, the chosen
-installer's source takes precedence. For uv, additional indexes from project,
-user, and system configuration are combined before checking for a single index.
-When the combined settings name different indexes, osdk reports an error before
-querying a version or starting an install. A single uv index is used as the default
-index, which keeps an implicit PyPI fallback out of that install.
+reads uv index environment variables and user, system, or explicit configuration.
+Global tools ignore project uv configuration and explicit package-only indexes.
+Additional indexes preserve default PyPI unless an explicit default replaces it.
+When both installers have a source, the selected installer takes precedence.
 
 Native index discovery makes an anonymous request to the configured origin.
 If the configuration has no usable single index or the index requires

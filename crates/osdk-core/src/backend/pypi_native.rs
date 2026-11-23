@@ -10,12 +10,43 @@ use crate::error::{Error, Result};
 const UV_DEFAULT: [&str; 2] = ["UV_DEFAULT_INDEX", "UV_INDEX_URL"];
 const UV_EXTRA: [&str; 2] = ["UV_INDEX", "UV_EXTRA_INDEX_URL"];
 
-pub(super) fn index(creator: EnvCreator) -> Result<Option<String>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NativeIndex {
+    pub default: String,
+    pub extra: Vec<String>,
+}
+impl NativeIndex {
+    fn single(url: String) -> Self {
+        Self {
+            default: url,
+            extra: Vec::new(),
+        }
+    }
+    pub fn urls(&self) -> impl Iterator<Item = &str> {
+        self.extra
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(self.default.as_str()))
+    }
+}
+
+pub(super) fn index(creator: EnvCreator) -> Result<Option<NativeIndex>> {
     let cwd = std::env::current_dir()?;
     let home = crate::python_index::home_directory();
     let getenv = |key: &str| std::env::var(key).ok();
     let native = native_index(creator, &cwd, home.as_deref(), &getenv)?;
-    native.map(|url| anonymous_url(&url)).transpose()
+    native
+        .map(|index| {
+            Ok(NativeIndex {
+                default: anonymous_url(&index.default)?,
+                extra: index
+                    .extra
+                    .iter()
+                    .map(|url| anonymous_url(url))
+                    .collect::<Result<_>>()?,
+            })
+        })
+        .transpose()
 }
 
 fn native_index(
@@ -23,9 +54,9 @@ fn native_index(
     cwd: &Path,
     home: Option<&Path>,
     getenv: &impl Fn(&str) -> Option<String>,
-) -> Result<Option<String>> {
+) -> Result<Option<NativeIndex>> {
     let uv = || uv_index(cwd, home, getenv);
-    let pip = || pip_index(home, getenv);
+    let pip = || pip_index(home, getenv).map(|url| url.map(NativeIndex::single));
     match creator {
         EnvCreator::Uv => match uv()? {
             Some(url) => Ok(Some(url)),
@@ -162,7 +193,7 @@ fn uv_index(
     cwd: &Path,
     home: Option<&Path>,
     getenv: &impl Fn(&str) -> Option<String>,
-) -> Result<Option<String>> {
+) -> Result<Option<NativeIndex>> {
     if value(getenv, "UV_ENV_FILE").is_some()
         || value(getenv, "UV_OFFLINE").is_some_and(|v| enabled(&v))
         || value(getenv, "UV_NO_INDEX").is_some_and(|v| enabled(&v))
@@ -180,7 +211,7 @@ fn uv_index(
 
     let mut default = UV_DEFAULT.iter().find_map(|key| value(getenv, key));
     let mut named = BTreeSet::new();
-    let mut urls = BTreeSet::new();
+    let mut urls = Vec::new();
     for key in UV_EXTRA {
         if let Some(indexes) = value(getenv, key) {
             urls.extend(indexes.split_whitespace().map(str::to_owned));
@@ -191,7 +222,7 @@ fn uv_index(
             continue;
         }
         if index.explicit {
-            return Err(index_error("uv configures package-specific indexes"));
+            continue;
         }
         if index.format.as_deref() == Some("flat") {
             return Err(index_error("uv configures a non-index source"));
@@ -199,17 +230,22 @@ fn uv_index(
         if index.default {
             default.get_or_insert(index.url);
         } else {
-            urls.insert(index.url);
+            urls.push(index.url);
         }
     }
     urls.extend(options.extra_index_url);
-    urls.extend(default.or(options.index_url));
-    if urls.len() > 1 {
-        return Err(index_error("uv configures multiple indexes"));
+    let default = default.or(options.index_url);
+    if default.is_none() && urls.is_empty() {
+        return Ok(None);
     }
-    // The caller promotes a lone additional index to the default, preventing
-    // uv's implicit PyPI fallback when no explicit default was configured.
-    Ok(urls.into_iter().next())
+    let default = default.unwrap_or_else(|| crate::python_index::PYPI.into());
+    urls.retain(|url| url != &default);
+    let mut seen = BTreeSet::new();
+    urls.retain(|url| seen.insert(url.clone()));
+    Ok(Some(NativeIndex {
+        default,
+        extra: urls.into_iter().collect(),
+    }))
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -253,7 +289,7 @@ impl UvIndexOptions {
 }
 
 fn uv_config(
-    cwd: &Path,
+    _cwd: &Path,
     home: Option<&Path>,
     getenv: &impl Fn(&str) -> Option<String>,
 ) -> Result<UvConfig> {
@@ -266,16 +302,6 @@ fn uv_config(
     }
 
     let mut merged = UvConfig::default();
-    for dir in cwd.ancestors() {
-        if let Some(project) = read_uv_config(&dir.join("uv.toml"), false)? {
-            merged = project;
-            break;
-        }
-        if let Some(project) = read_uv_config(&dir.join("pyproject.toml"), true)? {
-            merged = project;
-            break;
-        }
-    }
     // uv combines each section across files, before combining [pip] with the
     // top-level settings. Scalars take the higher value and arrays concatenate.
     for path in uv_user_and_system_files(home, getenv) {
@@ -382,6 +408,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn global_tool_ignores_project_explicit_uv_index() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("pyproject.toml"),
+            "[[tool.uv.index]]\nurl = \"https://pytorch.example/simple\"\nexplicit = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            uv_index(root.path(), None, &|key| (key == "UV_NO_SYSTEM_CONFIG")
+                .then(|| "1".into()))
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn pip_reads_native_install_index_with_config_file_and_environment_precedence() {
         let root = tempfile::tempdir().unwrap();
         let explicit = root.path().join("explicit.ini");
@@ -409,134 +451,27 @@ mod tests {
     }
 
     #[test]
-    fn uv_index_environment_addresses_and_native_config_are_discovered() {
+    fn uv_additional_indexes_keep_default_pypi() {
         let root = tempfile::tempdir().unwrap();
         let url = "https://private.example/simple/";
-        for name in UV_DEFAULT.into_iter().chain(UV_EXTRA) {
-            assert_eq!(
-                uv_index(root.path(), None, &|key| (key == name)
-                    .then(|| url.to_owned()))
+        for name in UV_EXTRA {
+            let index = uv_index(root.path(), None, &|key| (key == name).then(|| url.into()))
                 .unwrap()
-                .as_deref(),
-                Some(url)
-            );
+                .unwrap();
+            assert_eq!(index.default, crate::python_index::PYPI);
+            assert_eq!(index.extra, vec![url]);
         }
-        let uv_dir = root.path().join("uv");
-        std::fs::create_dir(&uv_dir).unwrap();
-        std::fs::write(
-            uv_dir.join("uv.toml"),
-            format!("[[index]]\nurl = {url:?}\ndefault = true\n"),
-        )
+        let index = uv_index(root.path(), None, &|key| {
+            (key == "UV_DEFAULT_INDEX").then(|| url.into())
+        })
+        .unwrap()
         .unwrap();
-        let config_home = if cfg!(windows) {
-            "APPDATA"
-        } else {
-            "XDG_CONFIG_HOME"
-        };
-        assert_eq!(
-            uv_index(root.path(), None, &|key| (key == config_home)
-                .then(|| root.path().display().to_string()))
-            .unwrap()
-            .as_deref(),
-            Some(url)
-        );
-    }
-
-    #[test]
-    fn uv_merges_project_user_and_system_index_arrays_before_checking_sources() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("project");
-        let user = root.path().join("user");
-        let system = root.path().join("system");
-        for dir in [&project, &user.join("uv"), &system.join("uv")] {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        let project_config = project.join("uv.toml");
-        let user_config = user.join("uv/uv.toml");
-        let system_config = system.join("uv/uv.toml");
-        let a = "https://project.example/simple";
-        let b = "https://user.example/simple";
-        let config_home = if cfg!(windows) {
-            "APPDATA"
-        } else {
-            "XDG_CONFIG_HOME"
-        };
-        let config_dirs = if cfg!(windows) {
-            "PROGRAMDATA"
-        } else {
-            "XDG_CONFIG_DIRS"
-        };
-        let getenv = |key: &str| match key {
-            key if key == config_home => Some(user.display().to_string()),
-            key if key == config_dirs => Some(system.display().to_string()),
-            _ => None,
-        };
-        let resolve = || uv_index(&project, None, &getenv);
-        std::fs::write(&system_config, "").unwrap();
-        assert_eq!(resolve().unwrap(), None);
-        std::fs::write(&project_config, format!("extra-index-url = [{a:?}]\n")).unwrap();
-        assert_eq!(resolve().unwrap().as_deref(), Some(a));
-
-        std::fs::write(&user_config, format!("extra-index-url = [{b:?}]\n")).unwrap();
-        assert!(resolve()
-            .unwrap_err()
-            .to_string()
-            .contains("multiple indexes"));
-        std::fs::write(&user_config, format!("extra-index-url = [{a:?}]\n")).unwrap();
-        assert_eq!(resolve().unwrap().as_deref(), Some(a));
-
-        // uv merges both sections' arrays, then uses the pip-specific scalar
-        // over the top-level scalar, even if it came from a lower-priority file.
-        std::fs::write(&project_config, format!("index-url = {b:?}\n")).unwrap();
-        std::fs::write(&user_config, format!("[pip]\nindex-url = {a:?}\n")).unwrap();
-        assert_eq!(resolve().unwrap().as_deref(), Some(a));
-        std::fs::write(&system_config, format!("extra-index-url = [{b:?}]\n")).unwrap();
-        assert!(resolve()
-            .unwrap_err()
-            .to_string()
-            .contains("multiple indexes"));
-        let without_system = uv_index(&project, None, &|key| {
-            if key == "UV_NO_SYSTEM_CONFIG" {
-                Some("1".into())
-            } else {
-                getenv(key)
-            }
-        });
-        assert_eq!(without_system.unwrap().as_deref(), Some(a));
-
-        // An explicit file replaces all discovered configuration.
-        let explicit = uv_index(&project, None, &|key| {
-            if key == "UV_CONFIG_FILE" {
-                Some(user_config.display().to_string())
-            } else {
-                getenv(key)
-            }
-        });
-        assert_eq!(explicit.unwrap().as_deref(), Some(a));
-        // Choosing a default through the environment still leaves the arrays
-        // from the configured files in effect.
-        let with_env = uv_index(&project, None, &|key| {
-            if key == "UV_DEFAULT_INDEX" {
-                Some(a.into())
-            } else {
-                getenv(key)
-            }
-        });
-        assert!(with_env
-            .unwrap_err()
-            .to_string()
-            .contains("multiple indexes"));
+        assert_eq!(index.default, url);
+        assert!(index.extra.is_empty());
     }
 
     #[test]
     fn private_python_sources_fail_closed_for_ambiguous_or_credentialed_urls() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(uv_index(root.path(), None, &|key| match key {
-            "UV_DEFAULT_INDEX" => Some("https://default.example/simple".into()),
-            "UV_INDEX" => Some("https://higher.example/simple".into()),
-            _ => None,
-        })
-        .is_err());
         let error = anonymous_url("https://user:fixture-secret@private.example/simple")
             .unwrap_err()
             .to_string();

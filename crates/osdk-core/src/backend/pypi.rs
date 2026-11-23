@@ -48,7 +48,7 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 #[cfg(feature = "install")]
 enum InstallIndex {
-    Native(String),
+    Native(super::pypi_native::NativeIndex),
     Managed(Option<String>),
 }
 
@@ -297,7 +297,7 @@ impl PypiBackend {
         index: &InstallIndex,
     ) -> Result<()> {
         let (url, pip_config) = match index {
-            InstallIndex::Native(url) => (Some(url.as_str()), None),
+            InstallIndex::Native(index) => (Some(index.default.as_str()), None),
             InstallIndex::Managed(url) => (
                 url.as_deref(),
                 (choice.creator == EnvCreator::Stdlib)
@@ -313,7 +313,7 @@ impl PypiBackend {
             EnvCreator::Uv => cache_root.join("uv"),
             EnvCreator::Stdlib => cache_root.join("pip"),
         };
-        let env = installer_env(
+        let mut env = installer_env(
             choice.creator,
             url,
             ctx.config.settings.offline,
@@ -322,6 +322,21 @@ impl PypiBackend {
             Some(&cache_dir),
         );
 
+        if let InstallIndex::Native(index) = index {
+            let extra = index.extra.join(" ");
+            match choice.creator {
+                EnvCreator::Uv => {
+                    env.insert("UV_NO_CONFIG".into(), "1".into());
+                    env.insert("UV_INDEX".into(), extra.clone());
+                    env.insert("UV_EXTRA_INDEX_URL".into(), String::new());
+                }
+                EnvCreator::Stdlib => {
+                    env.insert("PIP_EXTRA_INDEX_URL".into(), extra);
+                }
+            }
+        } else if choice.creator == EnvCreator::Uv {
+            env.insert("UV_NO_CONFIG".into(), "1".into());
+        }
         let (program, args) = venv_command(choice, interpreter, venv);
         run_installer(&program, &args, &env)?;
 
@@ -414,7 +429,23 @@ impl PypiBackend {
         }
         let choice = choose_installer(locate_uv(ctx).as_deref(), require_uv(options))?;
         let versions = if let Some(index) = super::pypi_native::index(choice.creator)? {
-            crate::python_index::list_native_versions(&index, &self.project).await?
+            let mut selected = None;
+            for url in index.urls() {
+                match crate::python_index::list_native_versions(url, &self.project).await {
+                    Ok(versions) => {
+                        selected = Some(versions);
+                        break;
+                    }
+                    Err(error) if error.to_string().contains("was not found on the index") => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            selected.ok_or_else(|| {
+                Error::config(format!(
+                    "`{}` was not found on the native indexes",
+                    self.project
+                ))
+            })?
         } else {
             let index = self.resolved_index(ctx).await?;
             crate::python_index::list_versions(&ctx.client, &index, &self.project, false).await?
