@@ -40,8 +40,10 @@ env_force = false
   `pypi:` 探测实际项目页，`go:` 在全新解析时生成 `|` 分隔的 GOPROXY 回退链。
 - `cargo:<crate>` 从 `$CARGO_HOME/config.toml`（默认 `~/.cargo/config.toml`）读取
   crates.io 替换源。匿名 sparse HTTPS 源独占版本查询和安装，不导入登录凭据。
-  旧文件名 `config` 优先。Git、目录或需认证的替换会报错；可添加自定义源后用
-  `osdk --source <id>` 显式选择。锁文件回放仍使用记录的 index。
+  旧文件名 `config` 优先，支持 source.registry 和 registries.index 替换目标。
+  USTC/TUNA/GitHub rust-lang/rsproxy 的已知公开 git 索引告警后沿用默认源；未知Git、
+  目录、认证源仍报错。受管 CARGO_HOME 回到用户配置。锁回放要求本机配置同一 index，
+  缺失/不同报错并要求配置或重锁。
 - `conda:<包名>` 遵循 `CONDARC`、`~/.condarc` 等配置的 `channel_alias`、
   `default_channels`、`custom_channels`，这些字段才启用原生来源。文件 `channels`
   不改变工具安装；局部配置未定义的普通频道仍用公开 alias。`CONDA_CHANNEL_ALIAS`、

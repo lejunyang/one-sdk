@@ -105,17 +105,65 @@ fn native_registry_index(cargo_home: &Path, tool: &str) -> Result<Option<String>
         else {
             return Ok(None);
         };
-        let index = replacement.as_str()
-            .and_then(|name| sources.get(name))
-            .filter(|source| ["replace-with", "git", "directory", "local-registry"].iter()
-                .all(|key| source.get(key).is_none()))
-            .and_then(|source| source.get("registry"))
-            .and_then(toml::Value::as_str)
-            .filter(|index| validate_registry_index(index).is_ok())
-            .ok_or_else(|| native_registry_error(tool, "Cargo replace-with requires a direct sparse HTTPS registry without URL credentials"))?;
+        let name = replacement
+            .as_str()
+            .ok_or_else(|| native_registry_error(tool, "replace-with must name a registry"))?;
+        let index = if let Some(source) = sources.get(name) {
+            if ["replace-with", "git", "directory", "local-registry"]
+                .iter()
+                .any(|key| source.get(key).is_some())
+            {
+                return Err(native_registry_error(
+                    tool,
+                    "Cargo replacement requires a direct registry",
+                ));
+            }
+            source.get("registry")
+        } else {
+            config
+                .get("registries")
+                .and_then(|registries| registries.get(name))
+                .and_then(|registry| registry.get("index"))
+        }
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| native_registry_error(tool, "Cargo replacement registry has no index"))?;
+        if is_public_git_registry(index) {
+            tracing::warn!(
+                "public Cargo git-index mirror is unsupported; using the default osdk sources"
+            );
+            return Ok(None);
+        }
+        validate_registry_index(index).map_err(|_| native_registry_error(tool, "Cargo replace-with requires a direct sparse HTTPS registry without URL credentials"))?;
         return Ok(Some(index.to_string()));
     }
     Ok(None)
+}
+
+fn is_public_git_registry(index: &str) -> bool {
+    matches!(
+        index.trim_end_matches('/'),
+        "https://mirrors.ustc.edu.cn/crates.io-index"
+            | "https://mirrors.tuna.tsinghua.edu.cn/git/crates.io-index.git"
+            | "https://github.com/rust-lang/crates.io-index"
+            | "https://rsproxy.cn/crates.io-index"
+    )
+}
+
+fn user_cargo_home(ctx: &Ctx, getenv: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let current = getenv("CARGO_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let managed = current.as_ref().is_some_and(|path| {
+        path == &ctx.dirs.cargo_home()
+            || path == &crate::cache::downstream_root(&ctx.dirs.cache).join("cargo")
+    });
+    if managed {
+        return getenv("OSDK_ORIG_CARGO_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::home_dir().map(|home| home.join(".cargo")));
+    }
+    current.or_else(|| std::env::home_dir().map(|home| home.join(".cargo")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1363,10 +1411,7 @@ impl Backend for CargoPackageBackend {
 
     #[cfg(feature = "install")]
     fn restrict_sources(&self, ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
-        let home = std::env::var_os("CARGO_HOME")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::home_dir().map(|dir| dir.join(".cargo")));
+        let home = user_cargo_home(ctx, |name| std::env::var_os(name));
         self.sources_from_cargo_home(ctx, sources, home.as_deref())
     }
 
@@ -1390,11 +1435,20 @@ impl Backend for CargoPackageBackend {
                     VersionSpec::Exact(version)
                         if req.options.contains_key(LOCKED_CARGO_INDEX_OPTION) =>
                     {
-                        validate_registry_index(
-                            req.options
-                                .get(LOCKED_CARGO_INDEX_OPTION)
-                                .expect("checked above"),
+                        let index = req
+                            .options
+                            .get(LOCKED_CARGO_INDEX_OPTION)
+                            .expect("checked above");
+                        validate_registry_index(index)?;
+                        let candidates = self.restrict_sources(
+                            ctx,
+                            crate::source::select::effective_sources(ctx, self),
                         )?;
+                        if !candidates.iter().any(|source| {
+                            registry_index(source).is_ok_and(|configured| configured == *index)
+                        }) {
+                            return Err(native_registry_error(self.id(), "locked Cargo registry is not configured on this machine; configure the same registry in Cargo or osdk [sources], or relock"));
+                        }
                         (version.clone(), None)
                     }
                     VersionSpec::Exact(version) if ctx.config.settings.offline => (
@@ -2032,6 +2086,43 @@ mod tests {
         );
         assert!(CargoPackageBackend::from_id("cargo:https://github.com/acme/tool.git").is_some());
         assert!(CargoPackageBackend::from_id("cargo:http://example.test/tool").is_none());
+    }
+
+    #[test]
+    fn public_git_mirror_and_named_sparse_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("config.toml"), "[source.crates-io]\nreplace-with='mirror'\n[source.mirror]\nregistry='https://mirrors.ustc.edu.cn/crates.io-index'\n").unwrap();
+        let public = native_registry_index(temp.path(), "cargo:ripgrep");
+        std::fs::write(temp.path().join("config.toml"), "[source.crates-io]\nreplace-with='corp'\n[registries.corp]\nindex='sparse+https://corp.example.test/index/'\n").unwrap();
+        let named = native_registry_index(temp.path(), "cargo:ripgrep");
+        assert!(public.unwrap().is_none());
+        assert_eq!(
+            named.unwrap().as_deref(),
+            Some("sparse+https://corp.example.test/index/")
+        );
+    }
+
+    #[test]
+    fn managed_cargo_homes_restore_user_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = context(temp.path(), false);
+        let original = temp.path().join("personal-cargo");
+        for managed in [
+            ctx.dirs.cargo_home(),
+            crate::cache::downstream_root(&ctx.dirs.cache).join("cargo"),
+        ] {
+            let home = user_cargo_home(&ctx, |name| match name {
+                "CARGO_HOME" => Some(managed.clone().into_os_string()),
+                "OSDK_ORIG_CARGO_HOME" => Some(original.clone().into_os_string()),
+                _ => None,
+            });
+            assert_eq!(home, Some(original.clone()));
+        }
+        assert_eq!(
+            user_cargo_home(&ctx, |name| (name == "CARGO_HOME")
+                .then(|| original.clone().into_os_string())),
+            Some(original)
+        );
     }
 
     #[test]
