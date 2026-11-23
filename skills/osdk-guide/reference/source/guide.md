@@ -58,3 +58,5 @@ Node 会合并所有可达版本 index；经典 CPython 会合并同一 release 
 Go/PyPI 原生源发现遵守 settings.precedence 的 go/python 或 packages 继承；osdk 策略使用 sources/registries 声明，不要求清除原生文件。
 
 空 PIP_EXTRA_INDEX_URL 可取消文件中的额外索引；不可读 GOENV 警告并忽略，不阻断 Go 命令。
+
+python=osdk 时，pypi 查询和安装忽略继承的 pip/uv 追加索引，仅用 registries.python 选中的默认索引；非源运行变量保留。

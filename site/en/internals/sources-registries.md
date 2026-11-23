@@ -119,3 +119,5 @@ Tool source ordering, conflict handling, per-ecosystem overrides and uv discover
 PyPI native discovery is triggered by index declarations only. Credential files and keyring settings do not select a source when no index is configured.
 
 uv source discovery extracts index addresses only; execution modes belong to the installer. Named-index name= prefixes are removed at the URL boundary.
+
+The global Python tool Managed install branch overrides inherited PIP_EXTRA_INDEX_URL, UV_INDEX, and UV_EXTRA_INDEX_URL. Discovery and installation share the controlled default index without clearing unrelated execution variables.

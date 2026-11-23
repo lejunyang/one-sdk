@@ -102,3 +102,5 @@ registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sd
 PyPI 原生发现只由索引声明触发；没有索引时，凭据文件和 keyring 设置不参与源选择。
 
 uv 源发现仅提取索引地址；运行模式由安装器处理。命名索引的 name= 前缀在地址解析边界去除。
+
+全局 Python 工具的 Managed 安装分支覆盖继承的 PIP_EXTRA_INDEX_URL、UV_INDEX、UV_EXTRA_INDEX_URL；版本查询与安装使用同一受控默认索引，其他运行变量不清空。

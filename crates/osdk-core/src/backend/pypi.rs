@@ -334,8 +334,16 @@ impl PypiBackend {
                     env.insert("PIP_EXTRA_INDEX_URL".into(), extra);
                 }
             }
-        } else if choice.creator == EnvCreator::Uv {
-            env.insert("UV_NO_CONFIG".into(), "1".into());
+        } else {
+            // Managed source selection owns the complete index set. An empty
+            // override removes inherited additional indexes without clearing
+            // unrelated installer execution settings.
+            for key in ["PIP_EXTRA_INDEX_URL", "UV_INDEX", "UV_EXTRA_INDEX_URL"] {
+                env.insert(key.into(), String::new());
+            }
+            if choice.creator == EnvCreator::Uv {
+                env.insert("UV_NO_CONFIG".into(), "1".into());
+            }
         }
         let (program, args) = venv_command(choice, interpreter, venv);
         run_installer(&program, &args, &env)?;
