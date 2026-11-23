@@ -62,3 +62,5 @@ Go/PyPI 原生源发现遵守 settings.precedence 的 go/python 或 packages 继
 python=osdk 时，pypi 查询和安装忽略继承的 pip/uv 追加索引，仅用 registries.python 选中的默认索引；非源运行变量保留。
 
 未安装受管 uv 时，不把 uv 追加索引转成 pip。先安装 pypi:uv，或使用 registries.python.urls + python=osdk；单个默认 uv 索引可回退 pip。
+
+osdk env/exec 后再启用hook，不把导出GOPROXY捕获为用户源；deactivate恢复未设置，用户覆盖仍生效。

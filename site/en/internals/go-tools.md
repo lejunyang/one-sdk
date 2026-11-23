@@ -162,3 +162,5 @@ leave the locked module and version unchanged. Offline reuse continues to valida
 the locked install identity.
 
 GoBackend.exec_env and standalone exports emit OSDK_APPLIED_GOPROXY. original_env recognizes an unchanged managed value, while hooks retain their pre-activation snapshot.
+
+Before clearing the applied marker, hooks capture absence when no snapshot exists and GOPROXY still equals osdk output. Existing snapshots remain unchanged; restoration uses the same snapshot.

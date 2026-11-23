@@ -4262,6 +4262,105 @@ eval "$("$OSDK_TEST_BIN" env --format bash)"
 
 #[cfg(unix)]
 #[test]
+fn first_hook_after_env_or_exec_keeps_go_proxy_origin_and_restores_absence() {
+    for entry in ["env", "exec"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        std::fs::write(root.join("osdk.toml"), format!("[tools]\ngo=\"1.24.0\"\n[sources]\nselection=\"ordered\"\n[[sources.\"go:example.com/tool\".custom]]\nid=\"fixture\"\nkind=\"custom\"\ndownload_url={endpoint:?}\n")).unwrap();
+        let runtime = root.join("installs/go/1.24.0");
+        write_executable(&runtime.join("bin/go"), "#!/bin/sh\nexit 42\n");
+        complete_go_fixture(&runtime);
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let mut stream = accept_fixture_connection(&listener, "first hook Go proxy");
+                let mut buf = [0; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let body = if request.starts_with("GET /example.com/tool/@v/list ") {
+                    "v1.2.3\n"
+                } else {
+                    assert!(
+                        request.starts_with("GET /example.com/tool/@v/v1.2.3.info "),
+                        "{request}"
+                    );
+                    r#"{"Version":"v1.2.3","Time":"2026-01-01T00:00:00Z"}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let script = r#"set -eu
+if [ "$ENTRY" = env ]; then eval "$("$OSDK_TEST_BIN" env --format bash)"; fi
+[ -z "${OSDK_ORIG_GOPROXY_SET+x}" ]
+[ "$GOPROXY" = "$OSDK_APPLIED_GOPROXY" ]
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+[ "$OSDK_ORIG_GOPROXY_PRESENT" = 0 ]
+[ "$("$OSDK_TEST_BIN" list-remote go:example.com/tool)" = 1.2.3 ]
+"$OSDK_TEST_BIN" lock go:example.com/tool@1.2.3
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ -z "${GOPROXY+x}" ] && [ -z "${OSDK_APPLIED_GOPROXY+x}" ]
+[ -z "${OSDK_ORIG_GOPROXY_SET+x}" ]
+# A user override before the first hook remains the user's value.
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+export GOPROXY=http://127.0.0.1:1,user
+_hook=$("$OSDK_TEST_BIN" hook-env --shell bash)
+eval "$_hook"
+[ "$GOPROXY" = http://127.0.0.1:1,user ]
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ "$GOPROXY" = http://127.0.0.1:1,user ]
+unset GOPROXY
+# A later override or unset must not be restored from an old snapshot.
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+export GOPROXY=off
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ "$GOPROXY" = off ]
+unset GOPROXY
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+unset GOPROXY
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ -z "${GOPROXY+x}" ]
+"#;
+        let mut command = if entry == "exec" {
+            let mut command = isolated_command(root, root, &osdk());
+            command.args([
+                "exec",
+                "--",
+                "/bin/bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                script,
+            ]);
+            command
+        } else {
+            let mut command = isolated_command(root, root, Path::new("/bin/bash"));
+            command.args(["--noprofile", "--norc", "-c", script]);
+            command
+        };
+        command
+            .env("ENTRY", entry)
+            .env("OSDK_TEST_BIN", osdk())
+            .env("GOENV", "off")
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root);
+        let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+        assert!(output.status.success(), "{entry}: {output:?}");
+        server.join().unwrap();
+        let lock = std::fs::read_to_string(root.join("osdk.lock")).unwrap();
+        assert!(lock.contains(&format!("source = {endpoint:?}")), "{lock}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn osdk_precedence_bypasses_native_go_and_python_sources() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

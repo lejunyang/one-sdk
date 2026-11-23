@@ -233,3 +233,5 @@ osdk marks proxy chains in env, direnv/CI exports, and exec/run/shim children. N
 Set `[settings.precedence] go = "osdk"` to select osdk sources without deleting native configuration. Use `[sources."go:<module>"]` for tools and `[sources."go-modules"]` for managed Go commands.
 
 An unreadable GOENV file or directory produces a warning and is ignored; valid environment settings still apply. Fix the file path or set GOENV=off.
+
+A first hook after osdk env/exec preserves the managed proxy origin; deactivate restores absence. User overrides or an explicit unset of GOPROXY remain authoritative.

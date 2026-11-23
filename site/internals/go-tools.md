@@ -130,3 +130,5 @@ module = "golang.org/x/tools/gopls"
 离线复用仍会核验锁定的安装身份。
 
 GoBackend.exec_env 与所有独立导出同时输出 OSDK_APPLIED_GOPROXY。original_env 在值仍等于标记时识别 osdk 输出，hook 则继续保留激活前快照。
+
+hook 在清除 applied 标记前，为尚无快照且当前值等于osdk导出的GOPROXY捕获未设置状态；已有原始快照不改。恢复使用同一快照规则。

@@ -907,6 +907,7 @@ pub fn render_hook_env(shell: Shell, delta: &EnvDelta) -> String {
                     render_restore_var(shell, k, &mut out);
                     continue;
                 }
+                render_capture_managed_goproxy(shell, &mut out);
                 render_release_goproxy(shell, &mut out);
             }
             render_capture_var(shell, k, &mut out);
@@ -1176,6 +1177,22 @@ fn windows_path_to_posix(path: &str) -> String {
 // Fish reports a missing optional erase as failure, and later `set` assignments
 // preserve that status. Treat absent capture/restore variables as successful
 // no-ops so sourcing a valid hook (or repeating deactivation) returns success.
+/// Capture standalone osdk env/exec output as absence before clearing its marker.
+fn render_capture_managed_goproxy(shell: Shell, out: &mut String) {
+    let applied = crate::execution::APPLIED_GOPROXY;
+    match shell {
+        Shell::Fish => out.push_str(&format!(
+            "if not set -q OSDK_ORIG_GOPROXY_SET; and set -q {applied}; and set -q GOPROXY; and test \"$GOPROXY\" = \"${applied}\"\n  set -e OSDK_ORIG_GOPROXY; or true\n  set -gx OSDK_ORIG_GOPROXY_PRESENT 0\n  set -gx OSDK_ORIG_GOPROXY_SET 1\nend\n"
+        )),
+        Shell::Powershell => out.push_str(&format!(
+            "if (!(Test-Path Env:OSDK_ORIG_GOPROXY_SET) -and (Test-Path Env:{applied}) -and (Test-Path Env:GOPROXY) -and ($env:GOPROXY -ceq $env:{applied})) {{ Remove-Item Env:OSDK_ORIG_GOPROXY -ErrorAction SilentlyContinue; $env:OSDK_ORIG_GOPROXY_PRESENT = '0'; $env:OSDK_ORIG_GOPROXY_SET = '1' }}\n"
+        )),
+        _ => out.push_str(&format!(
+            "if [ -z \"${{OSDK_ORIG_GOPROXY_SET+x}}\" ] && [ -n \"${{{applied}+x}}\" ] && [ -n \"${{GOPROXY+x}}\" ] && [ \"$GOPROXY\" = \"${{{applied}}}\" ]; then unset OSDK_ORIG_GOPROXY; export OSDK_ORIG_GOPROXY_PRESENT=0; export OSDK_ORIG_GOPROXY_SET=1; fi\n"
+        )),
+    }
+}
+
 fn render_capture_var(shell: Shell, key: &str, out: &mut String) {
     let original = format!("OSDK_ORIG_{key}");
     let present = format!("{original}_PRESENT");

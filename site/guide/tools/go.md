@@ -194,3 +194,5 @@ osdk 导出的代理链在 `env`、direnv/CI 环境和 exec/run/shim 子进程�
 设置 `[settings.precedence] go = "osdk"` 可显式选择 osdk 源而不删除原生配置。工具源用 `[sources."go:<module>"]`，受管 Go 命令用 `[sources."go-modules"]`。
 
 GOENV 文件不可读或指向目录时会警告并忽略，环境里的有效源设置仍生效；修正文件路径或设置 GOENV=off。
+
+在 osdk env/exec 的代理导出后首次启用 hook，会保留其 osdk 来源；deactivate 恢复到未设置。用户自行覆盖或 unset 的 GOPROXY 仍保持用户操作结果。
