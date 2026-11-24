@@ -3,36 +3,13 @@
 //! `go build` / `go test` 静默失效的缺陷回归。
 
 use super::go::{GoBackend, GO_MODULE_PROXY_TOOL};
-use super::{Backend, Ctx};
+use super::Ctx;
 use crate::config::{Config, Settings, SourcesConfig, ToolSources};
 use crate::dirs::Dirs;
 use crate::platform::{Arch, Libc, Os, Platform};
 use crate::source::Source;
 use crate::store::Cas;
-use crate::version::ToolVersion;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-
-/// GOPROXY 是进程级环境变量，而 Rust 测试默认并行执行。若不串行化，
-/// 一个用例设置的值会泄漏到另一个用例，产出与代码无关的假红或假绿。
-fn env_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// 在移除 GOPROXY 的干净环境里求值，结束后恢复原值，避免污染同进程其他用例。
-fn without_goproxy<T>(body: impl FnOnce() -> T) -> T {
-    let _guard = env_lock();
-    let original = std::env::var_os("GOPROXY");
-    std::env::remove_var("GOPROXY");
-    let result = body();
-    match original {
-        Some(value) => std::env::set_var("GOPROXY", value),
-        None => std::env::remove_var("GOPROXY"),
-    }
-    result
-}
+use std::sync::Arc;
 
 fn test_ctx(root: &std::path::Path) -> Ctx {
     let dirs = Dirs::resolve_from(|key| match key {
@@ -71,15 +48,6 @@ fn test_ctx(root: &std::path::Path) -> Ctx {
     }
 }
 
-fn goproxy_of(ctx: &Ctx) -> Option<String> {
-    let version = ToolVersion::new("go", "1.26.5");
-    GoBackend
-        .exec_env(ctx, &version)
-        .unwrap()
-        .get("GOPROXY")
-        .cloned()
-}
-
 /// 缺陷本体：镜像只作用于工具链归档下载，模块拉取仍直连 proxy.golang.org。
 /// 断言 GOPROXY 真的被注入、官方源在前、镜像随后、`direct` 兜底。
 ///
@@ -89,7 +57,10 @@ fn goproxy_of(ctx: &Ctx) -> Option<String> {
 fn exec_env_publishes_ranked_module_proxy_list() {
     let temporary = tempfile::tempdir().unwrap();
     let ctx = test_ctx(temporary.path());
-    let proxy = without_goproxy(|| goproxy_of(&ctx)).expect("GOPROXY must be injected");
+    let proxy = GoBackend
+        .preferred_module_proxy(&ctx, &|_| None)
+        .unwrap()
+        .expect("GOPROXY must be injected");
 
     assert_eq!(
         proxy,
@@ -108,16 +79,15 @@ fn explicit_goproxy_is_never_overridden() {
     let temporary = tempfile::tempdir().unwrap();
     let ctx = test_ctx(temporary.path());
 
-    let _guard = env_lock();
     for chosen in ["https://private.example.test", "off", "direct"] {
-        std::env::set_var("GOPROXY", chosen);
         assert_eq!(
-            goproxy_of(&ctx),
+            GoBackend
+                .preferred_module_proxy(&ctx, &|key| (key == "GOPROXY").then(|| chosen.into()))
+                .unwrap(),
             None,
             "osdk overrode a user-set GOPROXY of `{chosen}`"
         );
     }
-    std::env::remove_var("GOPROXY");
 }
 
 /// 镜像集受 `[sources."go-modules"]` 管理：禁用某个源后它必须从回退列表里消失，
@@ -135,7 +105,10 @@ fn module_proxy_honours_disabled_and_custom_sources() {
         },
     );
 
-    let proxy = without_goproxy(|| goproxy_of(&ctx)).expect("GOPROXY must be injected");
+    let proxy = GoBackend
+        .preferred_module_proxy(&ctx, &|_| None)
+        .unwrap()
+        .expect("GOPROXY must be injected");
 
     assert!(
         !proxy.contains("proxy.golang.org"),
@@ -168,7 +141,10 @@ fn module_proxy_pin_moves_that_source_to_the_front() {
         },
     );
 
-    let proxy = without_goproxy(|| goproxy_of(&ctx)).expect("GOPROXY must be injected");
+    let proxy = GoBackend
+        .preferred_module_proxy(&ctx, &|_| None)
+        .unwrap()
+        .expect("GOPROXY must be injected");
 
     assert!(
         proxy.starts_with("https://goproxy.cn|"),

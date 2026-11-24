@@ -73,26 +73,8 @@ async fn apply_with_environment(
     if program == "go" && args.first().is_some_and(|arg| arg == "mod") {
         if let Some(proxy) = &ctx.config.registries().go.proxy {
             let getenv = |key: &str| env.get(key).cloned().or_else(|| ambient(key));
-            let native_env = match getenv("GOENV").as_deref() {
-                Some("off") => false,
-                Some(path) if !path.is_empty() => Path::new(path).is_file(),
-                _ => {
-                    getenv("XDG_CONFIG_HOME")
-                        .is_some_and(|base| Path::new(&base).join("go/env").is_file())
-                        || ["HOME", "USERPROFILE"]
-                            .iter()
-                            .filter_map(|key| getenv(key))
-                            .any(|home| {
-                                [
-                                    ".config/go/env",
-                                    "Library/Application Support/go/env",
-                                    "AppData/Roaming/go/env",
-                                ]
-                                .iter()
-                                .any(|name| Path::new(&home).join(name).is_file())
-                            })
-                }
-            };
+            let native_env =
+                crate::backend::go_env::config_file(&getenv).is_some_and(|path| path.is_file());
             if ctx.config.settings.precedence.package_policy("go") == SourcePrecedence::Native
                 && native_env
             {

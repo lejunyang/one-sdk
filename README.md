@@ -622,6 +622,9 @@ schema-4 lock records the proxy, module root, and exact Go runtime—not the
 transitive module graph—so an exact completed install can be reused offline,
 but a cold offline build cannot.
 
+Online `osdk install` checks that the current Go proxy and privacy settings match
+the lock even when the tool is already installed.
+
 Go tool installs honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (including lowercase forms).
 
 Guide: [Go developer tools](site/en/guide/tools/go.md)
@@ -931,7 +934,7 @@ checksum/attestation verification fails, an archive cannot be unpacked, or its r
 missing. The receipt records the source whose artifact actually passed. Model sync likewise falls
 through after one source exhausts its attempts; exhaustion of every source remains terminal.
 
-Delegated ecosystems fail over only before or inside the native resolver: Cargo verifies the exact crate download endpoint before selecting a sparse index, `pypi:` probes the requested project and passes that choice to uv/pip, and fresh `go:` installs receive a `|`-joined GOPROXY chain. Project package-manager commands are still executed once, because blindly replaying a command after lifecycle scripts may duplicate side effects.
+If pip or uv is configured with a single index, `pypi:` uses it for version lookup and installation. Global tools ignore project uv configuration; additional native uv indexes retain default PyPI and require uv so first-index selection is preserved. Without a native index, set `[registries.python].urls` to choose the mirrors osdk can use. Set `[settings.precedence] python = "osdk"` to use that selected index for both lookup and installation, ignoring native additional indexes. `go:` uses your native Go module proxy and privacy settings, including values saved by `go env -w`. Version lookup for a private command stays within its Go no-proxy scope when checking parent module paths. Managed `go` commands also keep these settings, including command-level `GOPROXY` overrides after activation. Go locks keep the module and exact version, so teammates and CI can replay them with different local proxy settings.
 
 A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,
 `npm_config_registry`, and the like) is validated and then raced against osdk's

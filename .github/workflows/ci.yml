@@ -157,6 +157,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install Fish for execution regressions
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fish
       - name: clippy
         run: cargo clippy --workspace --all-targets
       - name: test
@@ -165,6 +168,13 @@ jobs:
           # Only the generic github: backend needs this. Current tests use local
           # fixture servers and do not require network access.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Linux PowerShell Go env/exec and hook restoration
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: |
+          cargo build --locked -p osdk-cli
+          if ($LASTEXITCODE -ne 0) { throw 'Linux CLI build failed' }
+          ./scripts/test-go-proxy-powershell.ps1 -Osdk ./target/debug/osdk
       - name: build windows runtime binaries
         if: runner.os == 'Windows'
         shell: pwsh
@@ -187,6 +197,47 @@ jobs:
           RUSTUP_HOME: ${{ runner.temp }}\osdk-ci-rustup
           CARGO_TARGET_DIR: ${{ runner.temp }}\osdk-ci-target
         run: ./scripts/windows-runtime-smoke.ps1 -BinDir "$env:CARGO_TARGET_DIR\debug"
+
+  pypi-native-install:
+    name: real pip/uv native source installs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install real uv oracle
+        run: python -m pip install uv==0.13.1
+      - name: build task runner
+        run: cargo build --locked -p osdk-cli
+      - name: run registered loopback installation task
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$(command -v openssl)"
+          python_path="$(command -v python)"
+          uv_path="$(command -v uv)"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export HOME="$RUNNER_TEMP/pypi-native-home"
+          export OSDK_DATA_DIR="$RUNNER_TEMP/pypi-native-data"
+          export OSDK_CACHE_DIR="$RUNNER_TEMP/pypi-native-cache"
+          export OSDK_CONFIG_DIR="$RUNNER_TEMP/pypi-native-config"
+          export OSDK_STORE_DIR="$RUNNER_TEMP/pypi-native-store"
+          export OSDK_INSTALL_DIR="$RUNNER_TEMP/pypi-native-installs"
+          export OSDK_TRUSTED_CONFIG_PATHS="$GITHUB_WORKSPACE"
+          mkdir -p "$HOME"
+          ./target/debug/osdk run pypi-native-install -- \
+            --python "$python_path" --uv "$uv_path" \
+            --report "$RUNNER_TEMP/pypi-native-install.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pypi-native-install
+          path: ${{ runner.temp }}/pypi-native-install.json
 
   # Explicit Windows cross-checks from Linux. Clippy guards every cfg path,
   # while Wine executes the Windows GNU test binaries against Win32 APIs even

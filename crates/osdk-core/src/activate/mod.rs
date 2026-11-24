@@ -199,6 +199,8 @@ if (-not (Test-Path Variable:script:OsdkOriginalPrompt)) {{
 pub fn deactivation_script(shell: Shell) -> String {
     let mut path = String::new();
     render_path_update(shell, &[], &mut path);
+    let mut goproxy = String::new();
+    render_restore_var(shell, "GOPROXY", &mut goproxy);
     let script = match shell {
         Shell::Bash => r#"# osdk shell deactivation (bash)
 if [ -n "${OSDK_MANAGED_ENV:-}" ]; then
@@ -206,7 +208,7 @@ if [ -n "${OSDK_MANAGED_ENV:-}" ]; then
   IFS=,
   for _osdk_key in $OSDK_MANAGED_ENV; do
     case "$_osdk_key" in
-      ''|*[!A-Za-z0-9_]*) continue ;;
+      ''|GOPROXY|*[!A-Za-z0-9_]*) continue ;;
     esac
     eval "_osdk_present=\${OSDK_ORIG_${_osdk_key}_PRESENT:-0}"
     if [ "$_osdk_present" = 1 ]; then
@@ -219,6 +221,7 @@ if [ -n "${OSDK_MANAGED_ENV:-}" ]; then
   IFS=$_osdk_saved_ifs
   unset _osdk_saved_ifs _osdk_key _osdk_present
 fi
+@@OSDK_GOPROXY@@
 @@OSDK_PATH@@
 PROMPT_COMMAND=";${PROMPT_COMMAND:-};"
 PROMPT_COMMAND="${PROMPT_COMMAND//;_osdk_hook;/;}"
@@ -232,6 +235,7 @@ unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH
 if [[ -n ${OSDK_MANAGED_ENV:-} ]]; then
   local _osdk_key
   for _osdk_key in ${(s:,:)OSDK_MANAGED_ENV}; do
+    [[ $_osdk_key == GOPROXY ]] && continue
     [[ $_osdk_key == [A-Za-z_][A-Za-z0-9_]# ]] || continue
     local _osdk_present_var="OSDK_ORIG_${_osdk_key}_PRESENT"
     local _osdk_original_var="OSDK_ORIG_${_osdk_key}"
@@ -243,6 +247,7 @@ if [[ -n ${OSDK_MANAGED_ENV:-} ]]; then
     unset "OSDK_ORIG_${_osdk_key}" "OSDK_ORIG_${_osdk_key}_PRESENT" "OSDK_ORIG_${_osdk_key}_SET"
   done
 fi
+@@OSDK_GOPROXY@@
 @@OSDK_PATH@@
 precmd_functions=(${precmd_functions:#_osdk_hook})
 unfunction _osdk_hook 2>/dev/null || true
@@ -252,6 +257,7 @@ unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH
         Shell::Fish => r#"# osdk shell deactivation (fish)
 if set -q OSDK_MANAGED_ENV
   for _osdk_key in (string split , -- $OSDK_MANAGED_ENV)
+    test "$_osdk_key" = GOPROXY; and continue
     string match -rq '^[A-Za-z_][A-Za-z0-9_]*$' -- $_osdk_key; or continue
     set _osdk_original OSDK_ORIG_$_osdk_key
     set _osdk_present $_osdk_original"_PRESENT"
@@ -264,6 +270,7 @@ if set -q OSDK_MANAGED_ENV
   end
   set -e _osdk_key _osdk_original _osdk_present; or true
 end
+@@OSDK_GOPROXY@@
 @@OSDK_PATH@@
 functions -e _osdk_hook
 set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PATH OSDK_MISSING_WARNED; or true
@@ -272,6 +279,7 @@ set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET OSDK_ADDED_PAT
         Shell::Powershell => r#"# osdk shell deactivation (powershell)
 if (Test-Path Env:OSDK_MANAGED_ENV) {
   foreach ($osdkKey in ($env:OSDK_MANAGED_ENV -split ',')) {
+    if ($osdkKey -ceq 'GOPROXY') { continue }
     if ($osdkKey -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
     $original = "OSDK_ORIG_${osdkKey}"
     $present = "${original}_PRESENT"
@@ -283,6 +291,7 @@ if (Test-Path Env:OSDK_MANAGED_ENV) {
     Remove-Item "Env:$original","Env:$present","Env:${original}_SET" -ErrorAction SilentlyContinue
   }
 }
+@@OSDK_GOPROXY@@
 @@OSDK_PATH@@
 # Put the user's own prompt back. Deleting our wrapper without restoring what it
 # wrapped would leave the session with no prompt function at all, silently
@@ -302,11 +311,9 @@ Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_S
 "#
         .to_string(),
     };
-    script.replace(
-        "@@OSDK_PATH@@
-",
-        &path,
-    )
+    script
+        .replace("@@OSDK_GOPROXY@@\n", &goproxy)
+        .replace("@@OSDK_PATH@@\n", &path)
 }
 
 /// The env changes to apply for the active toolset in `cwd`.
@@ -890,25 +897,28 @@ pub fn render_hook_env(shell: Shell, delta: &EnvDelta) -> String {
         }
     }
 
+    let mut managed = Vec::new();
     for (k, v) in &delta.set_vars {
-        if valid_env_name(k) {
-            render_capture_var(shell, k, &mut out);
-            match shell {
-                Shell::Fish => out.push_str(&format!("set -gx {} {}\n", k, shell_quote(shell, v))),
-                Shell::Powershell => {
-                    out.push_str(&format!("$env:{} = {}\n", k, powershell_quote(v)))
+        if valid_env_name(k) && k != crate::execution::APPLIED_GOPROXY {
+            if k == "GOPROXY" {
+                // An empty override from the Go backend asks the child to
+                // consult GOENV. In a hook, release the stale shell value.
+                if v.is_empty() {
+                    render_restore_var(shell, k, &mut out);
+                    continue;
                 }
-                _ => out.push_str(&format!("export {}={}\n", k, shell_quote(shell, v))),
+                render_capture_managed_goproxy(shell, &mut out);
+                render_release_goproxy(shell, &mut out);
             }
+            render_capture_var(shell, k, &mut out);
+            render_set_var(shell, k, v, &mut out);
+            if k == "GOPROXY" {
+                render_set_var(shell, crate::execution::APPLIED_GOPROXY, v, &mut out);
+            }
+            managed.push(k.as_str());
         }
     }
-    let managed = delta
-        .set_vars
-        .keys()
-        .filter(|key| valid_env_name(key))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(",");
+    let managed = managed.join(",");
     match shell {
         Shell::Fish if managed.is_empty() => out.push_str("set -e OSDK_MANAGED_ENV; or true\n"),
         Shell::Fish => out.push_str(&format!(
@@ -979,14 +989,9 @@ pub fn render_env_exports(shell: Shell, delta: &EnvDelta) -> String {
     }
     for (key, value) in &delta.set_vars {
         if valid_env_name(key) {
-            match shell {
-                Shell::Fish => {
-                    out.push_str(&format!("set -gx {key} {}\n", shell_quote(shell, value)))
-                }
-                Shell::Powershell => {
-                    out.push_str(&format!("$env:{key} = {}\n", powershell_quote(value)))
-                }
-                _ => out.push_str(&format!("export {key}={}\n", shell_quote(shell, value))),
+            render_set_var(shell, key, value, &mut out);
+            if key == "GOPROXY" {
+                render_set_var(shell, crate::execution::APPLIED_GOPROXY, value, &mut out);
             }
         }
     }
@@ -1008,6 +1013,9 @@ pub fn env_assignments(
         .filter(|(key, _)| valid_env_name(key))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    if let Some(proxy) = vars.get("GOPROXY").cloned() {
+        vars.insert(crate::execution::APPLIED_GOPROXY.into(), proxy);
+    }
     let path = std::env::join_paths(
         delta
             .path_prepend
@@ -1169,6 +1177,22 @@ fn windows_path_to_posix(path: &str) -> String {
 // Fish reports a missing optional erase as failure, and later `set` assignments
 // preserve that status. Treat absent capture/restore variables as successful
 // no-ops so sourcing a valid hook (or repeating deactivation) returns success.
+/// Capture standalone osdk env/exec output as absence before clearing its marker.
+fn render_capture_managed_goproxy(shell: Shell, out: &mut String) {
+    let applied = crate::execution::APPLIED_GOPROXY;
+    match shell {
+        Shell::Fish => out.push_str(&format!(
+            "if not set -q OSDK_ORIG_GOPROXY_SET; and set -q {applied}; and set -q GOPROXY; and test \"$GOPROXY\" = \"${applied}\"\n  set -e OSDK_ORIG_GOPROXY; or true\n  set -gx OSDK_ORIG_GOPROXY_PRESENT 0\n  set -gx OSDK_ORIG_GOPROXY_SET 1\nend\n"
+        )),
+        Shell::Powershell => out.push_str(&format!(
+            "if (!(Test-Path Env:OSDK_ORIG_GOPROXY_SET) -and (Test-Path Env:{applied}) -and (Test-Path Env:GOPROXY) -and ($env:GOPROXY -ceq $env:{applied})) {{ Remove-Item Env:OSDK_ORIG_GOPROXY -ErrorAction SilentlyContinue; $env:OSDK_ORIG_GOPROXY_PRESENT = '0'; $env:OSDK_ORIG_GOPROXY_SET = '1' }}\n"
+        )),
+        _ => out.push_str(&format!(
+            "if [ -z \"${{OSDK_ORIG_GOPROXY_SET+x}}\" ] && [ -n \"${{{applied}+x}}\" ] && [ -n \"${{GOPROXY+x}}\" ] && [ \"$GOPROXY\" = \"${{{applied}}}\" ]; then unset OSDK_ORIG_GOPROXY; export OSDK_ORIG_GOPROXY_PRESENT=0; export OSDK_ORIG_GOPROXY_SET=1; fi\n"
+        )),
+    }
+}
+
 fn render_capture_var(shell: Shell, key: &str, out: &mut String) {
     let original = format!("OSDK_ORIG_{key}");
     let present = format!("{original}_PRESENT");
@@ -1187,6 +1211,9 @@ fn render_capture_var(shell: Shell, key: &str, out: &mut String) {
 }
 
 fn render_restore_var(shell: Shell, key: &str, out: &mut String) {
+    if key == "GOPROXY" {
+        render_release_goproxy(shell, out);
+    }
     let original = format!("OSDK_ORIG_{key}");
     let present = format!("{original}_PRESENT");
     let set = format!("{original}_SET");
@@ -1199,6 +1226,32 @@ fn render_restore_var(shell: Shell, key: &str, out: &mut String) {
         )),
         _ => out.push_str(&format!(
             "if [ -n \"${{{set}+x}}\" ]; then if [ \"${{{present}:-0}}\" = 1 ]; then export {key}=\"${original}\"; else unset {key}; fi; unset {original} {present} {set}; fi\n"
+        )),
+    }
+}
+
+fn render_set_var(shell: Shell, key: &str, value: &str, out: &mut String) {
+    let value = shell_quote(shell, value);
+    match shell {
+        Shell::Fish => out.push_str(&format!("set -gx {key} {value}\n")),
+        Shell::Powershell => out.push_str(&format!("$env:{key} = {value}\n")),
+        _ => out.push_str(&format!("export {key}={value}\n")),
+    }
+}
+
+/// Forget the old snapshot if the user has changed GOPROXY. Run at eval time,
+/// just like capture and restore, so the decision uses the shell's current value.
+fn render_release_goproxy(shell: Shell, out: &mut String) {
+    let applied = crate::execution::APPLIED_GOPROXY;
+    match shell {
+        Shell::Fish => out.push_str(&format!(
+            "if not set -q {applied}; or test \"$GOPROXY\" != \"${applied}\"\n  set -e OSDK_ORIG_GOPROXY OSDK_ORIG_GOPROXY_PRESENT OSDK_ORIG_GOPROXY_SET; or true\nend\nset -e {applied}; or true\n"
+        )),
+        Shell::Powershell => out.push_str(&format!(
+            "if (!(Test-Path Env:{applied}) -or ($env:GOPROXY -cne $env:{applied})) {{ Remove-Item Env:OSDK_ORIG_GOPROXY,Env:OSDK_ORIG_GOPROXY_PRESENT,Env:OSDK_ORIG_GOPROXY_SET -ErrorAction SilentlyContinue }}\nRemove-Item Env:{applied} -ErrorAction SilentlyContinue\n"
+        )),
+        _ => out.push_str(&format!(
+            "if [ -z \"${{{applied}+x}}\" ] || [ \"${{GOPROXY-}}\" != \"${{{applied}}}\" ]; then unset OSDK_ORIG_GOPROXY OSDK_ORIG_GOPROXY_PRESENT OSDK_ORIG_GOPROXY_SET; fi\nunset {applied}\n"
         )),
     }
 }
@@ -1956,6 +2009,191 @@ mod tests {
                 })
         })?;
         Some(std::process::Command::new(program))
+    }
+
+    #[test]
+    fn managed_goproxy_capture_is_rendered_before_release_in_every_shell() {
+        let delta = EnvDelta {
+            path_prepend: Vec::new(),
+            set_vars: BTreeMap::from([("GOPROXY".into(), "https://proxy.example,direct".into())]),
+            unset_vars: Vec::new(),
+        };
+        for shell in [Shell::Bash, Shell::Fish, Shell::Powershell] {
+            let output = render_hook_env(shell, &delta);
+            let mut capture = String::new();
+            render_capture_managed_goproxy(shell, &mut capture);
+            let mut release = String::new();
+            render_release_goproxy(shell, &mut release);
+            let capture_at = output
+                .find(&capture)
+                .expect("missing managed proxy capture");
+            let release_at = output
+                .find(&release)
+                .expect("missing managed proxy release");
+            assert!(capture_at < release_at, "{shell:?}: {output}");
+            assert!(capture.contains("OSDK_ORIG_GOPROXY_PRESENT"));
+        }
+    }
+
+    #[test]
+    fn managed_goproxy_capture_runs_in_bash() {
+        assert_managed_goproxy_capture_in_shell(Shell::Bash);
+    }
+
+    #[test]
+    fn managed_goproxy_capture_runs_in_fish() {
+        assert_managed_goproxy_capture_in_shell(Shell::Fish);
+    }
+
+    #[test]
+    fn managed_goproxy_capture_runs_in_powershell_strict_mode() {
+        assert_managed_goproxy_capture_in_shell(Shell::Powershell);
+    }
+
+    fn assert_managed_goproxy_capture_in_shell(shell: Shell) {
+        let Some(mut command) = test_shell(shell) else {
+            eprintln!(
+                "skipping {shell:?}: interpreter unavailable on {}",
+                std::env::consts::OS
+            );
+            return;
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let proxy = "https://proxy.example,direct";
+        let user = "https://user.example,direct";
+        let delta = |value: &str| EnvDelta {
+            path_prepend: Vec::new(),
+            set_vars: BTreeMap::from([("GOPROXY".into(), value.into())]),
+            unset_vars: Vec::new(),
+        };
+        let exports = render_env_exports(shell, &delta(proxy));
+        let hook = render_hook_env(shell, &delta(proxy));
+        let user_hook = render_hook_env(shell, &delta(user));
+        let undo = deactivation_script(shell);
+        let set = |key: &str, value: &str| {
+            let mut output = String::new();
+            render_set_var(shell, key, value, &mut output);
+            output
+        };
+        let unset = |key: &str| match shell {
+            Shell::Fish => format!("set -e {key}; or true\n"),
+            Shell::Powershell => format!("Remove-Item Env:{key} -ErrorAction SilentlyContinue\n"),
+            _ => format!("unset {key}\n"),
+        };
+        let equal = |key: &str, value: &str| match shell {
+            Shell::Fish => format!(
+                "test \"${key}\" = {}; or exit 91\n",
+                shell_quote(shell, value)
+            ),
+            Shell::Powershell => format!(
+                "if ($env:{key} -cne {}) {{ throw 'unexpected {key}' }}\n",
+                powershell_quote(value)
+            ),
+            _ => format!(
+                "[ \"${key}\" = {} ] || exit 91\n",
+                shell_quote(shell, value)
+            ),
+        };
+        let absent = |key: &str| match shell {
+            Shell::Fish => format!("not set -q {key}; or exit 92\n"),
+            Shell::Powershell => {
+                format!("if (Test-Path Env:{key}) {{ throw 'unexpected present {key}' }}\n")
+            }
+            _ => format!("[ -z \"${{{key}+x}}\" ] || exit 92\n"),
+        };
+        let mark = |label: &str| match shell {
+            Shell::Powershell => format!("Write-Output '{label}'\n"),
+            _ => format!("echo {label}\n"),
+        };
+        let mut script = if shell == Shell::Powershell {
+            "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\nif ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 required' }\n".to_owned()
+        } else {
+            String::new()
+        };
+        // env output, and exec's process assignments, must both enter the same capture path.
+        for entry in ["ENV", "EXEC"] {
+            if entry == "ENV" {
+                script.push_str(&exports);
+            } else {
+                let assignments = env_assignments(&delta(proxy), std::ffi::OsStr::new("")).unwrap();
+                for key in ["GOPROXY", crate::execution::APPLIED_GOPROXY] {
+                    script.push_str(&set(key, &assignments[key]));
+                }
+            }
+            script.push_str(&absent("OSDK_ORIG_GOPROXY_SET"));
+            script.push_str(&hook);
+            script.push_str(&equal("OSDK_ORIG_GOPROXY_PRESENT", "0"));
+            script.push_str(&hook);
+            script.push_str(&equal("OSDK_ORIG_GOPROXY_PRESENT", "0"));
+            script.push_str(&equal("GOPROXY", proxy));
+            script.push_str(&undo);
+            for key in ["GOPROXY", "OSDK_APPLIED_GOPROXY", "OSDK_ORIG_GOPROXY_SET"] {
+                script.push_str(&absent(key));
+            }
+            script.push_str(&mark(entry));
+        }
+        // An existing snapshot is not replaced by the standalone export's absence.
+        script.push_str(&set("OSDK_ORIG_GOPROXY", user));
+        script.push_str(&set("OSDK_ORIG_GOPROXY_PRESENT", "1"));
+        script.push_str(&set("OSDK_ORIG_GOPROXY_SET", "1"));
+        script.push_str(&exports);
+        script.push_str(&hook);
+        script.push_str(&equal("OSDK_ORIG_GOPROXY", user));
+        script.push_str(&undo);
+        script.push_str(&equal("GOPROXY", user));
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&mark("SNAPSHOT"));
+        // A user change before a hook, after a hook, and an unset remain authoritative.
+        script.push_str(&exports);
+        script.push_str(&set("GOPROXY", user));
+        script.push_str(&user_hook);
+        script.push_str(&undo);
+        script.push_str(&equal("GOPROXY", user));
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&mark("BEFORE"));
+        script.push_str(&exports);
+        script.push_str(&hook);
+        script.push_str(&set("GOPROXY", user));
+        script.push_str(&undo);
+        script.push_str(&equal("GOPROXY", user));
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&mark("AFTER"));
+        script.push_str(&exports);
+        script.push_str(&hook);
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&undo);
+        script.push_str(&absent("GOPROXY"));
+        script.push_str(&mark("UNSET"));
+        match shell {
+            Shell::Powershell => {
+                command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            }
+            Shell::Fish => {
+                command.args(["--no-config", "-c", &script]);
+            }
+            _ => {
+                command.args(["--noprofile", "--norc", "-c", &script]);
+            }
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        command
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", temporary.path())
+            .env("USERPROFILE", temporary.path());
+        let output = command.output().expect("spawn GOPROXY shell regression");
+        let stdout = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+        assert!(
+            output.status.success(),
+            "{shell:?}: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            ["ENV", "EXEC", "SNAPSHOT", "BEFORE", "AFTER", "UNSET"],
+            "{shell:?}"
+        );
+        eprintln!("executed {shell:?} on {}: env/exec, first/repeated hook, snapshot, overrides, unset and deactivate", std::env::consts::OS);
     }
 
     #[test]

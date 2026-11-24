@@ -22,7 +22,7 @@ Cargo request before Cargo resolution continues. See
 `go:` has a dedicated namespace schema for canonical module/command paths,
 semantic or pseudo-versions, tags, and a restricted build environment. It
 injects or preserves one managed Go request, resolves that runtime first, and
-then discovers the longest module root through ranked Go proxy metadata. See
+then discovers the longest module root through the native Go policy or ranked Go proxy metadata. See
 [Go developer tool implementation](./go-tools#canonical-identity-and-selection).
 
 [`version/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) defines `VersionSpec`:

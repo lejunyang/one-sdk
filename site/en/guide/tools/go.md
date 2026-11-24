@@ -94,7 +94,22 @@ including their lowercase forms, so it can use the same network route as osdk
 metadata requests. These transport settings do not replace the selected
 `GOPROXY` module source or the isolated build environment.
 
-The built-in candidates are `https://proxy.golang.org` and
+For private modules, set `GOPROXY`, `GOPRIVATE`, or `GONOPROXY` in the
+environment or with `go env -w`. osdk uses those settings for both version
+lookup and installation. Go keeps the order and separators of the configured
+proxy chain, including `direct` or `off`. Privacy-only settings affect matching modules;
+public tools retain the default proxy chain and can list versions before Go is installed. Use a proxy URL without embedded
+credentials. A managed Go runtime must be installed before listing or locking
+versions with a native source. Locks keep the module and exact version without
+binding local source settings; changing GOPROXY/GOPRIVATE does not require relocking.
+An exact, complete install can still be reused offline. After activation, an override such as `GOPROXY=off go list -m` or
+`GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
+applies to that command. When a command path matches the effective
+`GONOPROXY` rule, version lookup also keeps parent-module searches within that
+rule. Go defaults `GONOPROXY` to `GOPRIVATE`; explicitly setting
+`GONOPROXY=none` allows the configured proxy.
+
+Without native Go source settings, the built-in candidates are `https://proxy.golang.org` and
 `https://goproxy.cn`. The normal `auto`, `ordered`, and pinned source policies
 apply; auto mode probes candidates and caches the ranking before metadata
 resolution. Exact versions are still verified with the chosen proxy's `.info`
@@ -117,7 +132,7 @@ different channel: `[sources.go]` only selects where the Go toolchain archive is
 downloaded from, while module downloads are driven by the go command through
 `GOPROXY`, so mirroring the archive does not mirror the modules.
 
-A managed go's xec_env injects a ranked GOPROXY. The candidate set is
+With no native source policy, managed Go receives a ranked GOPROXY. The candidate set is
 configured under its own `go-modules` name (`proxy.golang.org`, `goproxy.cn` and
 `mirrors.aliyun.com/goproxy` by default, with `direct` appended). Ranking here is
 configuration-level only, with no network probe: this code runs in the shim on
@@ -131,8 +146,8 @@ unreachable proxy and never reaches the mirrors behind it -- exactly the case
 mirrors exist for. The gatekeeper semantics a comma buys (a private proxy
 answering 403 stops the lookup instead of leaking the module path onward) do not
 apply, because every candidate here is a public mirror of the same public module
-set. A `GOPROXY` the user set themselves -- including `off` and `direct` -- is
-never overridden.
+set. Managed Go keeps native proxy and privacy settings from the environment and
+the Go environment file.
 
 `go-modules` is not a backend and so cannot be reached through the registry, but
 like `self` (osdk's own release download) it carries per-tool source
@@ -153,6 +168,12 @@ says "try this first", and dropping the others would turn one unreachable host
 into a hard build failure.
 
 ## Isolation and activation
+
+The one-sdk repository executes real Fish and PowerShell 7 regressions for `env`/`exec`
+→ first and repeated `hook-env` → `deactivate`, including user overrides and unset.
+PowerShell enables `Set-StrictMode -Version Latest`. Run `osdk run go-proxy-powershell`
+with PowerShell 7 installed; execution on Linux is not native Windows validation.
+The same scenario is part of the native Windows `osdk run windows-smoke` matrix.
 
 osdk runs one shell-free `go install <command>@v<version>` in a cleared
 environment. It forces the selected managed `GOROOT`, a staged `GOBIN`, private
@@ -212,3 +233,11 @@ the exact one through `osdk.lock` instead of allowing an ambiguous activation.
 
 For runtime identity, staging, provider, and lock-schema details, see
 [Go developer tool implementation](../../internals/go-tools).
+
+osdk marks proxy chains in env, direnv/CI exports, and exec/run/shim children. Nested osdk calls do not treat that value as a native GOPROXY choice; command-level overrides still win.
+
+Set `[settings.precedence] go = "osdk"` to select osdk sources without deleting native configuration. Use `[sources."go:<module>"]` for tools and `[sources."go-modules"]` for managed Go commands.
+
+An unreadable GOENV file or directory produces a warning and is ignored; valid environment settings still apply. Fix the file path or set GOENV=off.
+
+A first hook after osdk env/exec preserves the managed proxy origin; deactivate restores absence. User overrides or an explicit unset of GOPROXY remain authoritative.

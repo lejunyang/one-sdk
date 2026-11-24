@@ -43,7 +43,7 @@
 
 ## 使用 system 工具时的还原
 
-执行 system 目标前，osdk 将该工具由激活注入的强制变量（上表托管列）还原为保存的用户值**或未设置状态**，再按需要设置选定的 system home。例如外部 pnpm 得到原来的 `PNPM_HOME` 而非 osdk 托管目录；外部 Node/npm 还原 `npm_config_prefix`；外部 Go 还原 `GOBIN`/`GOPROXY`，在使用 GOROOT home 选择器时设置该 home。被还原的变量不会因此变成选择来源。
+执行 system 目标前，osdk 将该工具由激活注入的强制变量（上表托管列）还原为保存的用户值**或未设置状态**，再按需要设置选定的 system home。例如外部 pnpm 得到原来的 `PNPM_HOME` 而非 osdk 托管目录；外部 Node/npm 还原 `npm_config_prefix`；外部 Go 还原 `GOBIN`，并在 `GOPROXY` 仍等于激活写入值时还原它。在使用 GOROOT home 选择器时设置该 home。被还原的变量不会因此变成选择来源。
 
 无关环境变量与既有缓存策略保持原有行为。`deactivate` 还原 shell 激活接管的变量。此次选择不会重写 shell 启动文件或原生管理器配置。早先“辅助 JVM 工具找不到托管 JDK 时保留用户 `JAVA_HOME`”是更窄的兼容路径，不代表默认系统优先。
 

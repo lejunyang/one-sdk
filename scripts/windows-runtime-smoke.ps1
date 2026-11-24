@@ -107,6 +107,10 @@ try {
         } |
         ForEach-Object { Remove-Item ("Env:" + $_.Name) }
 
+    Invoke-Stage "PowerShell Go env/exec first hook and restoration" {
+        & (Join-Path $PSScriptRoot 'test-go-proxy-powershell.ps1') -Osdk $sourceOsdk
+    }
+
     Invoke-Stage "prepare isolated fixtures" {
         New-Item -ItemType Directory -Force -Path $programDir, $project, $runtime | Out-Null
         Copy-Item -LiteralPath $sourceOsdk -Destination (Join-Path $programDir "osdk.exe")

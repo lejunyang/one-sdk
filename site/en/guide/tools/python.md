@@ -201,7 +201,7 @@ Someone who lists a single index means that one, and quietly adding mirrors or
 upstream would send lookups somewhere they did not choose and defeat an
 internal-only setup.
 
-osdk ranks the candidates with a fresh anonymous probe and picks the fastest
+When no native source is configured, osdk ranks the candidates with a fresh anonymous probe and picks the fastest
 healthy one. `osdk registry test python` uses the long-lived `pip` project as a
 generic health check, while an actual `pypi:<project>` install probes the requested
 project page so a reachable but partially synchronized mirror cannot win. Both
@@ -227,35 +227,22 @@ npm registry rule, which still accepts http, because the index is where artifact
 hashes come from: a downgradeable transport would let an attacker rewrite both the
 artifact and the hash meant to detect the rewrite.
 
-The pip path additionally pins `PIP_CONFIG_FILE`. uv ignores `pip.conf` by design
-while pip reads it, so a leftover `pip.conf` on your system -- one pointing at an
-untrusted index, say -- could otherwise override everything above unnoticed.
+### Private indexes
 
-### Private indexes and credentials
+For a standalone `pypi:<project>` tool, osdk uses a single native index for both
+version discovery and installation. It reads pip's `PIP_INDEX_URL` and
+`pip.conf` / `pip.ini`, including a file selected by `PIP_CONFIG_FILE`. It also
+reads uv index environment variables and user, system, or explicit configuration.
+Global tools ignore project uv configuration and explicit package-only indexes.
+Additional indexes preserve default PyPI unless an explicit default replaces it.
+When both installers have a source, the selected installer takes precedence.
 
-When credentials for a private index are already configured, osdk **stops
-planning indexes** and hands the decision back to uv / pip:
-
-```
-$ osdk registry test
-python:
-  pass-through: index credentials are configured by environment variable UV_INDEX_INTERNAL_USERNAME
-```
-
-Recognised evidence includes `UV_INDEX_<NAME>_USERNAME` / `_PASSWORD`,
-`UV_KEYRING_PROVIDER`, `PIP_INDEX_URL`, `PIP_KEYRING_PROVIDER`, and credential
-files such as `~/.netrc` (`_netrc` on Windows), `pip.conf` / `pip.ini` and
-`uv.toml`.
-
-This is not "private index support" -- it is a refusal to interfere with one.
-osdk maps a mirror onto the default index, and it cannot know which packages are
-supposed to come from your private index; mapping anyway would send those lookups
-to the public mirror, exactly the dependency-confusion shape the warning above
-exists to prevent. Staying out of the way is what keeps the credentials working.
-
-Note that `UV_INDEX_URL`, `UV_INDEX` and `UV_DEFAULT_INDEX` are **not** treated as
-credentials -- they configure an address rather than an identity, so mirrors keep
-working as usual.
+Native index discovery makes an anonymous request to the configured origin.
+If the configuration has no usable single index or the index requires
+authentication to list versions, version discovery stops with an error.
+To use osdk's mirrors, clear the native source settings and set
+`[registries.python].urls`. pip retains its native configuration when a
+native index is in use.
 
 ## Interpreters
 
@@ -311,3 +298,15 @@ The `pypi:` tool backend above retains its existing anonymous mirror policy. Pro
 ## Native pip, pipx and uv tool
 
 Bare pip installs remain tied to their interpreter/virtualenv. pipx and uv tool environments may also depend on a particular Python installation; they are not shared site-packages or automatically migrated on a Python switch. Keep the interpreter or recreate the native tool environment before removing it. See [native global-install boundaries](./package-managers#native-global-boundaries).
+
+With no native index, `.netrc`, `NETRC`, or keyring credentials do not affect default mirror selection. Use `osdk config set registries.python.urls URL` to select a source.
+
+UV_OFFLINE, UV_ENV_FILE, UV_FIND_LINKS, and UV_NO_INDEX are not index addresses and do not block pypi source discovery. The uv installer still applies its execution settings. UV_INDEX accepts name=https://index.example/simple/.
+
+To use osdk indexes without deleting native configuration, set `[settings.precedence] python = "osdk"` and `[registries.python].urls`. Discovery and installation use the selected osdk index only; inherited pip/uv additional indexes are ignored. Non-source execution variables still belong to the installer.
+
+PIP_EXTRA_INDEX_URL="" clears extra indexes from pip configuration. On macOS, user discovery uses Library/Application Support/pip/pip.conf when Application Support exists.
+
+Native uv additional indexes require managed uv. pip merges candidates across indexes and cannot preserve uv first-index, so osdk fails before lookup or installation. Install pypi:uv, or set registries.python.urls and python=osdk to choose the osdk single-index policy. A single default index may still use pip.
+
+A name=URL in UV_INDEX replaces the same named index from user/system files; the old endpoint is excluded from both discovery and installation. Distinct names retain order. Named replacement precedes default/explicit filtering.

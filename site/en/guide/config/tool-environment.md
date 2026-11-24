@@ -43,7 +43,7 @@ See [source diagnostics](./tool-selection#inspect-sources) for a default **non-e
 
 ## Restoration when using system tools
 
-Before executing a system target, osdk restores that tool's activation-injected forced variables (the managed column above) to the saved user value **or absence**, then applies the selected system home where needed. For example, external pnpm gets the original `PNPM_HOME`, not osdk's managed pnpm home; external Node/npm restores `npm_config_prefix`; external Go restores `GOBIN`/`GOPROXY` and applies `GOROOT` when that home selector was used. This does not promote those restored variables to selection sources.
+Before executing a system target, osdk restores that tool's activation-injected forced variables (the managed column above) to the saved user value **or absence**, then applies the selected system home where needed. For example, external pnpm gets the original `PNPM_HOME`, not osdk's managed pnpm home; external Node/npm restores `npm_config_prefix`; external Go restores `GOBIN` and restores `GOPROXY` if its value still matches the last activation write. It applies `GOROOT` when that home selector was used. This does not promote those restored variables to selection sources.
 
 Unrelated environment variables and existing cache policies remain intact. `deactivate` restores variables owned by shell activation. osdk does not rewrite shell startup files or native manager configuration for this selection. The older behavior that preserves `JAVA_HOME` for auxiliary JVM tools when no managed JDK is available is a narrower compatibility path, not a general system-first policy.
 

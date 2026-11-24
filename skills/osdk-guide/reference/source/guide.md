@@ -35,8 +35,9 @@ Zig 与 Gradle index 中的绝对产物 URL 会按发布相对路径重映射到
 Maven/Kotlin 也使用有效 source 列表，而不是固定只用内置首项。
 
 委托型安装不会一概在命令失败后重跑：Cargo 会在选定 sparse index 前探测精确 crate
-制品，`pypi:` 会探测实际项目页并把结果传给 uv/pip，`go:` 的全新解析会生成以 `|`
-连接的原生 `GOPROXY` 回退链。普通项目依赖命令可能已经执行 lifecycle script，因此
+制品。配置原生源时，`pypi:` 使用单一 pip/uv 索引，`go:` 保留环境变量或
+`go env -w` 保存的代理链和私有模块设置。激活后，命令前设置的 `GOPROXY`（含 `off`）会同时用于 `go:` 查版本及受管 `go`。私有命令的版本查询只在生效的 `GONOPROXY` 范围内尝试父模块。未配置原生源时，`pypi:` 探测实际项目页，
+`go:` 把排序候选连成 `GOPROXY` 回退链。普通项目依赖命令可能已经执行 lifecycle script，因此
 仍只运行一次。
 
 Node 会合并所有可达版本 index；经典 CPython 会合并同一 release tag 的
@@ -45,3 +46,26 @@ Node 会合并所有可达版本 index；经典 CPython 会合并同一 release 
 
 `npm:<package>` 的未锁定安装和 `osdk lock` graph-only 阶段会逐 source 重建隔离项目；
 后者固定禁用脚本，所以可安全回退。已有原生 lock 的 frozen 重放不会切换来源。
+
+`pypi:` 没有原生索引时，忽略独立的 .netrc/NETRC/keyring 凭据配置，继续走默认源或显式 registries.python.urls。
+
+不要将 osdk env/exec/run/shim 输出的 GOPROXY 再解释为用户原生源；osdk 会随代理链导出来源标记，用户显式覆盖仍生效。
+
+全局 pypi 工具只发现 uv 用户/系统/显式文件，不发现项目目录。explicit 索引忽略；追加索引保留 PyPI 默认源。
+
+无关 UV_OFFLINE/ENV_FILE/FIND_LINKS/NO_INDEX 不拦 pypi 源发现；UV_INDEX 可用 name=URL。
+
+Go/PyPI 原生源发现遵守 settings.precedence 的 go/python 或 packages 继承；osdk 策略使用 sources/registries 声明，不要求清除原生文件。
+
+空 PIP_EXTRA_INDEX_URL 可取消文件中的额外索引；不可读 GOENV 警告并忽略，不阻断 Go 命令。
+
+python=osdk 时，pypi 查询和安装忽略继承的 pip/uv 追加索引，仅用 registries.python 选中的默认索引；非源运行变量保留。
+
+未安装受管 uv 时，不把 uv 追加索引转成 pip。先安装 pypi:uv，或使用 registries.python.urls + python=osdk；单个默认 uv 索引可回退 pip。
+
+osdk env/exec 后再启用hook，不把导出GOPROXY捕获为用户源；deactivate恢复未设置，用户覆盖仍生效。
+仓库可用 `osdk run go-proxy-powershell`（需 pwsh7）实跑 StrictMode 的 env/exec→hook→恢复；Linux pwsh 不等同原生 Windows，Windows 同场景包含在 windows-smoke。Fish 回归在解释器存在时执行，CI Linux 安装 Fish。
+
+命名UV_INDEX覆盖同名uv配置索引，旧地址从查版本和安装候选中移除；不同名索引保持顺序。
+
+one-sdk Linux 工作树的真实源回归通过 `osdk run pypi-native-install -- --python /path/to/python3 --uv /path/to/uv` 执行，先 build，需 openssl 与真实 uv（CI 固定 0.13.1）。自定义构建目录另传 `--osdk`，可传 `--report` 保存请求/产物证据；独立 CI job 使用同一命名任务。

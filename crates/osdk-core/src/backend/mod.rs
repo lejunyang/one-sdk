@@ -27,6 +27,7 @@ pub mod dynamic;
 pub mod github;
 mod github_asset;
 pub mod go;
+pub(crate) mod go_env;
 #[cfg(test)]
 mod go_module_proxy_tests;
 pub mod go_package;
@@ -40,6 +41,8 @@ pub mod npm_cli;
 pub mod npm_package;
 pub mod pnpm;
 pub mod pypi;
+#[cfg(feature = "install")]
+mod pypi_native;
 pub mod python;
 mod python_catalog;
 mod python_releases;
@@ -171,6 +174,13 @@ pub trait Backend: Send + Sync {
     #[cfg(feature = "install")]
     /// Backend-specific install transaction; call `install` to apply policy.
     async fn install_inner(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()>;
+
+    /// Check request policy before an install can be satisfied from disk
+    /// without running the backend's version resolver.
+    #[cfg(feature = "install")]
+    fn validate_install_reuse(&self, _ctx: &Ctx, _req: &ToolRequest) -> Result<()> {
+        Ok(())
+    }
 
     /// Take the tool versions this backend installed on its own behalf during
     /// the most recent [`Backend::install`], clearing the record.

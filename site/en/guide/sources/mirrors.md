@@ -52,7 +52,7 @@ The ranking rules in this section describe SDK/artifact source selection. Projec
 
 Every toolchain has its own way to point at a mirror through the environment:
 rustup reads `RUSTUP_DIST_SERVER` (and `RUSTUP_UPDATE_ROOT`), the go command
-reads `GOPROXY`, and the npm family reads `npm_config_registry`,
+uses native module settings directly, and the npm family reads `npm_config_registry`,
 `pnpm_config_registry`, `YARN_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`,
 `BUN_CONFIG_REGISTRY`, and friends.
 
@@ -66,9 +66,9 @@ of obeying it unconditionally:
 - when validation passes the value joins the probe as a candidate with the id
   `env`, visible in `osdk source list <tool>`; if it matches a built-in mirror's
   endpoint it is not listed twice;
-- `GOPROXY` values such as `off`, `direct`, and comma- or pipe-separated
-  fallback lists are legitimate go settings but are not a single probeable
-  mirror, so they are skipped with an explanation.
+
+Go native module settings are used as policy, including `off`, `direct` and
+comma- or pipe-separated proxy chains. See [Go tools](../tools/go#proxy-selection).
 
 To obey the environment unconditionally — for example a corporate mirror that
 must be used even when it is slower — pass `--source-mode env`. In that mode a
@@ -165,9 +165,9 @@ Delegated installers cannot all be handled by blindly rerunning a failed command
 because an install script may already have produced side effects. osdk therefore
 fails over at safe, ecosystem-specific boundaries: Rust reruns the complete rustup
 download operation per source; Cargo checks the exact crate version's `config.json`
-download endpoint before committing to a sparse index; `pypi:` probes the requested
-project page rather than a fixed `pip` page and passes the selected index to uv/pip;
-and `go:` supplies one native `GOPROXY` chain joined with `|`. Ordinary project
+download endpoint before committing to a sparse index. With no native source,
+`pypi:` probes the requested project page and passes the selected index to uv/pip,
+and `go:` supplies a ranked `GOPROXY` chain joined with `|`. Ordinary project
 npm/uv/pip commands still execute once and are not blindly replayed after a possible
 lifecycle script. Online metadata access may use stale cache after a request failure;
 strict offline mode only reads existing cache, while still re-verifying and unpacking

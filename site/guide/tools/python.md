@@ -170,7 +170,7 @@ urls = ["https://pypi.tuna.tsinghua.edu.cn/simple/"]
 **显式配置会被原样使用**，osdk 不会再往里追加自己的内置候选：只列一个索引的人是
 真的只要那一个，擅自补上镜像或上游会把请求发去你没选的地方，也会让纯内网环境失效。
 
-osdk 会用一次匿名探测给候选排序，选最快的可用者。`osdk registry test python` 使用
+没有配置原生源时，osdk 会用一次匿名探测给候选排序，选最快的可用者。`osdk registry test python` 使用
 长期存在的 `pip` 项目作为通用健康检查；实际 `pypi:<project>` 安装则探测所请求项目的
 页面，避免选中“PyPI 可访问但尚未同步这个项目”的镜像。两种探测都不只看 HTTP 200，
 还会校验响应形态（PEP 503 的 anchor 或 PEP 691 的 `files` 数组），所以一个返回 200
@@ -192,31 +192,17 @@ osdk 会用一次匿名探测给候选排序，选最快的可用者。`osdk reg
 http），原因是索引是制品哈希的来源：可降级的传输会让攻击者既改制品、又改本该
 发现改动的那个哈希。
 
-pip 路径还会额外固定 `PIP_CONFIG_FILE`。uv 设计上不读 `pip.conf`，pip 会读，所以
-你系统里遗留的 `pip.conf`（比如指向一个不受信任的索引）本来能悄悄覆盖上面所有
-设置。
+### 私有索引
 
-### 私有索引与凭据
+独立的 `pypi:<project>` 工具使用同一个原生索引查版本和安装。osdk 读取 pip 的
+`PIP_INDEX_URL` 和 `pip.conf` / `pip.ini`，包括 `PIP_CONFIG_FILE` 指定的文件。
+也会读取 uv 的索引环境变量及用户、系统或显式配置文件；全局工具不读取当前项目的 uv 配置。
+explicit 索引不参与全局工具安装。追加索引保留顺序与默认 PyPI，显式 default 才替换默认源。
+两种安装器都配置了源时，优先用本次选中的安装器的源。
 
-如果你已经为私有索引配置了凭据，osdk 会**退出索引规划**，把配置权完整交回给
-uv / pip：
-
-```
-$ osdk registry test
-python:
-  pass-through: index credentials are configured by environment variable UV_INDEX_INTERNAL_USERNAME
-```
-
-识别依据包括 `UV_INDEX_<名字>_USERNAME` / `_PASSWORD`、`UV_KEYRING_PROVIDER`、
-`PIP_INDEX_URL`、`PIP_KEYRING_PROVIDER`，以及 `~/.netrc`（Windows 上 `_netrc`）、
-`pip.conf` / `pip.ini`、`uv.toml` 等凭据文件。
-
-这样做不是「支持私有索引」，而是**不去干扰它**。osdk 把镜像映射为默认索引，而它
-无从知道哪些包本该来自你的私有索引——一旦映射，那些查询就会被送到公共镜像，正是
-上面那条 danger 要避免的依赖混淆形状。让开，凭据才能继续正常工作。
-
-注意 `UV_INDEX_URL`、`UV_INDEX`、`UV_DEFAULT_INDEX` **不算**凭据——它们配置的是
-索引地址而非身份，所以你照常可以用镜像。
+查版本只向配置的索引发匿名请求。无法确定单个可用索引，或索引要求认证才能列出版本时，
+查版本会报错。要使用 osdk 的镜像，先清除原生源设置，再配置
+`[registries.python].urls`。使用原生索引时，pip 继续读取自己的配置。
 
 ## 解释器
 
@@ -265,3 +251,15 @@ osdk 只暴露工具**自己的**命令。环境里的 `python`、`pip`、`activ
 ## 原生 pip、pipx 与 uv tool
 
 裸 pip 安装仍属于对应解释器/virtualenv。pipx、uv tool 环境也可能依赖特定 Python 安装；它们不会跨版本共享 site-packages，也不会在切换 Python 时自动迁移。删除解释器前应保留它或重建原生工具环境，详见[原生全局安装边界](./package-managers#native-global-boundaries)。
+
+未配置原生索引时，`.netrc`、`NETRC` 或 keyring 凭据不影响默认镜像选择。仍可通过 `osdk config set registries.python.urls URL` 指定源。
+
+UV_OFFLINE、UV_ENV_FILE、UV_FIND_LINKS、UV_NO_INDEX 不属于索引地址，不阻断 pypi 源发现；uv 安装器仍按自己的运行设置执行。UV_INDEX 支持 name=https://index.example/simple/。
+
+保留自己的原生配置又要使用 osdk 源时，设置 `[settings.precedence] python = "osdk"` 与 `[registries.python].urls`。查询和安装只使用选中的 osdk 索引，忽略继承的 pip/uv 追加索引；无需删除全局配置。非源运行变量仍由安装器处理。
+
+PIP_EXTRA_INDEX_URL="" 取消 pip 配置文件的额外索引。macOS 用户配置在 Library/Application Support 存在时从其 pip/pip.conf 读取。
+
+原生 uv 配置有追加索引时，必须有受管 uv。pip 会合并各索引候选，无法保持 uv first-index，osdk 因而在查询或安装前报错。可先 `osdk install pypi:uv`，或设置 registries.python.urls 与 python=osdk 改用 osdk 单源策略。单个默认索引仍可由 pip 执行。
+
+UV_INDEX 的 name=URL 会覆盖用户/系统文件中同名索引；旧地址不再参与查询或安装。不同名称保持声明顺序；同名覆盖先完成，再处理 default/explicit 属性。

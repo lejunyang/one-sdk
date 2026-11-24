@@ -13,10 +13,145 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
 import zipfile
+
+
+def pypi_uv_merged_indexes(osdk, uv):
+    """The root wheel is in project index A, and its dependency is only in user index B."""
+    osdk, uv = Path(osdk).resolve(), Path(uv).resolve()
+    with tempfile.TemporaryDirectory(prefix='osdk-pypi-uv-') as temporary:
+        root = Path(temporary)
+        project = root / 'project'
+        user_uv = root / 'user/uv'
+        for directory in (project, user_uv, root / 'home', root / 'system/uv'):
+            directory.mkdir(parents=True)
+        (project / 'osdk.toml').touch()
+        (root / 'system/uv/uv.toml').touch()
+        interpreter = Path(sys.executable).resolve()
+        version = '.'.join(map(str, sys.version_info[:3]))
+        python_root = root / 'installs/python' / version
+        python_bin = python_root / ('python.exe' if os.name == 'nt' else 'bin/python3')
+        python_bin.parent.mkdir(parents=True)
+        python_bin.symlink_to(interpreter)
+        (python_root / '.osdk-complete').touch()
+
+        calls = root / 'uv-calls'
+        packages = {}
+
+        def wheel(index, name, files, requires=''):
+            filename = f'{name.replace("-", "_")}-1.0.0-py3-none-any.whl'
+            metadata = filename.split('-py3-')[0] + '.dist-info/'
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                archive.writestr(metadata + 'METADATA', f'Metadata-Version: 2.1\nName: {name}\nVersion: 1.0.0\n{requires}\n')
+                archive.writestr(metadata + 'WHEEL', 'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
+                archive.writestr(metadata + 'RECORD', '')
+                for path, content in files.items():
+                    archive.writestr(path.replace('DIST-INFO/', metadata), content)
+            packages[f'/{index}/simple/{name}/'] = ('text/html', f'<a href="{filename}">{filename}</a>'.encode())
+            packages[f'/{index}/simple/{name}/{filename}'] = ('application/octet-stream', buffer.getvalue())
+
+        wheel('bootstrap', 'uv', {
+            'DIST-INFO/entry_points.txt': '[console_scripts]\nuv = uv_launcher:main\n',
+            'uv_launcher.py': f'''import os, sys
+def main():
+    with open({str(calls)!r}, "a") as log:
+        log.write(sys.argv[1] + "\\n")
+    os.execv({str(uv)!r}, [{str(uv)!r}, *sys.argv[1:]])
+''',
+        })
+        wheel('a', 'layered-tool', {'layered_tool.py': ''}, 'Requires-Dist: user-dep==1.0.0\n')
+        wheel('a', 'single-tool', {'single_tool.py': ''})
+        wheel('b', 'user-dep', {'user_dep.py': ''})
+        requests = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_CONNECT(self):
+                self.do_GET()
+
+            def do_HEAD(self):
+                self.do_GET()
+
+            def do_GET(self):
+                requests.append((self.path, self.headers.get('Authorization')))
+                package = packages.get(self.path)
+                if package is None:
+                    self.send_error(404)
+                    return
+                content_type, body = package
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if self.command != 'HEAD':
+                    self.wfile.write(body)
+
+        with http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+            base = f'http://127.0.0.1:{server.server_port}'
+            env = {key: os.environ[key] for key in ('SYSTEMROOT', 'WINDIR') if key in os.environ}
+            for name, directory in {
+                'HOME': 'home', 'USERPROFILE': 'home', 'APPDATA': 'user', 'XDG_CONFIG_HOME': 'user',
+                'PROGRAMDATA': 'system', 'XDG_CONFIG_DIRS': 'system', 'OSDK_DATA_DIR': 'data',
+                'OSDK_CONFIG_DIR': 'config', 'OSDK_CACHE_DIR': 'cache', 'OSDK_STORE_DIR': 'store',
+                'OSDK_INSTALL_DIR': 'installs', 'UV_CACHE_DIR': 'native-uv-cache',
+            }.items():
+                env[name] = str(root / directory)
+            env.update(HTTP_PROXY=base, HTTPS_PROXY=base, NO_PROXY='127.0.0.1', UV_PYTHON_DOWNLOADS='never')
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def run(*command, **overrides):
+                    return subprocess.run(command, cwd=project, env=env | overrides,
+                                          capture_output=True, text=True, timeout=30)
+
+                bootstrap = run(osdk, 'install', 'pypi:uv@1.0.0',
+                                PIP_INDEX_URL=base + '/bootstrap/simple/', PIP_CONFIG_FILE=os.devnull)
+                assert bootstrap.returncode == 0, bootstrap.stderr
+                a = base + '/a/simple/'
+                b = base + '/b/simple/'
+                (project / 'uv.toml').write_text(f'extra-index-url = ["{a}"]\n')
+                (user_uv / 'uv.toml').write_text(f'extra-index-url = ["{b}"]\n')
+                control = root / 'control-venv'
+                created = run(uv, 'venv', '--python', interpreter, control)
+                assert created.returncode == 0, created.stderr
+                control_python = control / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+                requests.clear()
+                positive = run(uv, 'pip', 'install', '--python', control_python, 'layered-tool==1.0.0', UV_DEFAULT_INDEX=a)
+                assert positive.returncode == 0, positive.stderr
+                imported = run(control_python, '-c', 'import layered_tool, user_dep')
+                assert imported.returncode == 0, imported.stderr
+                assert any(path.startswith('/b/simple/user-dep/user_dep-') for path, _ in requests), requests
+                assert all(path.startswith(('/a/', '/b/')) and auth is None for path, auth in requests), requests
+                print('PASS: real uv downloads the dependency that exists only in user index B')
+
+                calls.touch()
+                for command in [('list-remote', 'pypi:layered-tool'), ('install', 'pypi:layered-tool@1.0.0')]:
+                    requests.clear()
+                    calls.write_text('')
+                    result = run(osdk, *command)
+                    assert result.returncode != 0 and 'uv configures multiple indexes' in result.stderr, (command, result)
+                    assert not requests, requests
+                    assert set(calls.read_text().splitlines()) == {'--version'}, calls.read_text()
+                print('PASS: osdk rejects both version lookup and exact install before network or installer work')
+                (user_uv / 'uv.toml').unlink()
+                requests.clear()
+                calls.write_text('')
+                single = run(osdk, 'install', 'pypi:single-tool')
+                assert single.returncode == 0, single.stderr
+                assert 'venv' in calls.read_text().splitlines() and 'pip' in calls.read_text().splitlines()
+                assert any(path.startswith('/a/simple/single-tool/single_tool-') for path, _ in requests), requests
+                assert all(path.startswith('/a/') and auth is None for path, auth in requests), requests
+                print('PASS: a single project index still serves version lookup and real uv installation')
+            finally:
+                server.shutdown()
+                thread.join()
 
 
 def main():
@@ -25,7 +160,13 @@ def main():
         parser.add_argument('--' + manager, default=shutil.which(manager))
     parser.add_argument('--yarn-classic')
     parser.add_argument('--yarn-berry')
+    parser.add_argument('--osdk', help='run the standalone pypi/uv check only (also needs uv and venv-capable Python)')
     args = parser.parse_args()
+    if args.osdk:
+        if not args.uv:
+            parser.error('the standalone pypi check requires --uv or uv on PATH')
+        pypi_uv_merged_indexes(args.osdk, args.uv)
+        return
     if not all(getattr(args, name) for name in ('npm', 'pnpm', 'bun', 'uv')):
         parser.error('npm, pnpm, bun and uv are required on PATH or through explicit paths')
     with tempfile.TemporaryDirectory(prefix='osdk-native-sources-') as tmp:

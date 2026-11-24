@@ -120,7 +120,7 @@ impl IndexPlan {
 /// Order follows `native_home_directories` in `package_registry.rs`: on Windows
 /// `USERPROFILE` first, elsewhere `HOME` first. Both are checked either way
 /// because Git Bash and MSYS set `HOME` on Windows too.
-fn home_directory() -> Option<PathBuf> {
+pub(crate) fn home_directory() -> Option<PathBuf> {
     let names = if cfg!(windows) {
         ["USERPROFILE", "HOME"]
     } else {
@@ -322,6 +322,18 @@ pub async fn list_versions(
     Ok(versions)
 }
 
+/// A native index lookup is anonymous and stays on the configured origin.
+pub(crate) async fn list_native_versions(
+    base: &str,
+    project: &str,
+) -> crate::error::Result<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .redirect(index_probe_redirect_policy())
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    list_versions(&client, base, project, false).await
+}
+
 /// Read versions from a PEP 691 JSON listing.
 ///
 /// Prefers the `versions` key (PEP 700) and falls back to deriving them from
@@ -431,6 +443,15 @@ pub async fn plan(candidates: &[String], timeout_ms: u64) -> IndexPlan {
 /// project entirely, so dynamic `pypi:` installs use this target-aware form.
 pub async fn plan_for_project(candidates: &[String], timeout_ms: u64, project: &str) -> IndexPlan {
     plan_for_probe_project(candidates, timeout_ms, project).await
+}
+
+pub(crate) async fn rank_project_indexes(
+    candidates: &[String],
+    timeout_ms: u64,
+    project: &str,
+) -> IndexPlan {
+    // The pypi backend has already resolved native configuration for its installer.
+    plan_for_probe_project_with_credentials(candidates, timeout_ms, project, None).await
 }
 
 async fn plan_for_probe_project(

@@ -544,6 +544,8 @@ gopls version
 root 与精确 Go runtime，不记录传递 module graph；因此可离线复用精确匹配的完整安装，
 但不能进行全新离线构建。
 
+在线运行 `osdk install` 时，即使 Go 工具已经安装，也会核对当前代理及私有模块设置是否与锁文件一致。
+
 Go 工具安装保留 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`（含小写形式）。
 
 指南：[Go 开发工具](site/guide/tools/go.md)
@@ -819,7 +821,7 @@ Last-Modified，通过 `Range` + `If-Range` 断点续传；服务端忽略或返
 存在后才会被选中；任一步失败都会继续下一个排序来源，receipt 记录真正通过验证的来源。
 模型在某个来源耗尽尝试后同样会继续下一个排序来源；所有来源都耗尽后才终止。
 
-委托型生态只在原生解析器执行前或内部回退：Cargo 选定 sparse index 前检查精确 crate 下载端点，`pypi:` 探测实际项目并把结果传给 uv/pip，全新 `go:` 安装则收到以 `|` 连接的 GOPROXY 链。项目包管理器命令仍只执行一次，因为 lifecycle script 运行后盲目重放可能产生重复副作用。
+pip 或 uv 已配置单一索引时，`pypi:` 用它查版本和安装。全局工具忽略项目 uv 配置；uv 追加索引保留默认 PyPI，并要求 uv 保持 first-index 选择语义。没有配置原生索引时，可以通过 `[registries.python].urls` 指定 osdk 可用的镜像。设置 `[settings.precedence] python = "osdk"` 后，查询和安装统一使用选中的 osdk 索引，忽略原生追加索引。`go:` 安装和受管 `go` 命令会保留 Go 原生模块代理与私有模块设置，包括用 `go env -w` 保存的值和激活后为单条命令指定的 `GOPROXY`。查私有工具版本时，只在 Go 的免代理范围内尝试父模块路径。Go 锁保留模块与精确版本，团队成员和 CI 可使用不同的本机代理设置回放。
 
 环境变量里已经设置的镜像（`RUSTUP_DIST_SERVER`、`GOPROXY`、`npm_config_registry`
 等）会先经过校验，再与 osdk 内置镜像一起参与测速竞争，因此过期或不可用的值不会

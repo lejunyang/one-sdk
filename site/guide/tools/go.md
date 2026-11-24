@@ -85,7 +85,18 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 以便沿用 osdk 元数据请求的网络路径。这些传输设置不会替换选中的 `GOPROXY`
 模块来源，也不会取消构建环境隔离。
 
-内置候选为 `https://proxy.golang.org` 与 `https://goproxy.cn`。它们遵循通用的 `auto`、
+可以在环境变量里设置 `GOPROXY`、`GOPRIVATE` 或 `GONOPROXY`，也可以用
+`go env -w` 保存这些设置。`go:` 会沿用它们查版本和安装，保留代理链的顺序、
+逗号或竖线以及 `direct`、`off`。仅配置私有规则时，只对匹配模块直连；公开工具仍走默认代理链。
+公开模块查版本不要求预先安装 Go。代理 URL 不得内嵌凭据。用原生源列出或锁定版本前，先安装受管 Go
+运行时。锁记录模块和精确版本，不绑定本机源策略；修改 GOPROXY/GOPRIVATE 无需重新锁定。
+已有且精确匹配的完整安装仍可离线复用。激活后仍可用 `GOPROXY=off go list -m`
+或 `GOPROXY=https://proxy.example,direct osdk list-remote go:example.com/tool`
+为单条命令指定代理策略。命令路径匹配生效的 `GONOPROXY` 规则时，查版本也只在规则
+覆盖范围内尝试父模块。Go 默认使用 `GOPRIVATE` 作为 `GONOPROXY`，显式设置
+`GONOPROXY=none` 则允许使用用户配置的代理。
+
+未配置原生 Go 源时，内置候选为 `https://proxy.golang.org` 与 `https://goproxy.cn`。它们遵循通用的 `auto`、
 `ordered` 和 pin 来源策略；auto 会先探测并缓存排序，再解析 metadata。精确版本仍通过
 选中 proxy 的 `.info` endpoint 验证。
 
@@ -101,7 +112,7 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 `go test`）拉取依赖是另一条通道：`[sources.go]` 只决定 Go 工具链归档的下载来源，
 模块下载由 go 命令自己按 `GOPROXY` 进行，因此镜像归档并不会让模块也走镜像。
 
-受管 go 的 `exec_env` 会注入一份排好序的 `GOPROXY`，候选集在配置里用 `go-modules`
+没有原生源策略时，受管 go 会收到一份排好序的 `GOPROXY`，候选集在配置里用 `go-modules`
 这个独立名字管理（默认为 `proxy.golang.org`、`goproxy.cn`、`mirrors.aliyun.com/goproxy`，
 末尾追加 `direct`）。这里只做配置层排序、不做网络探测：这段代码在 shim 里每次命令
 调用都会执行，一次探测往返会直接计入交互延迟；实时测速仍留在安装路径。
@@ -110,7 +121,7 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 下一个，连接超时被视为终止错误，于是首个不可达的 proxy 就会让整条链失效 —— 而这
 恰好是需要镜像的场景。逗号带来的 gatekeeper 语义（私有 proxy 返回 403 时停止查找，
 避免把 module path 泄漏给下一个来源）在这里不适用，因为这组候选全是同一批公开模块
-的公开镜像。用户自己设过 `GOPROXY`（含 `off`、`direct`）时不会被覆盖。
+的公开镜像。受管 Go 会保留进程环境和 Go 环境文件中的代理与私有模块设置。
 
 `go-modules` 不是 backend，因此进不了 registry；但它和 `self`（osdk 自身的发布下载）
 一样携带 per-tool source 配置，所以 `canonical_source_tool` 显式放行它，`osdk source`
@@ -125,6 +136,11 @@ pin 在这里需要额外处理。通用路径是在探测之后再应用 pin，
 本身是回退列表：pin 表达「优先尝试」，丢掉其余会让单点不可达直接变成构建失败。
 
 ## 隔离与激活
+
+one-sdk 仓库通过真实 Fish 与 PowerShell 7 测试 `env`/`exec` → 首次和重复 `hook-env`
+→ `deactivate`，包括用户覆盖与 unset。PowerShell 开启 `Set-StrictMode -Version Latest`。
+本地可执行 `osdk run go-proxy-powershell`；需 PowerShell 7，Linux 运行不代表原生 Windows。
+同一场景也纳入 `osdk run windows-smoke` 的原生 Windows 矩阵。
 
 osdk 在清空的环境中无 shell 执行一次 `go install <command>@v<version>`。它强制使用选中的
 受管 `GOROOT`、分阶段 `GOBIN`、私有 home/GOPATH/temp、osdk 控制的共享 module/build cache、
@@ -177,3 +193,11 @@ osdk reshim
 
 runtime 身份、stage、provider 和 lock schema 的细节见
 [Go 开发工具实现](../../internals/go-tools)。
+
+osdk 导出的代理链在 `env`、direnv/CI 环境和 exec/run/shim 子进程中带来源标记。嵌套运行 osdk 不会把该值当成用户原生 GOPROXY；显式命令级覆盖仍优先。
+
+设置 `[settings.precedence] go = "osdk"` 可显式选择 osdk 源而不删除原生配置。工具源用 `[sources."go:<module>"]`，受管 Go 命令用 `[sources."go-modules"]`。
+
+GOENV 文件不可读或指向目录时会警告并忽略，环境里的有效源设置仍生效；修正文件路径或设置 GOENV=off。
+
+在 osdk env/exec 的代理导出后首次启用 hook，会保留其 osdk 来源；deactivate 恢复到未设置。用户自行覆盖或 unset 的 GOPROXY 仍保持用户操作结果。

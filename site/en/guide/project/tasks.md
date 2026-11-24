@@ -5,6 +5,22 @@ Declare project commands under `[tasks]` in `osdk.toml` and run them with
 used for: tasks are phony by default so there is no `.PHONY`, prerequisites run
 in topological order, and osdk injects the tool versions the project declared.
 
+## Repository PyPI source integration check
+
+In a Linux one-sdk checkout, `osdk task list` exposes `pypi-native-install`. It runs
+`build` first, then real pip/uv installations against isolated loopback TLS indexes.
+It requires openssl, Python with venv/pip, and real uv (CI pins 0.13.1), without
+installing anything into the user's SDK state.
+
+```sh
+osdk run pypi-native-install -- --python /path/to/python3 --uv /path/to/uv
+```
+
+For a custom `CARGO_TARGET_DIR`, also pass `--osdk /path/to/current/debug/osdk`.
+`--report /path/to/result.json` saves request counts and artifact evidence. A dedicated
+Linux CI job runs the task; the generic `ci` task does not silently skip it when its
+prerequisites are unavailable.
+
 ## The simplest form
 
 ```toml

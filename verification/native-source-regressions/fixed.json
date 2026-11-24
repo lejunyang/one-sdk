@@ -1,0 +1,82 @@
+{
+  "binary": "/data00/home/lejunyang/.omem/workspaces/one-sdk/3/target/qa/build/debug/osdk",
+  "results": [
+    {
+      "name": "pypi_netrc",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "installing pypi:fixture@1.2.3 ...\ninstalled pypi:fixture@1.2.3\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\n"
+    },
+    {
+      "name": "pypi_project_uv",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "installing pypi:fixture@1.2.3 ...\ninstalled pypi:fixture@1.2.3\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\n"
+    },
+    {
+      "name": "pypi_uv_vars",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "installing pypi:fixture@1.2.3 ...\ninstalled pypi:fixture@1.2.3\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\n"
+    },
+    {
+      "name": "pypi_uv_extra",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "installing pypi:fixture@1.2.3 ...\ninstalled pypi:fixture@1.2.3\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\n"
+    },
+    {
+      "name": "pypi_uv_named",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "installing pypi:fixture@1.2.3 ...\ninstalled pypi:fixture@1.2.3\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\n"
+    },
+    {
+      "name": "pypi_pip_empty",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "installing pypi:fixture@1.2.3 ...\ninstalled pypi:fixture@1.2.3\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\n"
+    },
+    {
+      "name": "pypi_precedence",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "installing pypi:fixture@1.2.3 ...\ninstalled pypi:fixture@1.2.3\n",
+      "stderr": "osdk: uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy.\n"
+    },
+    {
+      "name": "go_public_privacy_no_runtime",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "1.2.3\n",
+      "stderr": ""
+    },
+    {
+      "name": "go_locked_proxy_different_native",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "go@1.24.0 already installed\ninstalling go:example.com/tool@1.2.3 ...\ninstalled go:example.com/tool@1.2.3\n",
+      "stderr": ""
+    },
+    {
+      "name": "go_env_nested_lookup",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "name": "go_unreadable_goenv",
+      "passed": true,
+      "exit_code": 0,
+      "stdout": "go-env-ok\n",
+      "stderr": "\u001b[33m WARN\u001b[0m ignoring unreadable GOENV; fix its path or use GOENV=off \u001b[3mpath\u001b[0m\u001b[2m=\u001b[0m/tmp/osdk-source-regression-hqexzh2k/home \u001b[3merror\u001b[0m\u001b[2m=\u001b[0mIs a directory (os error 21)\n"
+    }
+  ]
+}

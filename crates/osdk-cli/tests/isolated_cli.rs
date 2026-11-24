@@ -126,6 +126,12 @@ fn run_isolated_in_with_env(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Output {
+    let mut command = isolated_command(root, cwd, &osdk());
+    command.args(args).envs(env.iter().copied());
+    run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT)
+}
+
+fn isolated_command(root: &Path, cwd: &Path, program: &Path) -> Command {
     let home = root.join("home");
     let data = root.join("data");
     let cache = root.join("cache");
@@ -134,9 +140,8 @@ fn run_isolated_in_with_env(
     let installs = root.join("installs");
     std::fs::create_dir_all(&home).unwrap();
 
-    let mut command = Command::new(osdk());
+    let mut command = Command::new(program);
     command
-        .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", &home)
@@ -147,10 +152,7 @@ fn run_isolated_in_with_env(
         .env("OSDK_CONFIG_DIR", &config)
         .env("OSDK_STORE_DIR", &store)
         .env("OSDK_INSTALL_DIR", &installs);
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT)
+    command
 }
 
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
@@ -4077,6 +4079,686 @@ fn install_without_arguments_consumes_matching_platform_lock() {
 
 #[cfg(unix)]
 #[test]
+fn pypi_credentials_without_index_do_not_block_managed_install() {
+    for credential in [
+        "netrc",
+        "NETRC",
+        "PIP_KEYRING_PROVIDER",
+        "UV_KEYRING_PROVIDER",
+        "UV_INDEX_INTERNAL_USERNAME",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::create_dir(root.join("home")).unwrap();
+        std::fs::write(
+            root.join("osdk.toml"),
+            "[registries.python]\nurls = [\"https://127.0.0.1:1/simple/\"]\n",
+        )
+        .unwrap();
+        let python = root.join("installs/python/3.12.0");
+        write_executable(&python.join("bin/python3"), "#!/bin/sh\nexit 0\n");
+        std::fs::write(python.join(".osdk-complete"), "").unwrap();
+        let netrc = root.join("home/.netrc");
+        std::fs::write(&netrc, "machine github.com login fixture\n").unwrap();
+        let value = if credential == "NETRC" {
+            netrc.to_str().unwrap()
+        } else {
+            "auto"
+        };
+        let mut env = if credential == "netrc" {
+            vec![]
+        } else {
+            vec![(credential, value)]
+        };
+        env.push(("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()));
+        let output = run_isolated_in_with_env(root, root, &["install", "pypi:fixture@1.2.3"], &env);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("no configured Python index is reachable"),
+            "{credential}: {output:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pypi_private_pip_index_serves_latest_and_reaches_installer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let index = format!("http://{}/simple/", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_fixture_connection(&listener, "native Python index");
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.ends_with(b"\r\n\r\n") {
+            let read = stream.read(&mut buf).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buf[..read]);
+        }
+        let request = String::from_utf8(request).unwrap();
+        assert!(
+            request.starts_with("GET /simple/private-fixture/ "),
+            "{request}"
+        );
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        let body = r#"<a href="private_fixture-9.8.7-py3-none-any.whl">private_fixture-9.8.7-py3-none-any.whl</a>"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+
+    // A closed osdk-managed index would make this fail if the native one
+    // were treated as a hint rather than used for both steps.
+    std::fs::create_dir(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/config.toml"),
+        "[registries.python]\nurls = [\"https://127.0.0.1:1/simple/\"]\n",
+    )
+    .unwrap();
+    let pip_config = root.join("native-pip.conf");
+    std::fs::write(&pip_config, format!("[install]\nindex-url = {index}\n")).unwrap();
+    let python = root.join("installs/python/3.12.0");
+    write_executable(
+        &python.join("bin/python3"),
+        r#"#!/bin/sh
+[ "$1 $2" = "-m venv" ] || exit 10
+/bin/mkdir -p "$3/bin"
+/bin/cat > "$3/bin/python" <<'EOF'
+#!/bin/sh
+[ "$PIP_INDEX_URL" = "$FIXTURE_INDEX" ] || exit 11
+[ "$PIP_CONFIG_FILE" = "$FIXTURE_PIP_CONFIG" ] || exit 12
+[ "$*" = "-m pip install --only-binary=:all: private-fixture==9.8.7" ] || exit 13
+/bin/cp "$0" "${0%/*}/private-fixture"
+EOF
+/bin/chmod +x "$3/bin/python"
+"#,
+    );
+    std::fs::write(python.join(".osdk-complete"), "").unwrap();
+    let pip_path = pip_config.to_str().unwrap();
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["install", "pypi:private-fixture"],
+        &[
+            ("PIP_CONFIG_FILE", pip_path),
+            ("FIXTURE_PIP_CONFIG", pip_path),
+            ("FIXTURE_INDEX", &index),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    assert!(root.join("installs/pypi/private-fixture/9.8.7").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn public_go_lookup_with_only_privacy_needs_no_runtime() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    std::fs::write(root.join("osdk.toml"), format!("[sources]\nselection = \"ordered\"\n[[sources.\"go:example.com/tool\".custom]]\nid = \"fixture\"\nkind = \"custom\"\ndownload_url = {endpoint:?}\n")).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_fixture_connection(&listener, "public Go module");
+        let mut request = [0; 2048];
+        let n = stream.read(&mut request).unwrap();
+        assert!(
+            String::from_utf8_lossy(&request[..n]).starts_with("GET /example.com/tool/@v/list ")
+        );
+        let body = "v1.2.3\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["list-remote", "go:example.com/tool"],
+        &[
+            ("GOPRIVATE", "private.example"),
+            ("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.2.3");
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn env_exports_identify_managed_go_proxy_for_nested_lookup() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[tools]\ngo = \"1.24.0\"\n").unwrap();
+    let runtime = root.join("installs/go/1.24.0");
+    write_executable(
+        &runtime.join("bin/go"),
+        "#!/bin/sh\nprintf '%s' \"${OSDK_APPLIED_GOPROXY:-missing}\"\n",
+    );
+    complete_go_fixture(&runtime);
+    let mut command = isolated_command(root, root, Path::new("/bin/bash"));
+    command
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"set -eu
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+[ "$OSDK_APPLIED_GOPROXY" = "$GOPROXY" ]
+[ "$("$OSDK_TEST_BIN" exec -- go env GOPROXY)" = "$GOPROXY" ]
+"#,
+        ])
+        .env("OSDK_TEST_BIN", osdk());
+    let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn first_hook_after_env_or_exec_keeps_go_proxy_origin_and_restores_absence() {
+    for entry in ["env", "exec"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        std::fs::write(root.join("osdk.toml"), format!("[tools]\ngo=\"1.24.0\"\n[sources]\nselection=\"ordered\"\n[[sources.\"go:example.com/tool\".custom]]\nid=\"fixture\"\nkind=\"custom\"\ndownload_url={endpoint:?}\n")).unwrap();
+        let runtime = root.join("installs/go/1.24.0");
+        write_executable(&runtime.join("bin/go"), "#!/bin/sh\nexit 42\n");
+        complete_go_fixture(&runtime);
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let mut stream = accept_fixture_connection(&listener, "first hook Go proxy");
+                let mut buf = [0; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let body = if request.starts_with("GET /example.com/tool/@v/list ") {
+                    "v1.2.3\n"
+                } else {
+                    assert!(
+                        request.starts_with("GET /example.com/tool/@v/v1.2.3.info "),
+                        "{request}"
+                    );
+                    r#"{"Version":"v1.2.3","Time":"2026-01-01T00:00:00Z"}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let script = r#"set -eu
+if [ "$ENTRY" = env ]; then eval "$("$OSDK_TEST_BIN" env --format bash)"; fi
+[ -z "${OSDK_ORIG_GOPROXY_SET+x}" ]
+[ "$GOPROXY" = "$OSDK_APPLIED_GOPROXY" ]
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+[ "$OSDK_ORIG_GOPROXY_PRESENT" = 0 ]
+[ "$("$OSDK_TEST_BIN" list-remote go:example.com/tool)" = 1.2.3 ]
+"$OSDK_TEST_BIN" lock go:example.com/tool@1.2.3
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ -z "${GOPROXY+x}" ] && [ -z "${OSDK_APPLIED_GOPROXY+x}" ]
+[ -z "${OSDK_ORIG_GOPROXY_SET+x}" ]
+# A user override before the first hook remains the user's value.
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+export GOPROXY=http://127.0.0.1:1,user
+_hook=$("$OSDK_TEST_BIN" hook-env --shell bash)
+eval "$_hook"
+[ "$GOPROXY" = http://127.0.0.1:1,user ]
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ "$GOPROXY" = http://127.0.0.1:1,user ]
+unset GOPROXY
+# A later override or unset must not be restored from an old snapshot.
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+export GOPROXY=off
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ "$GOPROXY" = off ]
+unset GOPROXY
+eval "$("$OSDK_TEST_BIN" env --format bash)"
+eval "$("$OSDK_TEST_BIN" hook-env --shell bash)"
+unset GOPROXY
+eval "$("$OSDK_TEST_BIN" deactivate bash)"
+[ -z "${GOPROXY+x}" ]
+"#;
+        let mut command = if entry == "exec" {
+            let mut command = isolated_command(root, root, &osdk());
+            command.args([
+                "exec",
+                "--",
+                "/bin/bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                script,
+            ]);
+            command
+        } else {
+            let mut command = isolated_command(root, root, Path::new("/bin/bash"));
+            command.args(["--noprofile", "--norc", "-c", script]);
+            command
+        };
+        command
+            .env("ENTRY", entry)
+            .env("OSDK_TEST_BIN", osdk())
+            .env("GOENV", "off")
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root);
+        let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+        assert!(output.status.success(), "{entry}: {output:?}");
+        server.join().unwrap();
+        let lock = std::fs::read_to_string(root.join("osdk.lock")).unwrap();
+        assert!(lock.contains(&format!("source = {endpoint:?}")), "{lock}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fish_go_proxy_env_and_exec_survive_first_hook_and_deactivation() {
+    let fish = std::env::var_os("OSDK_TEST_FISH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|directory| directory.join("fish"))
+                .find(|candidate| candidate.is_file())
+        });
+    let Some(fish) = fish else {
+        eprintln!("skipping Fish CLI regression: interpreter unavailable");
+        return;
+    };
+    for entry in ["env", "exec"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::write(root.join("osdk.toml"), "[tools]\ngo=\"1.24.0\"\n").unwrap();
+        let runtime = root.join("installs/go/1.24.0");
+        write_executable(&runtime.join("bin/go"), "#!/bin/sh\nexit 42\n");
+        complete_go_fixture(&runtime);
+        let script = r#"
+function apply
+    set -l text ($OSDK_TEST_BIN $argv | string collect)
+    test $pipestatus[1] = 0; or exit 81
+    test -n "$text"; or exit 82
+    eval $text
+end
+if test $ENTRY = env
+    apply env --format fish
+end
+not set -q OSDK_ORIG_GOPROXY_SET; or exit 83
+test "$GOPROXY" = "$OSDK_APPLIED_GOPROXY"; or exit 84
+set -l managed "$GOPROXY"
+apply hook-env --shell fish
+test "$OSDK_ORIG_GOPROXY_PRESENT" = 0; or exit 85
+apply hook-env --shell fish
+test "$OSDK_ORIG_GOPROXY_PRESENT" = 0; or exit 85
+test "$GOPROXY" = "$managed"; or exit 86
+apply deactivate fish
+not set -q GOPROXY; or exit 87
+not set -q OSDK_APPLIED_GOPROXY; or exit 88
+apply env --format fish
+set -gx GOPROXY https://user.example,direct
+apply hook-env --shell fish
+apply deactivate fish
+test "$GOPROXY" = https://user.example,direct; or exit 89
+set -e GOPROXY
+apply env --format fish
+apply hook-env --shell fish
+set -gx GOPROXY off
+apply deactivate fish
+test "$GOPROXY" = off; or exit 90
+set -e GOPROXY
+apply env --format fish
+apply hook-env --shell fish
+set -e GOPROXY
+apply deactivate fish
+not set -q GOPROXY; or exit 91
+echo FISH_GO_PROXY_OK
+"#;
+        let mut command = if entry == "exec" {
+            let mut command = isolated_command(root, root, &osdk());
+            command
+                .args(["exec", "--"])
+                .arg(&fish)
+                .args(["--no-config", "-c", script]);
+            command
+        } else {
+            let mut command = isolated_command(root, root, &fish);
+            command.args(["--no-config", "-c", script]);
+            command
+        };
+        command
+            .env("ENTRY", entry)
+            .env("OSDK_TEST_BIN", osdk())
+            .env("GOENV", "off")
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root);
+        let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+        assert!(output.status.success(), "Fish {entry}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("FISH_GO_PROXY_OK"));
+        eprintln!("Fish CLI {entry} first/repeated hook and restoration executed on Linux/Unix");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn osdk_precedence_bypasses_native_go_and_python_sources() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[settings.precedence]\ngo = \"osdk\"\npython = \"osdk\"\n[registries.python]\nurls = [\"https://127.0.0.1:1/simple/\"]\n[sources]\nselection = \"ordered\"\n[[sources.\"go:example.com/tool\".custom]]\nid = \"fixture\"\nkind = \"custom\"\ndownload_url = \"http://127.0.0.1:1\"\n").unwrap();
+    let env = [
+        ("GOPROXY", "off"),
+        (
+            "PIP_INDEX_URL",
+            "https://user:secret@private.example/simple",
+        ),
+        ("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()),
+    ];
+    for tool in ["go:example.com/tool", "pypi:fixture"] {
+        let output = run_isolated_in_with_env(root, root, &["list-remote", tool], &env);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(!error.contains("requires a managed Go runtime"), "{error}");
+        assert!(!error.contains("without credentials"), "{error}");
+        assert!(
+            error.contains("127.0.0.1:1") || error.contains("no configured Python index"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn activated_go_honors_command_proxy_and_off_in_lookup_and_execution() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[tools]\ngo = \"1.24.0\"\n").unwrap();
+    let runtime = root.join("installs/go/1.24.0");
+    let chain = "http://127.0.0.1:1/proxy/,off";
+    write_executable(
+        &runtime.join("bin/go"),
+        &r#"#!/bin/sh
+set -eu
+case "$1" in
+    env) printf '%s\n' "${GOPROXY:-}" ;;
+    list)
+        case "${GOPROXY:-}" in
+            'FIXTURE_CHAIN') version=v1.2.3 ;;
+            off) printf 'module lookup disabled by GOPROXY=off\n' >&2; exit 1 ;;
+            *) version=v9.0.0 ;;
+        esac
+        printf '{"Path":"example.com/acme/tool","Version":"%s","Versions":["%s"]}\n' "$version" "$version"
+        ;;
+    *) exit 2 ;;
+esac
+"#
+        .replace("FIXTURE_CHAIN", chain),
+    );
+    complete_go_fixture(&runtime);
+
+    let mut command = isolated_command(root, root, Path::new("/bin/bash"));
+    command
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"
+set -eu
+eval "$("$OSDK_TEST_BIN" activate bash)"
+case "$GOPROXY" in https://*'|direct') ;; *) exit 10 ;; esac
+[[ "$("$OSDK_TEST_BIN" exec -- go env GOPROXY)" == "$GOPROXY" ]]
+(
+    eval "$("$OSDK_TEST_BIN" deactivate bash)"
+    [[ -z "${GOPROXY+x}" && -z "${OSDK_APPLIED_GOPROXY+x}" ]]
+)
+# An unmodified activation value must defer to a Go env file added later.
+printf 'GOPROXY=off\n' > "$GOENV"
+tool=go:example.com/acme/tool
+result=$(GOPROXY="$FIXTURE_CHAIN" "$OSDK_TEST_BIN" list-remote "$tool")
+[[ "$result" == 1.2.3 ]]
+if result=$(GOPROXY=off "$OSDK_TEST_BIN" list-remote "$tool" 2>&1); then exit 11; fi
+[[ "$result" == *'module lookup disabled by GOPROXY=off'* ]]
+[[ "$(GOPROXY=off "$OSDK_TEST_BIN" exec -- go env GOPROXY)" == off ]]
+[[ "$(GOPROXY="$FIXTURE_CHAIN" "$OSDK_TEST_BIN" exec -- go env GOPROXY)" == "$FIXTURE_CHAIN" ]]
+[[ -z "$("$OSDK_TEST_BIN" exec -- go env GOPROXY)" ]]
+export GOPROXY="$FIXTURE_CHAIN"
+(
+    eval "$("$OSDK_TEST_BIN" deactivate bash)"
+    [[ "$GOPROXY" == "$FIXTURE_CHAIN" && -z "${OSDK_APPLIED_GOPROXY+x}" ]]
+)
+_osdk_hook
+[[ "$GOPROXY" == "$FIXTURE_CHAIN" && -z "${OSDK_APPLIED_GOPROXY+x}" ]]
+"#,
+        ])
+        .env("GOENV", root.join("go.env"))
+        .env("OSDK_TEST_BIN", osdk())
+        .env("FIXTURE_CHAIN", chain);
+    let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+    assert!(
+        output.status.success(),
+        "status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn complete_go_fixture(runtime: &Path) {
+    write_executable(&runtime.join("bin/gofmt"), "#!/bin/sh\nexit 0\n");
+    write_executable(&runtime.join("pkg/tool/compile"), "#!/bin/sh\nexit 0\n");
+    std::fs::create_dir_all(runtime.join("src/runtime")).unwrap();
+    std::fs::write(runtime.join("src/runtime/runtime.go"), "package runtime\n").unwrap();
+    std::fs::write(runtime.join("VERSION"), "go1.24.0\n").unwrap();
+    std::fs::write(runtime.join("go.env"), "GOTOOLCHAIN=local\n").unwrap();
+    std::fs::write(runtime.join(".osdk-complete"), "").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn private_go_lookup_never_retries_a_public_parent() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let runtime = root.join("installs/go/1.24.0");
+    write_executable(
+        &runtime.join("bin/go"),
+        r#"#!/bin/sh
+[ "$1 $2 $3 $4" = "list -m -json -versions" ] || exit 2
+case "$5" in
+    private.example/acme/secret/fail/* | private.example/acme/secret/fail | private.example/acme/secret/found/cli)
+        printf 'private module unavailable\n' >&2; exit 1 ;;
+    private.example/acme/secret/empty/* | private.example/acme/secret/empty | private.example/acme/secret)
+        printf '{"Path":"%s","Versions":[]}\n' "$5" ;;
+    private.example/acme/secret/found)
+        printf '{"Path":"%s","Versions":["v1.2.3"]}\n' "$5" ;;
+    private.example/acme)
+        printf '{"Path":"%s","Versions":["v9.0.0"]}\n' "$5" ;;
+    *) exit 2 ;;
+esac
+"#,
+    );
+    complete_go_fixture(&runtime);
+    let lookup = |package, privacy, no_proxy| {
+        run_isolated_in_with_env(
+            root,
+            root,
+            &[
+                "list-remote",
+                &format!("go:private.example/acme/secret/{package}/cli"),
+            ],
+            &[
+                ("GOPROXY", "http://127.0.0.1:1|off"),
+                ("GOPRIVATE", privacy),
+                ("GONOPROXY", no_proxy),
+            ],
+        )
+    };
+    let privacy = "*.example/acme/secret/";
+    for (pattern, no_proxy) in [("unrelated.example", ""), (privacy, "none")] {
+        let public = lookup("fail", pattern, no_proxy);
+        assert!(public.status.success(), "{public:?}");
+        assert_eq!(String::from_utf8_lossy(&public.stdout).trim(), "9.0.0");
+    }
+    let found = lookup("found", privacy, "");
+    assert!(found.status.success(), "{found:?}");
+    assert_eq!(String::from_utf8_lossy(&found.stdout).trim(), "1.2.3");
+    for (package, reason) in [
+        ("fail", "private module unavailable"),
+        ("empty", "no module versions found"),
+    ] {
+        let private = lookup(package, privacy, "");
+        let error = String::from_utf8_lossy(&private.stderr);
+        assert!(!private.status.success(), "{private:?}");
+        assert!(error.contains(reason), "{error}");
+        assert!(
+            error.contains(
+                "search limited to private module paths under `private.example/acme/secret`"
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn go_native_file_policy_reaches_version_lookup_install_and_shim() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("osdk.toml"), "[tools]\ngo = \"1.24.0\"\n").unwrap();
+    let goenv = root.join("go.env");
+    let chain = "http://127.0.0.1:1/,https://private.example/proxy|direct";
+    std::fs::write(
+        &goenv,
+        format!("GOPROXY={chain}\nGOPRIVATE=private.example\n"),
+    )
+    .unwrap();
+    let runtime = root.join("installs/go/1.24.0");
+    let provider_calls = root.join("go-provider-calls");
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> '{}'
+if [ "$1" = "env" ]; then
+    [ -z "${{GOPROXY:-}}" ] || exit 10
+    [ "$GOENV" = '{}' ] || exit 11
+    printf 'native go env retained\n'
+    exit
+fi
+[ "$GOPROXY" = '{chain}' ] || exit 12
+[ "$GOPRIVATE" = 'private.example' ] || exit 13
+[ "${{GONOPROXY-unset}}" = unset ] || exit 14
+[ "$GOENV" = off ] && [ "$GOAUTH" = off ] || exit 15
+case "$*" in
+    'list -m -json private.example/acme/cli/cmd/cli@latest') exit 1 ;;
+    'list -m -json private.example/acme/cli/cmd@latest') exit 1 ;;
+    'list -m -json private.example/acme/cli@latest')
+        printf '%s\n' '{{"Path":"private.example/acme/cli","Version":"v1.2.3"}}' ;;
+    'install private.example/acme/cli/cmd/cli@v1.2.3')
+        /bin/mkdir -p "$GOBIN"
+        printf '#!/bin/sh\nprintf native-cli-ok\n' > "$GOBIN/cli"
+        /bin/chmod +x "$GOBIN/cli" ;;
+    *) exit 16 ;;
+esac
+"#,
+        provider_calls.display(),
+        goenv.display()
+    );
+    write_executable(&runtime.join("bin/go"), &script);
+    complete_go_fixture(&runtime);
+
+    let env = [
+        ("GOENV", goenv.to_str().unwrap()),
+        // The public proxy left by a prior activation must not replace GOENV.
+        ("GOPROXY", "https://proxy.golang.org|direct"),
+        ("OSDK_APPLIED_GOPROXY", "https://proxy.golang.org|direct"),
+        ("OSDK_MANAGED_ENV", "GOPROXY"),
+        ("OSDK_ORIG_GOPROXY_SET", "1"),
+        ("OSDK_ORIG_GOPROXY_PRESENT", "0"),
+        ("OSDK_TRUSTED_CONFIG_PATHS", root.to_str().unwrap()),
+    ];
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["use", "go:private.example/acme/cli/cmd/cli@latest"],
+        &env,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock = std::fs::read_to_string(root.join("osdk.lock")).unwrap();
+    assert!(lock.contains("version = \"1.2.3\""), "{lock}");
+    assert!(lock.contains("source = \"native\""), "{lock}");
+    assert!(
+        lock.contains("module = \"private.example/acme/cli\""),
+        "{lock}"
+    );
+    assert!(!lock.contains(chain), "{lock}");
+
+    let shim_env =
+        run_isolated_in_with_env(root, root, &["exec", "--", "go", "env", "GOPROXY"], &env);
+    assert!(
+        shim_env.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shim_env.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&shim_env.stdout).trim(),
+        "native go env retained"
+    );
+
+    let calls_before_replay = std::fs::read_to_string(&provider_calls).unwrap();
+    let replay = |args: &[&str]| run_isolated_in_with_env(root, root, args, &env);
+    let original_policy = replay(&["install"]);
+    assert!(original_policy.status.success(), "{original_policy:?}");
+    let original_goenv = std::fs::read_to_string(&goenv).unwrap();
+    std::fs::write(&goenv, "GOPROXY=off\nGOPRIVATE=private.example\n").unwrap();
+    let changed_policy = replay(&["install"]);
+    assert!(changed_policy.status.success(), "{changed_policy:?}");
+    let offline_reuse = replay(&["--offline", "install"]);
+    assert!(offline_reuse.status.success(), "{offline_reuse:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("osdk.lock")).unwrap(),
+        lock
+    );
+    assert_eq!(
+        std::fs::read_to_string(&provider_calls).unwrap(),
+        calls_before_replay
+    );
+    std::fs::write(&goenv, original_goenv).unwrap();
+
+    let removed = run_isolated_in_with_env(
+        root,
+        root,
+        &[
+            "--yes",
+            "uninstall",
+            "go:private.example/acme/cli/cmd/cli@1.2.3",
+        ],
+        &env,
+    );
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    // A changed policy reaches the provider; it is not rejected by lock identity.
+    let mut override_env = env.to_vec();
+    override_env.push(("GOPROXY", "off"));
+    let replay = run_isolated_in_with_env(root, root, &["install"], &override_env);
+    assert!(!replay.status.success());
+    assert!(std::fs::read_to_string(&provider_calls)
+        .unwrap()
+        .ends_with("install private.example/acme/cli/cmd/cli@v1.2.3\n"));
+}
+
+#[cfg(unix)]
+#[test]
 fn go_tool_use_publishes_locks_reuses_offline_and_uninstalls_exact_identity() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
@@ -4244,6 +4926,39 @@ download_url = {endpoint:?}
         String::from_utf8_lossy(&uninstall.stderr)
     );
     assert!(!install_root.exists());
+    for policy in ["GOPRIVATE", "GOPROXY"] {
+        let value = if policy == "GOPROXY" {
+            "http://127.0.0.1:1|direct"
+        } else {
+            "private.example"
+        };
+        let replay = run_isolated_in_with_env(
+            temporary.path(),
+            &project,
+            &["install"],
+            &[
+                (policy, value),
+                ("PATH", "/usr/bin:/bin"),
+                ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+            ],
+        );
+        assert!(replay.status.success(), "{replay:?}");
+        assert_eq!(
+            std::fs::read_to_string(project.join("osdk.lock")).unwrap(),
+            lock
+        );
+        let uninstall = run_isolated_in_with_env(
+            temporary.path(),
+            &project,
+            &[
+                "--yes",
+                "uninstall",
+                "go:example.com/acme/tool/cmd/tool@1.2.3",
+            ],
+            &[("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap())],
+        );
+        assert!(uninstall.status.success(), "{uninstall:?}");
+    }
 }
 
 #[cfg(unix)]

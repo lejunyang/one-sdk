@@ -1011,7 +1011,7 @@ pub(crate) fn locked_native_metadata(version: &ToolVersion) -> Result<Option<Loc
                 version.backend
             )
         })?;
-        osdk_core::backend::go_package::validate_go_proxy(source)?;
+        osdk_core::backend::go_package::validate_go_source_identity(source)?;
         if metadata.module.is_none() {
             anyhow::bail!(
                 "Go tool `{}` is missing its locked module root",

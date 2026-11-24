@@ -51,8 +51,9 @@ Go command 工具有更严格的边界：存在 custom source 时只对这些 cu
 显式 pin 的 candidate）排序，避免把私有 module path 发往公开默认 proxy。自定义 header
 会被拒绝，因为 `go install` 无法执行 osdk 的逐请求转发策略。全新解析会把首选及其余
 候选组成 `|` 分隔的 GOPROXY，让 Go 自己在一次 provider 运行中处理下载回退；lock 重放
-只恢复记录的首选 proxy。Cargo Registry 则在确定 source 身份前读取 sparse `config.json`
-并探测精确 `.crate` URL，避免在 build script 可能启动后重跑。`pypi:` 的选择探测实际
+在没有原生设置时恢复记录的首选 proxy，有原生设置时沿用本机策略，不比较指纹。配置原生源时，由 Go 处理查版本和下载安装。Cargo Registry 则在确定 source 身份前读取 sparse `config.json`
+并探测精确 `.crate` URL，避免在 build script 可能启动后重跑。`pypi:` 优先使用原生配置中的单个索引做匿名查版本，并把它传给安装器。uv 全局工具只合并用户和系统配置，额外索引数组拼接、标量按优先级取值。
+版本查询按 first-index 顺序，安装器接收相同 default/extra 集合；项目和 explicit 索引不参与。未配置原生源时才探测实际
 project 页面，并把结果注入 uv/pip 的 default index。
 
 ## 项目 registry 启动前预检
@@ -97,3 +98,13 @@ registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sd
 
 
 工具来源排序、冲突处理、分生态覆盖及 uv 配置边界见[包管理器优先级](../guide/tools/package-managers#可配置的声明优先级)。explain 复用工具选择证据；freshness 输入文件不等于原生有效配置发现链。
+
+PyPI 原生发现只由索引声明触发；没有索引时，凭据文件和 keyring 设置不参与源选择。
+
+uv 源发现仅提取索引地址；运行模式由安装器处理。命名索引的 name= 前缀在地址解析边界去除。
+
+全局 Python 工具的 Managed 安装分支覆盖继承的 PIP_EXTRA_INDEX_URL、UV_INDEX、UV_EXTRA_INDEX_URL；版本查询与安装使用同一受控默认索引，其他运行变量不清空。
+
+安装器选择边界禁止将 uv first-index 多索引集合翻译为 pip extra-index；stdlib 仅接受单个默认索引，多个原生 uv 索引要求 uv。
+
+uv 环境和配置文件索引以同一有序定义列表按名字合并。名字、URL与default/explicit保留至覆盖完成，被覆盖旧地址不会在扁平化时复活。

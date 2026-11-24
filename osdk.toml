@@ -135,6 +135,13 @@ depends = ["build"]
 run = "pwsh -NoProfile -File scripts/windows-runtime-smoke.ps1 -BinDir target/debug"
 when = { os = "windows" }
 
+[tasks.go-proxy-powershell]
+description = "Go env/exec first-hook and restoration under PowerShell 7 StrictMode (Linux or native Windows)"
+depends = ["build"]
+run = "pwsh -NoProfile -File scripts/test-go-proxy-powershell.ps1 -Osdk target/debug/osdk"
+run_windows = "pwsh -NoProfile -File scripts/test-go-proxy-powershell.ps1 -Osdk target/debug/osdk.exe"
+when = { os = ["linux", "windows"] }
+
 [tasks.wine-tests]
 description = "Windows GNU test suite under Wine, from Linux"
 # Requires mingw-w64 and the x86_64-pc-windows-gnu target; the script downloads
@@ -234,3 +241,24 @@ run = "python scripts/test-deps-monorepo.py"
 [tasks.package-source-native]
 description = "Native npm/pnpm/Bun/uv source adapters against isolated local fixtures"
 run = "python3 scripts/test-package-sources.py"
+
+[tasks.pypi-native-install]
+description = "Real pip/uv loopback installs (Linux; openssl and real uv required; pass --python and --uv paths)"
+depends = ["build"]
+# argv substitution keeps executable paths with spaces as single arguments.
+run = [{ argv = ["python", "scripts/test-pypi-native-install.py", "--osdk", "{{osdk}}", "--python", "{{python}}", "--uv", "{{uv}}", "{{args}}"] }]
+when = { os = "linux" }
+
+[tasks.pypi-native-install.options.osdk]
+help = "Current-source CLI binary (honors a custom build directory when overridden)"
+default = "target/debug/osdk"
+
+[tasks.pypi-native-install.options.python]
+help = "Real Python with venv and pip (required)"
+
+[tasks.pypi-native-install.options.uv]
+help = "Real uv executable (required; tested with 0.13.1)"
+
+[tasks.go-private-proxy]
+description = "Private Go module lookup against loopback proxies (requires Go on PATH)"
+run = ["cargo build --locked -p osdk-cli --bin osdk", "python scripts/test-go-private-proxy.py"]

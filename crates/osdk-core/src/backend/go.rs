@@ -204,8 +204,13 @@ impl Backend for GoBackend {
         // by priority) and involves no network: this runs in the shim on every
         // command invocation, where a probe round-trip would be charged to
         // interactive latency. Live probing stays in the install path.
-        if let Some(proxy) = self.preferred_module_proxy(ctx) {
+        let original_proxy = super::go_env::process_value("GOPROXY");
+        if let Some(proxy) = self.preferred_module_proxy(ctx, &super::go_env::process_value)? {
+            env.insert(crate::execution::APPLIED_GOPROXY.to_string(), proxy.clone());
             env.insert("GOPROXY".to_string(), proxy);
+        } else if original_proxy != std::env::var("GOPROXY").ok() {
+            // Go interprets the empty value as unset and consults its env file.
+            env.insert("GOPROXY".to_string(), original_proxy.unwrap_or_default());
         }
         Ok(env)
     }
@@ -316,14 +321,20 @@ pub async fn refresh_module_proxy_sources(ctx: &Ctx) -> Result<Vec<crate::source
 impl GoBackend {
     /// The GOPROXY value to hand the go command, or `None` to leave it alone.
     ///
-    /// Returns `None` when the user has already set GOPROXY, so an explicit
-    /// choice -- including the policy values `off` and `direct`, which are not
-    /// mirrors at all -- always wins over osdk's default. Also returns `None`
-    /// when configuration disabled every candidate, because emitting an empty or
-    /// `direct`-only value there would silently override that intent.
-    fn preferred_module_proxy(&self, ctx: &Ctx) -> Option<String> {
-        if std::env::var_os("GOPROXY").is_some() {
-            return None;
+    /// Defer to native proxy or privacy settings from the process or Go's
+    /// configured environment file. Also return no value when configuration
+    /// disables every osdk candidate.
+    pub(super) fn preferred_module_proxy(
+        &self,
+        ctx: &Ctx,
+        getenv: &impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<String>> {
+        let native = super::go_env::source_settings(getenv)?;
+        if ctx.config.settings.precedence.package_policy("go")
+            == crate::config::SourcePrecedence::Native
+            && native.contains_key("GOPROXY")
+        {
+            return Ok(None);
         }
         let mut endpoints = module_proxy_sources(ctx)
             .into_iter()
@@ -331,7 +342,7 @@ impl GoBackend {
             .filter(|url| crate::backend::go_package::validate_go_proxy(url).is_ok())
             .collect::<Vec<_>>();
         if endpoints.is_empty() {
-            return None;
+            return Ok(None);
         }
         endpoints.push("direct".to_string());
         // Join with `|`, not `,`. The separator *is* the fallback policy: after a
@@ -347,7 +358,7 @@ impl GoBackend {
         // public module set, so there is no private path to leak. A user who
         // needs the gatekeeper behaviour sets GOPROXY themselves, which the
         // check above leaves untouched.
-        Some(endpoints.join("|"))
+        Ok(Some(endpoints.join("|")))
     }
 
     /// Find the platform archive file for `go_ver` (e.g. "go1.22.5") by trying

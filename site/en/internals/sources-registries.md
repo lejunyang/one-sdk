@@ -55,16 +55,20 @@ override inside an otherwise empty osdk-owned configuration, so `npm:<package>`
 package fetches do not forward `Source.headers`. Project operations may use native trusted configuration;
 global npm-tool installs remain anonymous: discarded user credentials alone do not block
 public packages, while private/scoped policy still fails closed. See [npm tools](/en/guide/tools/npm#sources-and-shared-storage).
-Go command tools add one stricter boundary: if custom sources exist, only those
+Go command tools delegate a configured native policy to Go. With osdk-managed sources, if custom sources exist, only those
 custom candidates (plus an explicitly pinned candidate) are ranked, so a private
 module path is not sent to public default proxies. Custom headers are rejected
-because `go install` cannot enforce osdk's per-request forwarding policy. A fresh
+because `go install` cannot enforce osdk's per-request forwarding policy. For osdk-managed sources, a fresh
 resolution joins the preferred and remaining candidates with `|` as one GOPROXY,
 letting Go perform download failover inside one provider invocation; lock replay
-restores only its recorded primary proxy. Cargo Registry selection instead reads
+uses current native settings when present, otherwise restoring the recorded primary proxy; it never compares local policy fingerprints. Cargo Registry selection instead reads
 the sparse `config.json` and probes the exact `.crate` URL before fixing source
-identity, avoiding a rerun after build scripts may have started. `pypi:` probes
-the requested project page and injects the winner as uv/pip's default index.
+identity, avoiding a rerun after build scripts may have started. `pypi:` lists
+versions anonymously on the selected native index when configured. For uv it
+merges only user and system settings, concatenating additional indexes with scalar precedence.
+Discovery follows first-index order and installation receives the same default/extra set;
+project and explicit package-only indexes do not participate. With no native index, it
+probes the requested project page and injects the winner as uv/pip's default index.
 
 ## Project registry preflight
 
@@ -111,3 +115,13 @@ Explicit canonical overrides use the shared adapter across exec, shim and deps. 
 
 
 Tool source ordering, conflict handling, per-ecosystem overrides and uv discovery boundaries are defined in [package-manager precedence](../guide/tools/package-managers#configurable-declaration-precedence). Explain output reuses tool selection evidence; fingerprint input files are not an effective native discovery chain.
+
+PyPI native discovery is triggered by index declarations only. Credential files and keyring settings do not select a source when no index is configured.
+
+uv source discovery extracts index addresses only; execution modes belong to the installer. Named-index name= prefixes are removed at the URL boundary.
+
+The global Python tool Managed install branch overrides inherited PIP_EXTRA_INDEX_URL, UV_INDEX, and UV_EXTRA_INDEX_URL. Discovery and installation share the controlled default index without clearing unrelated execution variables.
+
+The installer boundary refuses to translate uv first-index sets into pip extra-index search. stdlib accepts a single default only; native uv multi-index sets require uv.
+
+uv environment and file indexes merge as one ordered definition list by name. Name, URL and default/explicit survive until replacement is complete, so overridden endpoints cannot reappear during flattening.

@@ -38,6 +38,8 @@ const PROVIDER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 pub const LOCKED_GO_PROXY_OPTION: &str = "__osdk_go_proxy";
 pub const LOCKED_GO_MODULE_OPTION: &str = "__osdk_go_module";
 const GO_PROXY_FALLBACKS_OPTION: &str = "__osdk_go_proxy_fallbacks";
+const NATIVE_SOURCE_PREFIX: &str = "native:";
+const NATIVE_SOURCE: &str = "native";
 static NEXT_METADATA_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +60,88 @@ struct GoProxySelection {
     versions: Vec<VersionInfo>,
 }
 
+struct NativeGoSource {
+    identity: String,
+    settings: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NativeGoModule {
+    path: String,
+    version: Option<String>,
+    #[serde(default)]
+    versions: Vec<String>,
+}
+
+impl NativeGoSource {
+    fn discover() -> Result<Option<Self>> {
+        Self::from_settings(super::go_env::source_settings(
+            &super::go_env::process_value,
+        )?)
+    }
+
+    fn from_settings(settings: BTreeMap<String, String>) -> Result<Option<Self>> {
+        if !super::go_env::has_module_policy(&settings) {
+            return Ok(None);
+        }
+        if let Some(chain) = settings.get("GOPROXY") {
+            validate_native_proxy_chain(chain)?;
+        }
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for (name, value) in &settings {
+            hash.update(name);
+            hash.update(b"=");
+            hash.update(value);
+            hash.update(b"\0");
+        }
+        Ok(Some(Self {
+            identity: format!("{NATIVE_SOURCE_PREFIX}{}", hex::encode(hash.finalize())),
+            settings,
+        }))
+    }
+}
+
+fn validate_native_proxy_chain(chain: &str) -> Result<()> {
+    let error = || {
+        Error::config(
+        "native GOPROXY must contain Go proxy URLs without embedded credentials, query or fragment, or Go policies such as direct/off; set [sources.\"go:<module>\"] and [settings.precedence] go = \"osdk\" to use osdk sources",
+    )
+    };
+    let mut has_entry = false;
+    for entry in chain
+        .split([',', '|'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        has_entry = true;
+        if matches!(entry, "direct" | "off") {
+            break;
+        }
+        let absolute;
+        let url = if entry.contains(":/") {
+            entry
+        } else {
+            absolute = format!("https://{entry}");
+            &absolute
+        };
+        let url = reqwest::Url::parse(url).map_err(|_| error())?;
+        if !matches!(url.scheme(), "http" | "https" | "file")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(error());
+        }
+    }
+    if !has_entry {
+        return Err(error());
+    }
+    Ok(())
+}
+
 /// Backend bound to one canonical Go module or nested command path.
 pub struct GoPackageBackend {
     id: String,
@@ -74,6 +158,27 @@ impl GoPackageBackend {
             command_path: id.subject().to_string(),
             id: id.to_string(),
         })
+    }
+
+    fn native_source(&self, ctx: &Ctx) -> Result<Option<NativeGoSource>> {
+        if ctx.config.settings.precedence.package_policy("go")
+            == crate::config::SourcePrecedence::Osdk
+        {
+            return Ok(None);
+        }
+        let Some(native) = NativeGoSource::discover()? else {
+            return Ok(None);
+        };
+        let patterns = native
+            .settings
+            .get("GONOPROXY")
+            .or_else(|| native.settings.get("GOPRIVATE"));
+        let private = patterns
+            .map(|patterns| super::go_env::private_query_prefix(&self.command_path, patterns))
+            .transpose()?
+            .flatten()
+            .is_some();
+        Ok((native.settings.contains_key("GOPROXY") || private).then_some(native))
     }
 
     fn runtime_version<'a>(&self, options: &'a BTreeMap<String, String>) -> Result<&'a str> {
@@ -142,7 +247,7 @@ impl GoPackageBackend {
             .get(LOCKED_GO_PROXY_OPTION)
             .map(String::as_str)
             .unwrap_or("https://proxy.golang.org");
-        validate_go_proxy(proxy)?;
+        validate_go_source_identity(proxy)?;
         Ok(proxy)
     }
 
@@ -192,6 +297,14 @@ impl GoPackageBackend {
             && options.contains_key(LOCKED_GO_MODULE_OPTION)
     }
 
+    fn check_replay_source(
+        &self,
+        options: &BTreeMap<String, String>,
+        _native: Option<&NativeGoSource>,
+    ) -> Result<()> {
+        self.proxy(options).map(|_| ())
+    }
+
     fn materials(&self, tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
         Ok(BTreeMap::from([
             ("source-kind".into(), "go-proxy".into()),
@@ -214,7 +327,7 @@ impl GoPackageBackend {
         let Some(module_root) = actual.get("module-root") else {
             return false;
         };
-        validate_go_proxy(proxy).is_ok()
+        validate_go_source_identity(proxy).is_ok()
             && ToolId::parse(&format!("go:{module_root}"))
                 .is_ok_and(|id| id.subject() == module_root)
             && self
@@ -456,11 +569,8 @@ impl GoPackageBackend {
         }))
     }
 
-    async fn ranked_proxy_sources(&self, ctx: &Ctx) -> Result<Vec<Source>> {
-        // `effective_sources_with_env` rather than `effective_sources`, so an
-        // ambient GOPROXY is ranked here too instead of being dropped by this
-        // backend's own candidate narrowing.
-        let mut sources = crate::source::select::effective_sources_with_env(ctx, self)?;
+    fn proxy_sources(&self, ctx: &Ctx) -> Result<Vec<Source>> {
+        let mut sources = crate::source::select::effective_sources(ctx, self);
         if let Some(config) = ctx.config.tool_sources(self.id()) {
             if !config.custom.is_empty() {
                 let mut allowed_ids = config
@@ -477,7 +587,16 @@ impl GoPackageBackend {
         for source in &sources {
             validate_go_source(source)?;
         }
-        crate::source::select::ranked_source_candidates(ctx, self, sources).await
+        Ok(sources)
+    }
+
+    async fn ranked_proxy_sources(&self, ctx: &Ctx) -> Result<Vec<Source>> {
+        if ctx.config.sources.mode == crate::source::env::SourceMode::Env {
+            return Err(Error::config(
+                "Go source mode env requires native GOPROXY, GOPRIVATE or GONOPROXY settings",
+            ));
+        }
+        crate::source::select::ranked_source_candidates(ctx, self, self.proxy_sources(ctx)?).await
     }
 
     fn managed_go(
@@ -516,12 +635,16 @@ impl GoPackageBackend {
         ctx: &Ctx,
         tv: &ToolVersion,
         stage: &Path,
+        native: Option<&NativeGoSource>,
     ) -> Result<BTreeMap<OsString, OsString>> {
         let (go_root, _) = self.managed_go(ctx, &tv.options)?;
         let home = stage.join("home");
         let go_path = stage.join("gopath");
         let tmp = stage.join("tmp");
-        let module_cache = crate::cache::downstream_root(&ctx.dirs.cache).join("go-mod");
+        let module_cache = crate::cache::downstream_root(&ctx.dirs.cache).join(match native {
+            Some(native) => format!("go-mod-{}", &native.identity[NATIVE_SOURCE_PREFIX.len()..]),
+            None => "go-mod".into(),
+        });
         let build_cache = crate::cache::downstream_root(&ctx.dirs.cache).join("go-build");
         for path in [&home, &go_path, &tmp, &module_cache, &build_cache] {
             std::fs::create_dir_all(path).map_err(|error| Error::io(path, error))?;
@@ -544,10 +667,6 @@ impl GoPackageBackend {
             ),
             (OsString::from("GONOPROXY"), OsString::from("none")),
             (
-                OsString::from("GOPROXY"),
-                OsString::from(self.proxy_chain(&tv.options)?),
-            ),
-            (
                 OsString::from("PATH"),
                 sanitized_provider_path(ctx, &go_root.join("bin"), std::env::var_os("PATH"))?,
             ),
@@ -556,6 +675,46 @@ impl GoPackageBackend {
             (OsString::from("TMP"), tmp.into_os_string()),
             (OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0")),
         ]);
+        if let Some(native) = native {
+            env.remove(OsStr::new("GONOPROXY"));
+            if !native.settings.contains_key("GOPROXY") {
+                env.insert(
+                    "GOPROXY".into(),
+                    super::go::GoBackend
+                        .preferred_module_proxy(ctx, &|_| None)?
+                        .unwrap_or_else(|| "https://proxy.golang.org,direct".into())
+                        .into(),
+                );
+            }
+            env.extend(
+                native
+                    .settings
+                    .iter()
+                    .map(|(key, value)| (key.into(), value.into())),
+            );
+            env.extend(
+                [
+                    ("GO111MODULE", "on"),
+                    ("GOWORK", "off"),
+                    ("GOAUTH", "off"),
+                    ("GIT_CONFIG_NOSYSTEM", "1"),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+            );
+        } else {
+            let proxy = self.proxy(&tv.options)?;
+            let chain = if proxy == NATIVE_SOURCE || proxy.starts_with(NATIVE_SOURCE_PREFIX) {
+                self.proxy_sources(ctx)?
+                    .into_iter()
+                    .map(|source| source.download_url)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            } else {
+                self.proxy_chain(&tv.options)?.to_owned()
+            };
+            env.insert("GOPROXY".into(), chain.into());
+        }
         if let Some(values) = tv.options.get("env") {
             for assignment in values.split(';') {
                 let (name, value) = assignment
@@ -584,6 +743,40 @@ impl GoPackageBackend {
             "no_proxy",
         ]));
         Ok(env)
+    }
+
+    async fn native_module(
+        &self,
+        ctx: &Ctx,
+        options: &BTreeMap<String, String>,
+        native: &NativeGoSource,
+        query: Option<String>,
+    ) -> Result<(String, Vec<VersionInfo>)> {
+        let runtime = match options.get(LOCKED_NATIVE_RUNTIME_VERSION_OPTION) {
+            Some(_) => self.runtime_version(options)?.to_owned(),
+            None => super::go::GoBackend.list_installed(ctx)?.pop().ok_or_else(|| {
+                Error::config("native Go module lookup requires a managed Go runtime; run `osdk install go` first")
+            })?,
+        };
+        let mut tv = ToolVersion::new(&self.id, "");
+        tv.options = BTreeMap::from([
+            (LOCKED_NATIVE_RUNTIME_OPTION.into(), "go".into()),
+            (LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(), runtime.clone()),
+        ]);
+        let (_, go) = self.managed_go(ctx, &tv.options).map_err(|_| Error::config(format!(
+            "native Go module lookup requires managed Go {runtime}; run `osdk install go@{runtime}` first"
+        )))?;
+        let stage = tempfile::Builder::new()
+            .prefix("go-module-lookup-")
+            .tempdir_in(&ctx.dirs.cache)
+            .map_err(|error| Error::io(&ctx.dirs.cache, error))?;
+        let env = self.command_env(ctx, &tv, stage.path(), Some(native))?;
+        let command_path = self.command_path.clone();
+        tokio::task::spawn_blocking(move || {
+            query_native_module(&go, stage.path(), env, &command_path, query.as_deref())
+        })
+        .await
+        .map_err(|error| Error::other(format!("Go module lookup did not complete: {error}")))?
     }
 
     fn install_args(&self, tv: &ToolVersion) -> Vec<OsString> {
@@ -624,12 +817,14 @@ impl GoPackageBackend {
                 self.id
             )));
         }
+        let native = self.native_source(ctx)?;
+        self.check_replay_source(&tv.options, native.as_ref())?;
         let lifecycle = self.lifecycle(ctx, tv)?;
         let NativeToolPreparation::Staged(stage) = lifecycle.prepare(&ctx.dirs).await? else {
             return Ok(());
         };
         let (_, go) = self.managed_go(ctx, &tv.options)?;
-        let env = self.command_env(ctx, tv, stage.path())?;
+        let env = self.command_env(ctx, tv, stage.path(), native.as_ref())?;
         let command = CommandSpec::new(go.as_os_str().to_owned())
             .args(self.install_args(tv))
             .envs(env)
@@ -681,7 +876,7 @@ impl GoPackageBackend {
             && actual.backend == self.id
             && actual.version == tv.version
             && actual.replay == "version-only"
-            && validate_go_proxy(&actual.proxy).is_ok()
+            && validate_go_source_identity(&actual.proxy).is_ok()
             && valid_module
             && tv
                 .options
@@ -716,39 +911,28 @@ impl Backend for GoPackageBackend {
     }
 
     fn probe_url(&self, _ctx: &Ctx, source: &Source) -> Option<String> {
+        let settings = super::go_env::source_settings(&super::go_env::process_value).ok()?;
+        if super::go_env::has_module_policy(&settings) {
+            return None;
+        }
         validate_go_source(source)
             .ok()
             .map(|()| format!("{}/", source.download_url.trim_end_matches('/')))
     }
 
-    fn env_mirror(&self) -> Option<crate::source::env::EnvMirror<'static>> {
-        // The go command has no separate index endpoint; GOPROXY serves both.
-        Some(crate::source::env::EnvMirror {
-            download: &["GOPROXY"],
-            index: &[],
-        })
-    }
-
-    fn validate_env_endpoint(&self, url: &str) -> Result<()> {
-        // GOPROXY accepts `off`, `direct`, and comma/pipe separated fallback
-        // lists that have no single endpoint to probe. Those are legitimate
-        // values, but they are not a mirror we can rank, so they are reported as
-        // unusable-for-ranking rather than silently reinterpreted.
-        if url.contains(',') || url.contains('|') {
-            return Err(Error::config(
-                "GOPROXY holds a fallback list, which cannot be ranked as a single mirror",
-            ));
-        }
-        if matches!(url, "off" | "direct" | "none") {
-            return Err(Error::config(format!(
-                "GOPROXY is set to `{url}`, which is a policy rather than a mirror"
-            )));
-        }
-        validate_go_proxy(url)
-    }
-
     #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
+        if let Some(native) = self.native_source(ctx)? {
+            if ctx.config.settings.offline {
+                return Err(Error::config(
+                    "native Go module lookup is unavailable offline",
+                ));
+            }
+            return Ok(self
+                .native_module(ctx, &BTreeMap::new(), &native, None)
+                .await?
+                .1);
+        }
         Ok(self.proxy_selection(ctx).await?.versions)
     }
 
@@ -775,6 +959,52 @@ impl Backend for GoPackageBackend {
                 .insert(LOCKED_NATIVE_REPLAY_OPTION.into(), "version-only".into());
             return Ok(resolved);
         }
+        let locked = Self::has_locked_resolution(&options);
+        let native = if locked && ctx.config.settings.offline {
+            None
+        } else {
+            self.native_source(ctx)?
+        };
+        if locked {
+            if !ctx.config.settings.offline {
+                self.check_replay_source(&options, native.as_ref())?;
+            }
+        } else if let Some(native) = native {
+            if ctx.config.settings.offline {
+                return Err(Error::config(
+                    "native Go module lookup is unavailable offline",
+                ));
+            }
+            let query = match &req.spec {
+                VersionSpec::Exact(version) => Some(go_provider_version(version)),
+                VersionSpec::Latest => Some("latest".into()),
+                _ => None,
+            };
+            let (module, versions) = self.native_module(ctx, &options, &native, query).await?;
+            let selected = if matches!(&req.spec, VersionSpec::Prefix(_)) {
+                crate::version::select_version(
+                    &req.spec,
+                    &versions
+                        .into_iter()
+                        .filter(|version| version.stable)
+                        .collect::<Vec<_>>(),
+                )
+                .map(|version| version.version.clone())
+            } else {
+                versions.into_iter().next().map(|version| version.version)
+            };
+            let version = selected.ok_or_else(|| Error::VersionResolve {
+                tool: self.id.clone(),
+                spec: req.spec.to_string(),
+                hint: Some("the native Go source returned no matching module version".into()),
+            })?;
+            options.insert(LOCKED_GO_PROXY_OPTION.into(), NATIVE_SOURCE.into());
+            options.insert(LOCKED_GO_MODULE_OPTION.into(), module);
+            options.insert(LOCKED_NATIVE_REPLAY_OPTION.into(), "version-only".into());
+            let mut resolved = ToolVersion::new(&self.id, version);
+            resolved.options = options;
+            return Ok(resolved);
+        }
         let (version, source, module_root) = match &req.spec {
             VersionSpec::Exact(version) if crate::tool::is_canonical_go_module_version(version) => {
                 let selection = if Self::has_locked_resolution(&options) {
@@ -784,7 +1014,7 @@ impl Backend for GoPackageBackend {
                     let module = options
                         .get(LOCKED_GO_MODULE_OPTION)
                         .expect("locked resolution checked module");
-                    validate_go_proxy(proxy)?;
+                    validate_go_source_identity(proxy)?;
                     self.module_root(&options)?;
                     GoProxySelection {
                         source: Source::official("locked", proxy),
@@ -849,7 +1079,7 @@ impl Backend for GoPackageBackend {
                 });
             }
         };
-        validate_go_proxy(&source)?;
+        validate_go_source_identity(&source)?;
         let fallback_chain =
             if !ctx.config.settings.offline && !Self::has_locked_resolution(&options) {
                 Some(Self::proxy_fallbacks(
@@ -876,6 +1106,15 @@ impl Backend for GoPackageBackend {
             .options
             .insert(LOCKED_NATIVE_REPLAY_OPTION.into(), "version-only".into());
         Ok(resolved)
+    }
+
+    #[cfg(feature = "install")]
+    fn validate_install_reuse(&self, ctx: &Ctx, req: &ToolRequest) -> Result<()> {
+        if !ctx.config.settings.offline && Self::has_locked_resolution(&req.options) {
+            let native = self.native_source(ctx)?;
+            self.check_replay_source(&req.options, native.as_ref())?;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "install")]
@@ -976,6 +1215,74 @@ fn module_path_candidates(path: &str) -> Vec<String> {
         .collect()
 }
 
+fn query_native_module(
+    go: &Path,
+    cwd: &Path,
+    env: BTreeMap<OsString, OsString>,
+    command_path: &str,
+    query: Option<&str>,
+) -> Result<(String, Vec<VersionInfo>)> {
+    let patterns = env
+        .get(OsStr::new("GONOPROXY"))
+        .or_else(|| env.get(OsStr::new("GOPRIVATE")))
+        .and_then(|value| value.to_str());
+    let private_prefix =
+        super::go_env::private_query_prefix(command_path, patterns.unwrap_or_default())?;
+    let candidates = module_path_candidates(command_path);
+    let command = CommandSpec::new(go)
+        .args(["list", "-m", "-json"])
+        .envs(env)
+        .current_dir(cwd)
+        .clear_env();
+    let mut last_error = None;
+    // Go reevaluates privacy for each go list invocation. Keep a private
+    // command's ancestor probes inside its original no-proxy boundary.
+    for module in candidates
+        .into_iter()
+        .take_while(|module| private_prefix.is_none_or(|prefix| module.starts_with(prefix)))
+    {
+        let command = match query {
+            Some(query) => command.clone().arg(format!("{module}@{query}")),
+            None => command.clone().args(["-versions", &module]),
+        };
+        match SystemCommandRunner.run_captured(
+            &command,
+            CaptureLimits::new(GO_PROXY_TIMEOUT, GO_PROXY_METADATA_LIMIT, PROVIDER_OUTPUT_LIMIT),
+        ) {
+            CommandOutcome::Exited { status, output } if status.success() && !output.stdout_truncated => {
+                let response: NativeGoModule = serde_json::from_slice(&output.stdout)?;
+                if response.path != module {
+                    return Err(Error::config("native Go reported an unexpected module path"));
+                }
+                let versions = match query {
+                    Some(query) => response.version.as_deref()
+                        .filter(|version| query == "latest" || query == *version)
+                        .and_then(|version| version.strip_prefix('v'))
+                        .filter(|version| crate::tool::is_canonical_go_module_version(version))
+                        .map(|version| vec![version_info(version)])
+                        .ok_or_else(|| Error::config("native Go reported an unexpected module version"))?,
+                    None => parse_proxy_versions(response.versions.join("\n").as_bytes())?,
+                };
+                if !versions.is_empty() {
+                    return Ok((module, versions));
+                }
+            }
+            CommandOutcome::Exited { status, output } if !status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                last_error.get_or_insert_with(|| stderr.trim().to_string());
+            }
+            _ => return Err(Error::other("native Go module metadata lookup exceeded its time or output limits or could not start")),
+        }
+    }
+    let detail = last_error.as_deref().unwrap_or("no module versions found");
+    let scope = private_prefix
+        .map(|prefix| format!("; search limited to private module paths under `{prefix}`"))
+        .unwrap_or_default();
+    Err(Error::other(format!(
+        "native Go module lookup failed: {detail}{scope}; check GOPROXY, or set [sources.\"go:<module>\"] and [settings.precedence] go = \"osdk\" and Go privacy settings"
+    )))
+}
+
 fn escape_module_path(path: &str) -> String {
     let mut escaped = String::with_capacity(path.len());
     for character in path.chars() {
@@ -1061,6 +1368,25 @@ pub fn validate_go_proxy(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Native policy is local execution input, not a portable lock fingerprint.
+/// Legacy fingerprints remain readable, but new locks use the `native` marker.
+pub fn validate_go_source_identity(value: &str) -> Result<()> {
+    if value == NATIVE_SOURCE {
+        return Ok(());
+    }
+    if let Some(digest) = value.strip_prefix(NATIVE_SOURCE_PREFIX) {
+        if digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Ok(());
+        }
+        return Err(Error::config("invalid native Go source fingerprint"));
+    }
+    validate_go_proxy(value)
 }
 
 fn parse_proxy_versions(bytes: &[u8]) -> Result<Vec<VersionInfo>> {
@@ -1458,6 +1784,32 @@ mod tests {
             (LOCKED_GO_MODULE_OPTION.into(), backend.command_path.clone()),
         ]));
         version
+    }
+
+    #[test]
+    fn locked_go_proxy_replays_under_different_native_settings() {
+        let backend = GoPackageBackend::from_id("go:example.com/acme/tool").unwrap();
+        let tv = selected(&backend, "1.24.0");
+        for settings in [
+            BTreeMap::from([("GOPROXY".into(), "http://127.0.0.1:12345,direct".into())]),
+            BTreeMap::from([("GOPRIVATE".into(), "private.example".into())]),
+        ] {
+            let native = NativeGoSource::from_settings(settings).unwrap().unwrap();
+            backend
+                .check_replay_source(&tv.options, Some(&native))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn privacy_only_policy_does_not_force_public_modules_direct() {
+        let native = NativeGoSource::from_settings(BTreeMap::from([(
+            "GOPRIVATE".into(),
+            "private.example".into(),
+        )]))
+        .unwrap()
+        .unwrap();
+        assert!(!native.settings.contains_key("GOPROXY"));
     }
 
     #[derive(Clone)]
@@ -1901,30 +2253,6 @@ mod tests {
     }
 
     #[test]
-    /// `off`, `direct` and comma/pipe fallback lists are legitimate go settings
-    /// but none of them is a single rankable endpoint, so each must be rejected
-    /// as a mirror candidate instead of becoming a bogus source.
-    fn goproxy_policy_values_are_not_usable_as_mirrors() {
-        let backend = GoPackageBackend::from_id("go:example.com/acme/tool").unwrap();
-        for value in [
-            "off",
-            "direct",
-            "none",
-            "https://goproxy.cn,direct",
-            "https://goproxy.cn|https://proxy.golang.org",
-        ] {
-            let error = backend
-                .validate_env_endpoint(value)
-                .expect_err("`{value}` must not be ranked as a mirror");
-            let message = error.to_string();
-            assert!(
-                message.contains("policy") || message.contains("fallback list"),
-                "`{value}` should be explained as a policy or list, got: {message}"
-            );
-        }
-    }
-
-    #[test]
     fn selected_go_proxy_stays_first_in_native_fallback_chain() {
         let sources = vec![
             Source::mirror("preferred", "https://proxy.example", 0),
@@ -1954,38 +2282,18 @@ mod tests {
     }
 
     #[test]
-    /// A single canonical proxy URL is a usable candidate, and it inherits the
-    /// go-specific endpoint rules (no credentials, no trailing slash).
-    fn a_single_goproxy_url_is_a_usable_mirror() {
-        let backend = GoPackageBackend::from_id("go:example.com/acme/tool").unwrap();
-        backend
-            .validate_env_endpoint("https://goproxy.io")
-            .expect("a plain https proxy must be usable");
-        backend
-            .validate_env_endpoint("https://user:secret@goproxy.io")
-            .expect_err("credentials must be refused");
-    }
-
-    #[test]
-    /// The narrowing that keeps a private module name away from public hosts runs
-    /// after the ambient candidate is folded in, and the ambient candidate uses a
-    /// reserved id that a per-module `custom` list never names. So an ambient
-    /// GOPROXY cannot widen a narrowed set — verified here on the id contract
-    /// that `ranked_proxy_sources` relies on.
-    fn the_ambient_id_is_never_allowed_by_custom_narrowing() {
-        let custom = [Source::mirror(
-            "private",
-            "https://proxy.private.example",
-            0,
-        )];
-        let allowed = custom
-            .iter()
-            .map(|source| source.id.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(
-            !allowed.contains(crate::source::env::ENV_SOURCE_ID),
-            "the ambient id must not be reachable through custom narrowing"
-        );
+    fn native_proxy_chains_accept_go_routing_and_reject_embedded_credentials() {
+        for chain in [
+            "https://private.example/proxy/,http://127.0.0.1:8080|direct",
+            "private.example/proxy,off",
+            "file:///srv/go/proxy|off",
+        ] {
+            validate_native_proxy_chain(chain).unwrap();
+        }
+        let error = validate_native_proxy_chain("https://user:secret@private.example|direct")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret"), "{error}");
     }
 
     #[tokio::test]

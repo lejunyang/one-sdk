@@ -11,7 +11,19 @@ backend 明确分离。
 保留大小写，并拒绝 URL 分隔符、路径穿越、隐藏 component、控制字符与空白。selector
 支持 `latest`、一到两段数字前缀、精确语义版本与规范 Go 伪版本。
 
-`latest` 请求使用候选 module 的 `@latest` endpoint；前缀请求读取有界的 `@v/list`；
+若进程环境或 Go 用户环境文件配置了模块源，osdk 用受管 Go 的
+`go list -m -json` 查版本，并把同一组白名单内的源设置传给 `go install`。
+分隔符的回退语义、私有模块匹配和直连均由 Go 处理。激活时记录最近一次写入的 `GOPROXY`。查询、策略指纹和 shim 只有在当前值
+与记录一致时才读取激活前的值或未设置状态。命令级覆盖会改变本次命令的源策略。每次原生 `go list -m` 都接收一个候选模块路径。
+如果命令路径命中生效的免代理规则，候选只保留在最宽匹配前缀内的路径。查询失败或
+返回空版本列表时，查询会在这个边界内结束。仅配置私有规则时，匹配模块委托 Go；
+公开模块使用 osdk 默认代理 metadata。受管进程仍使用清空后的环境，不会加载整个 Go 环境文件或转发凭据。模块缓存
+按原生策略指纹分开。
+
+在仓库根目录运行 `osdk run go-private-proxy`，用 PATH 上的 Go 和回环代理验证
+私有端报错、返回空版本列表，以及显式设置 `GONOPROXY=none` 时的请求路径。
+
+未配置原生源时，`latest` 请求使用候选 module 的 `@latest` endpoint；前缀请求读取有界的 `@v/list`；
 精确请求必须由匹配的 `.info` 响应证明。module proxy 转义遵循 Go 的大写字母 `!x` 规则。
 嵌套 command 会优先尝试最长 module 候选，并在每个候选内按来源排序依次尝试，避免较短
 module 因 proxy 更快而遮蔽实际存在的较长 module。
@@ -83,6 +95,9 @@ provider 成功后，osdk 删除私有 workspace，写入有界 `go-resolution.j
 
 ## Lock schema 4
 
+使用原生源时，`source` 记录可移植的 `native` 标记，不写本机策略指纹。旧 `native:<sha256>` 仍可读。在线回放保留模块与精确版本，使用当前机器的原生设置；没有原生设置时使用 osdk 的源候选。
+
+
 Go 工具使用共享的类型化 `native` 子表：
 
 ```toml
@@ -111,4 +126,9 @@ module = "golang.org/x/tools/gopls"
 
 `version-only` 是刻意如实描述：lock 只记录顶层解析与来源身份，不记录传递 module graph
 或 source payload。因此全新离线安装与修复会在 provider 启动前失败；只有完整且身份精确
-匹配的既有安装可离线复用。
+匹配的既有安装可离线复用。在线重放不会比较本机源策略指纹；来源差异不改变锁定的模块与版本。
+离线复用仍会核验锁定的安装身份。
+
+GoBackend.exec_env 与所有独立导出同时输出 OSDK_APPLIED_GOPROXY。original_env 在值仍等于标记时识别 osdk 输出，hook 则继续保留激活前快照。
+
+hook 在清除 applied 标记前，为尚无快照且当前值等于osdk导出的GOPROXY捕获未设置状态；已有原始快照不改。恢复使用同一快照规则。
