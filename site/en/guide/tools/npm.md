@@ -424,7 +424,8 @@ overrides the native default; offline skips native preflight. An explicitly sele
 default that cannot be used anonymously fails with an osdk configuration alternative.
 `osdk source pin npm:<package> <id>` or `--source <id>` overrides native routing with
 one explicit built-in/custom source. `source list` always shows manageable osdk sources;
-unpin restores native selection.
+unpin restores native selection. If switching to a pinned registry fails, the previous
+installation remains intact.
 
 `osdk exec --tool npm:... -- <command>` resolves the published command name from
 the selected install inventory, even when its target has a different filename

@@ -103,7 +103,7 @@ def rust(root):
         '/bin/chmod +x "$3/bin/fixture-tool"\n', True)
 
 
-def case(family, mode):
+def case(family, mode, native_configuration=True):
     with tempfile.TemporaryDirectory(prefix="osdk-source-switch-") as directory:
         root = Path(directory)
         with server(root, family == "cargo") as s:
@@ -119,7 +119,17 @@ def case(family, mode):
                     s.responses[f"/{region}/fi/xt/fixture-tool"] = b'{"vers":"1.2.3"}'
             else:
                 put(root, "osdk.toml", '[tools]\nnode="20.0.0"\n')
-                put(root, "home/.npmrc", f"registry={s.base}/native/\n")
+                if native_configuration:
+                    put(root, "home/.npmrc", f"registry={s.base}/native/\n")
+                else:
+                    put(root, "config/config.toml", f'''[sources."npm:fixture-tool"]
+pin = "previous"
+disable = ["npmmirror", "npm"]
+[[sources."npm:fixture-tool".custom]]
+id = "previous"
+kind = "custom"
+download_url = "{s.base}/native/"
+''')
                 put(root, "installs/node/20.0.0/.osdk-complete", "")
                 put(root, "installs/node/20.0.0/bin/node", "#!/bin/sh\nexit 0\n", True)
                 for region in ["native", "selected", "broken"]:
@@ -149,7 +159,7 @@ def case(family, mode):
             if mode == "failed":
                 run(root, ["--source", "broken", "install", tool + "@1.2.3"], extra, success=False)
                 assert all(p.read_bytes() == content for p, content in old_bytes.items())
-                assert any(path.startswith("/broken/") for _, path in s.requests), s.requests
+                assert s.requests and all(path.startswith("/broken/") for _, path in s.requests), s.requests
             else:
                 if mode == "pin":
                     run(root, ["source", "pin", tool, "selected"], extra)
@@ -175,4 +185,6 @@ def case(family, mode):
 for family in ["cargo", "npm"]:
     for mode in (["pin", "once"] if BASELINE else ["pin", "once", "failed"]):
         case(family, mode)
-print("6 source-switch scenarios passed" if not BASELINE else "4 baseline failures reproduced")
+if not BASELINE:
+    case("npm", "failed", native_configuration=False)
+print("7 source-switch scenarios passed" if not BASELINE else "4 baseline failures reproduced")

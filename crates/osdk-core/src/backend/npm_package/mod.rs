@@ -1370,23 +1370,19 @@ impl Backend for NpmPackageBackend {
 
     #[cfg(feature = "install")]
     fn restrict_sources(&self, ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
-        // Like the global preflight, resolve user configuration outside the
-        // invoking project. The synthetic project's own npmrc is written later.
-        let cwd = ctx.dirs.data.join("npm-registry-preflight");
-        let native = crate::package_registry::isolated_native_npm_registry(ctx, &cwd);
-        if matches!(&native, Ok(None)) {
-            return Ok(sources);
-        }
-        if let Some(pin) = ctx
+        // A synthetic install records the pinned registry in its identity.
+        if let Some(source) = ctx
             .config
             .tool_sources(self.id())
             .and_then(|cfg| cfg.pin.as_deref())
+            .and_then(|pin| sources.iter().find(|source| source.id == pin))
         {
-            if let Some(source) = sources.iter().find(|source| source.id == pin) {
-                return Ok(vec![source.clone()]);
-            }
+            return Ok(vec![source.clone()]);
         }
-        match native {
+        // Like the global preflight, resolve user configuration outside the
+        // invoking project. The synthetic project's own npmrc is written later.
+        let cwd = ctx.dirs.data.join("npm-registry-preflight");
+        match crate::package_registry::isolated_native_npm_registry(ctx, &cwd) {
             Ok(Some(url)) => Ok(vec![Source::mirror(NATIVE_NPMRC_SOURCE, &url, 0)]),
             Ok(None) => Ok(sources),
             Err(error) => Err(Error::config(format!(

@@ -184,7 +184,7 @@ The dynamic npm backend reuses the npm CLI backend's artifact sources, which are
 npmmirror and the official npmjs registry by default. They pass through the
 common [`ranked_source_list`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs):
 
-1. a pin comes first, with the other sources retained for failure fallback;
+1. an explicit pin is the sole candidate for a synthetic project install;
 2. `ordered` follows priority;
 3. the default `auto` mode probes concurrently and ranks throughput first, with
    time to first byte as the secondary factor;

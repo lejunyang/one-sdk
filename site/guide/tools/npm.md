@@ -343,7 +343,8 @@ lifecycle 操作，`osdk.lock` schema 4 保存与 schema 3 兼容的 npm 选项�
 新的用户配置。`[settings.precedence] npm="osdk"` 配合 `[registries.npm] default` 可覆盖
 原生默认源；离线跳过原生源预检。无法匿名使用的显式默认源会报错并给出 osdk 配置出口。
 `osdk source pin npm:<包名> <id>` 或 `--source <id>` 的显式内置/自定义源优先于原生配置，
-只使用该源；`source list` 始终展示可管理的 osdk 源，取消 pin 恢复原生选择。
+只使用该源。`source list` 始终展示可管理的 osdk 源，取消 pin 恢复原生选择。
+切换到固定源失败时，保留原来的安装。
 
 `osdk exec --tool npm:... -- <命令>` 按所选安装清单中的公开命令名解析目标，
 即使实际文件名不同（例如 `prettier.cjs`）也能执行。显式可执行文件路径保持不变。

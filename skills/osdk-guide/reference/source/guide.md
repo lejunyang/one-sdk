@@ -49,5 +49,5 @@ Node 会合并所有可达版本 index；经典 CPython 会合并同一 release 
 `SHA256SUMS`；Java 会逐个查询 Foojay-compatible source 及其 checksum detail。这样
 “通用探测正常但目标版本 metadata 缺失”也会继续后备源。
 
-`npm:<package>` 的未锁定安装和 `osdk lock` graph-only 阶段会逐 source 重建隔离项目；
-后者固定禁用脚本，所以可安全回退。已有原生 lock 的 frozen 重放不会切换来源。
+`npm:<package>` 的未锁定安装和 `osdk lock` graph-only 阶段会逐候选源重建隔离项目。明确
+选源时只有一个候选。graph-only 固定禁用脚本。已有原生 lock 的 frozen 重放按锁定来源执行。

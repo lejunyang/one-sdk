@@ -141,7 +141,7 @@ lock。`npm install --global` 不会写 lockfile，因此该作用域不会记�
 动态 npm backend 复用 npm CLI backend 的 artifact sources：默认候选为 npmmirror 和
 npmjs 官方 Registry。它们经过通用 [`ranked_source_list`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs)：
 
-1. pin 优先，并保留其余来源作为失败回退；
+1. 合成项目安装设置了 pin 时，仅使用选定源；
 2. `ordered` 按 priority；
 3. 默认 `auto` 并发探测，吞吐优先、TTFB 为次要因子；
 4. 探测结果按 `cache_ttl` 复用，`--refresh-sources` 强制刷新。

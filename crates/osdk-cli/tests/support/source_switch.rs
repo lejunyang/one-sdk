@@ -15,7 +15,7 @@ fn cargo_and_npm_source_switches_use_the_selected_provider_and_preserve_failed_i
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("6 source-switch scenarios passed"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("7 source-switch scenarios passed"));
 }
 
 fn fixture_dirs(root: &Path) -> osdk_core::dirs::Dirs {
