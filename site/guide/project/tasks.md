@@ -4,6 +4,20 @@
 目标是替代大多数 Makefile 与 npm scripts 的用途：任务默认就是「伪目标」，
 不需要 `.PHONY`；依赖按拓扑顺序执行；用什么工具版本由 osdk 自己注入。
 
+## 仓库的真实 PyPI 源回归
+
+在 one-sdk 的 Linux 工作树中，`osdk task list` 可见 `pypi-native-install`。它先执行
+`build`，再运行真实 pip/uv 的隔离 TLS 回环安装；需要 openssl、带 venv/pip 的 Python
+及真实 uv（CI 固定 0.13.1），不会安装到用户的 SDK 状态中。
+
+```sh
+osdk run pypi-native-install -- --python /path/to/python3 --uv /path/to/uv
+```
+
+使用自定义 `CARGO_TARGET_DIR` 时，再传 `--osdk /path/to/current/debug/osdk`。
+`--report /path/to/result.json` 保存请求计数和产物证据。该任务由独立 Linux CI job 执行，
+不在不具备这些前置条件的通用 `ci` 任务中静默跳过。
+
 ## 最简形式
 
 ```toml

@@ -66,3 +66,5 @@ python=osdk 时，pypi 查询和安装忽略继承的 pip/uv 追加索引，仅�
 osdk env/exec 后再启用hook，不把导出GOPROXY捕获为用户源；deactivate恢复未设置，用户覆盖仍生效。
 
 命名UV_INDEX覆盖同名uv配置索引，旧地址从查版本和安装候选中移除；不同名索引保持顺序。
+
+one-sdk Linux 工作树的真实源回归通过 `osdk run pypi-native-install -- --python /path/to/python3 --uv /path/to/uv` 执行，先 build，需 openssl 与真实 uv（CI 固定 0.13.1）。自定义构建目录另传 `--osdk`，可传 `--report` 保存请求/产物证据；独立 CI job 使用同一命名任务。
