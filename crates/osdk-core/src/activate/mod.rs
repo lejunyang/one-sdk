@@ -2012,6 +2012,191 @@ mod tests {
     }
 
     #[test]
+    fn managed_goproxy_capture_is_rendered_before_release_in_every_shell() {
+        let delta = EnvDelta {
+            path_prepend: Vec::new(),
+            set_vars: BTreeMap::from([("GOPROXY".into(), "https://proxy.example,direct".into())]),
+            unset_vars: Vec::new(),
+        };
+        for shell in [Shell::Bash, Shell::Fish, Shell::Powershell] {
+            let output = render_hook_env(shell, &delta);
+            let mut capture = String::new();
+            render_capture_managed_goproxy(shell, &mut capture);
+            let mut release = String::new();
+            render_release_goproxy(shell, &mut release);
+            let capture_at = output
+                .find(&capture)
+                .expect("missing managed proxy capture");
+            let release_at = output
+                .find(&release)
+                .expect("missing managed proxy release");
+            assert!(capture_at < release_at, "{shell:?}: {output}");
+            assert!(capture.contains("OSDK_ORIG_GOPROXY_PRESENT"));
+        }
+    }
+
+    #[test]
+    fn managed_goproxy_capture_runs_in_bash() {
+        assert_managed_goproxy_capture_in_shell(Shell::Bash);
+    }
+
+    #[test]
+    fn managed_goproxy_capture_runs_in_fish() {
+        assert_managed_goproxy_capture_in_shell(Shell::Fish);
+    }
+
+    #[test]
+    fn managed_goproxy_capture_runs_in_powershell_strict_mode() {
+        assert_managed_goproxy_capture_in_shell(Shell::Powershell);
+    }
+
+    fn assert_managed_goproxy_capture_in_shell(shell: Shell) {
+        let Some(mut command) = test_shell(shell) else {
+            eprintln!(
+                "skipping {shell:?}: interpreter unavailable on {}",
+                std::env::consts::OS
+            );
+            return;
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let proxy = "https://proxy.example,direct";
+        let user = "https://user.example,direct";
+        let delta = |value: &str| EnvDelta {
+            path_prepend: Vec::new(),
+            set_vars: BTreeMap::from([("GOPROXY".into(), value.into())]),
+            unset_vars: Vec::new(),
+        };
+        let exports = render_env_exports(shell, &delta(proxy));
+        let hook = render_hook_env(shell, &delta(proxy));
+        let user_hook = render_hook_env(shell, &delta(user));
+        let undo = deactivation_script(shell);
+        let set = |key: &str, value: &str| {
+            let mut output = String::new();
+            render_set_var(shell, key, value, &mut output);
+            output
+        };
+        let unset = |key: &str| match shell {
+            Shell::Fish => format!("set -e {key}; or true\n"),
+            Shell::Powershell => format!("Remove-Item Env:{key} -ErrorAction SilentlyContinue\n"),
+            _ => format!("unset {key}\n"),
+        };
+        let equal = |key: &str, value: &str| match shell {
+            Shell::Fish => format!(
+                "test \"${key}\" = {}; or exit 91\n",
+                shell_quote(shell, value)
+            ),
+            Shell::Powershell => format!(
+                "if ($env:{key} -cne {}) {{ throw 'unexpected {key}' }}\n",
+                powershell_quote(value)
+            ),
+            _ => format!(
+                "[ \"${key}\" = {} ] || exit 91\n",
+                shell_quote(shell, value)
+            ),
+        };
+        let absent = |key: &str| match shell {
+            Shell::Fish => format!("not set -q {key}; or exit 92\n"),
+            Shell::Powershell => {
+                format!("if (Test-Path Env:{key}) {{ throw 'unexpected present {key}' }}\n")
+            }
+            _ => format!("[ -z \"${{{key}+x}}\" ] || exit 92\n"),
+        };
+        let mark = |label: &str| match shell {
+            Shell::Powershell => format!("Write-Output '{label}'\n"),
+            _ => format!("echo {label}\n"),
+        };
+        let mut script = if shell == Shell::Powershell {
+            "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\nif ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 required' }\n".to_owned()
+        } else {
+            String::new()
+        };
+        // env output, and exec's process assignments, must both enter the same capture path.
+        for entry in ["ENV", "EXEC"] {
+            if entry == "ENV" {
+                script.push_str(&exports);
+            } else {
+                let assignments = env_assignments(&delta(proxy), std::ffi::OsStr::new("")).unwrap();
+                for key in ["GOPROXY", crate::execution::APPLIED_GOPROXY] {
+                    script.push_str(&set(key, &assignments[key]));
+                }
+            }
+            script.push_str(&absent("OSDK_ORIG_GOPROXY_SET"));
+            script.push_str(&hook);
+            script.push_str(&equal("OSDK_ORIG_GOPROXY_PRESENT", "0"));
+            script.push_str(&hook);
+            script.push_str(&equal("OSDK_ORIG_GOPROXY_PRESENT", "0"));
+            script.push_str(&equal("GOPROXY", proxy));
+            script.push_str(&undo);
+            for key in ["GOPROXY", "OSDK_APPLIED_GOPROXY", "OSDK_ORIG_GOPROXY_SET"] {
+                script.push_str(&absent(key));
+            }
+            script.push_str(&mark(entry));
+        }
+        // An existing snapshot is not replaced by the standalone export's absence.
+        script.push_str(&set("OSDK_ORIG_GOPROXY", user));
+        script.push_str(&set("OSDK_ORIG_GOPROXY_PRESENT", "1"));
+        script.push_str(&set("OSDK_ORIG_GOPROXY_SET", "1"));
+        script.push_str(&exports);
+        script.push_str(&hook);
+        script.push_str(&equal("OSDK_ORIG_GOPROXY", user));
+        script.push_str(&undo);
+        script.push_str(&equal("GOPROXY", user));
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&mark("SNAPSHOT"));
+        // A user change before a hook, after a hook, and an unset remain authoritative.
+        script.push_str(&exports);
+        script.push_str(&set("GOPROXY", user));
+        script.push_str(&user_hook);
+        script.push_str(&undo);
+        script.push_str(&equal("GOPROXY", user));
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&mark("BEFORE"));
+        script.push_str(&exports);
+        script.push_str(&hook);
+        script.push_str(&set("GOPROXY", user));
+        script.push_str(&undo);
+        script.push_str(&equal("GOPROXY", user));
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&mark("AFTER"));
+        script.push_str(&exports);
+        script.push_str(&hook);
+        script.push_str(&unset("GOPROXY"));
+        script.push_str(&undo);
+        script.push_str(&absent("GOPROXY"));
+        script.push_str(&mark("UNSET"));
+        match shell {
+            Shell::Powershell => {
+                command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            }
+            Shell::Fish => {
+                command.args(["--no-config", "-c", &script]);
+            }
+            _ => {
+                command.args(["--noprofile", "--norc", "-c", &script]);
+            }
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        command
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", temporary.path())
+            .env("USERPROFILE", temporary.path());
+        let output = command.output().expect("spawn GOPROXY shell regression");
+        let stdout = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+        assert!(
+            output.status.success(),
+            "{shell:?}: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            ["ENV", "EXEC", "SNAPSHOT", "BEFORE", "AFTER", "UNSET"],
+            "{shell:?}"
+        );
+        eprintln!("executed {shell:?} on {}: env/exec, first/repeated hook, snapshot, overrides, unset and deactivate", std::env::consts::OS);
+    }
+
+    #[test]
     fn hook_env_renders_path_and_vars() {
         let mut set_vars = BTreeMap::new();
         set_vars.insert("GOROOT".to_string(), "/x/go".to_string());
