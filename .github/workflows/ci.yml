@@ -157,6 +157,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install Fish for execution regressions
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fish
       - name: clippy
         run: cargo clippy --workspace --all-targets
       - name: test
@@ -165,6 +168,13 @@ jobs:
           # Only the generic github: backend needs this. Current tests use local
           # fixture servers and do not require network access.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Linux PowerShell Go env/exec and hook restoration
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: |
+          cargo build --locked -p osdk-cli
+          if ($LASTEXITCODE -ne 0) { throw 'Linux CLI build failed' }
+          ./scripts/test-go-proxy-powershell.ps1 -Osdk ./target/debug/osdk
       - name: build windows runtime binaries
         if: runner.os == 'Windows'
         shell: pwsh

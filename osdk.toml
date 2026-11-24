@@ -135,6 +135,13 @@ depends = ["build"]
 run = "pwsh -NoProfile -File scripts/windows-runtime-smoke.ps1 -BinDir target/debug"
 when = { os = "windows" }
 
+[tasks.go-proxy-powershell]
+description = "Go env/exec first-hook and restoration under PowerShell 7 StrictMode (Linux or native Windows)"
+depends = ["build"]
+run = "pwsh -NoProfile -File scripts/test-go-proxy-powershell.ps1 -Osdk target/debug/osdk"
+run_windows = "pwsh -NoProfile -File scripts/test-go-proxy-powershell.ps1 -Osdk target/debug/osdk.exe"
+when = { os = ["linux", "windows"] }
+
 [tasks.wine-tests]
 description = "Windows GNU test suite under Wine, from Linux"
 # Requires mingw-w64 and the x86_64-pc-windows-gnu target; the script downloads

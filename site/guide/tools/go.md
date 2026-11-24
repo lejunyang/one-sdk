@@ -137,6 +137,11 @@ pin 在这里需要额外处理。通用路径是在探测之后再应用 pin，
 
 ## 隔离与激活
 
+one-sdk 仓库通过真实 Fish 与 PowerShell 7 测试 `env`/`exec` → 首次和重复 `hook-env`
+→ `deactivate`，包括用户覆盖与 unset。PowerShell 开启 `Set-StrictMode -Version Latest`。
+本地可执行 `osdk run go-proxy-powershell`；需 PowerShell 7，Linux 运行不代表原生 Windows。
+同一场景也纳入 `osdk run windows-smoke` 的原生 Windows 矩阵。
+
 osdk 在清空的环境中无 shell 执行一次 `go install <command>@v<version>`。它强制使用选中的
 受管 `GOROOT`、分阶段 `GOBIN`、私有 home/GOPATH/temp、osdk 控制的共享 module/build cache、
 `GOENV=off` 和 `GOTOOLCHAIN=local`。`GOSUMDB=off` 避免访问无关 checksum service，因此

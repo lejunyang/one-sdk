@@ -169,6 +169,12 @@ into a hard build failure.
 
 ## Isolation and activation
 
+The one-sdk repository executes real Fish and PowerShell 7 regressions for `env`/`exec`
+→ first and repeated `hook-env` → `deactivate`, including user overrides and unset.
+PowerShell enables `Set-StrictMode -Version Latest`. Run `osdk run go-proxy-powershell`
+with PowerShell 7 installed; execution on Linux is not native Windows validation.
+The same scenario is part of the native Windows `osdk run windows-smoke` matrix.
+
 osdk runs one shell-free `go install <command>@v<version>` in a cleared
 environment. It forces the selected managed `GOROOT`, a staged `GOBIN`, private
 home/GOPATH/temp directories, shared osdk-controlled module and build caches,

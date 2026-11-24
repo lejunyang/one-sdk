@@ -64,6 +64,7 @@ python=osdk 时，pypi 查询和安装忽略继承的 pip/uv 追加索引，仅�
 未安装受管 uv 时，不把 uv 追加索引转成 pip。先安装 pypi:uv，或使用 registries.python.urls + python=osdk；单个默认 uv 索引可回退 pip。
 
 osdk env/exec 后再启用hook，不把导出GOPROXY捕获为用户源；deactivate恢复未设置，用户覆盖仍生效。
+仓库可用 `osdk run go-proxy-powershell`（需 pwsh7）实跑 StrictMode 的 env/exec→hook→恢复；Linux pwsh 不等同原生 Windows，Windows 同场景包含在 windows-smoke。Fish 回归在解释器存在时执行，CI Linux 安装 Fish。
 
 命名UV_INDEX覆盖同名uv配置索引，旧地址从查版本和安装候选中移除；不同名索引保持顺序。
 

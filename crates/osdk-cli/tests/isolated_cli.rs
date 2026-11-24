@@ -4361,6 +4361,91 @@ eval "$("$OSDK_TEST_BIN" deactivate bash)"
 
 #[cfg(unix)]
 #[test]
+fn fish_go_proxy_env_and_exec_survive_first_hook_and_deactivation() {
+    let fish = std::env::var_os("OSDK_TEST_FISH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|directory| directory.join("fish"))
+                .find(|candidate| candidate.is_file())
+        });
+    let Some(fish) = fish else {
+        eprintln!("skipping Fish CLI regression: interpreter unavailable");
+        return;
+    };
+    for entry in ["env", "exec"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::write(root.join("osdk.toml"), "[tools]\ngo=\"1.24.0\"\n").unwrap();
+        let runtime = root.join("installs/go/1.24.0");
+        write_executable(&runtime.join("bin/go"), "#!/bin/sh\nexit 42\n");
+        complete_go_fixture(&runtime);
+        let script = r#"
+function apply
+    set -l text ($OSDK_TEST_BIN $argv | string collect)
+    test $pipestatus[1] = 0; or exit 81
+    test -n "$text"; or exit 82
+    eval $text
+end
+if test $ENTRY = env
+    apply env --format fish
+end
+not set -q OSDK_ORIG_GOPROXY_SET; or exit 83
+test "$GOPROXY" = "$OSDK_APPLIED_GOPROXY"; or exit 84
+set -l managed "$GOPROXY"
+apply hook-env --shell fish
+test "$OSDK_ORIG_GOPROXY_PRESENT" = 0; or exit 85
+apply hook-env --shell fish
+test "$OSDK_ORIG_GOPROXY_PRESENT" = 0; or exit 85
+test "$GOPROXY" = "$managed"; or exit 86
+apply deactivate fish
+not set -q GOPROXY; or exit 87
+not set -q OSDK_APPLIED_GOPROXY; or exit 88
+apply env --format fish
+set -gx GOPROXY https://user.example,direct
+apply hook-env --shell fish
+apply deactivate fish
+test "$GOPROXY" = https://user.example,direct; or exit 89
+set -e GOPROXY
+apply env --format fish
+apply hook-env --shell fish
+set -gx GOPROXY off
+apply deactivate fish
+test "$GOPROXY" = off; or exit 90
+set -e GOPROXY
+apply env --format fish
+apply hook-env --shell fish
+set -e GOPROXY
+apply deactivate fish
+not set -q GOPROXY; or exit 91
+echo FISH_GO_PROXY_OK
+"#;
+        let mut command = if entry == "exec" {
+            let mut command = isolated_command(root, root, &osdk());
+            command
+                .args(["exec", "--"])
+                .arg(&fish)
+                .args(["--no-config", "-c", script]);
+            command
+        } else {
+            let mut command = isolated_command(root, root, &fish);
+            command.args(["--no-config", "-c", script]);
+            command
+        };
+        command
+            .env("ENTRY", entry)
+            .env("OSDK_TEST_BIN", osdk())
+            .env("GOENV", "off")
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root);
+        let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+        assert!(output.status.success(), "Fish {entry}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("FISH_GO_PROXY_OK"));
+        eprintln!("Fish CLI {entry} first/repeated hook and restoration executed on Linux/Unix");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn osdk_precedence_bypasses_native_go_and_python_sources() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
