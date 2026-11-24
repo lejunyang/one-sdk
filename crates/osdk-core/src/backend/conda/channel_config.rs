@@ -40,15 +40,12 @@ impl NativeChannels {
     pub(super) fn load() -> Result<Option<Self>> {
         #[cfg(test)]
         if let Some(root) = TEST_CONFIG_ROOT.with(|root| root.borrow().clone()) {
-            return Self::read(
-                &config_paths(Some(root.clone()), |_| None)
-                    .into_iter()
-                    .filter(|path| path.starts_with(&root))
-                    .collect::<Vec<_>>(),
-            );
+            return Self::read(&config_paths(Vec::new(), Some(root), |_| None));
         }
         Self::read_with_env(
-            &config_paths(std::env::home_dir(), |name| std::env::var_os(name)),
+            &config_paths(system_config_directories(), std::env::home_dir(), |name| {
+                std::env::var_os(name)
+            }),
             |name| std::env::var_os(name),
         )
     }
@@ -294,20 +291,28 @@ fn channel_url(value: &str) -> Result<Url> {
     )
 }
 
-fn config_paths(home: Option<PathBuf>, getenv: impl Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
+fn system_config_directories() -> Vec<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("ProgramData")
+            .filter(|value| !value.is_empty())
+            .map(|value| PathBuf::from(value).join("conda"))
+            .into_iter()
+            .collect()
+    } else {
+        ["/etc/conda", "/var/lib/conda"].map(PathBuf::from).into()
+    }
+}
+
+fn config_paths(
+    mut directories: Vec<PathBuf>,
+    home: Option<PathBuf>,
+    getenv: impl Fn(&str) -> Option<OsString>,
+) -> Vec<PathBuf> {
     let env_dir = |name| {
         getenv(name)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     };
-    let mut directories = Vec::new();
-    if cfg!(windows) {
-        if let Some(program_data) = env_dir("ProgramData") {
-            directories.push(program_data.join("conda"));
-        }
-    } else {
-        directories.extend(["/etc/conda", "/var/lib/conda"].map(PathBuf::from));
-    }
     directories.extend(env_dir("CONDA_ROOT"));
     directories.extend(env_dir("XDG_CONFIG_HOME").map(|path| path.join("conda")));
     if let Some(home) = &home {
@@ -538,16 +543,19 @@ mod tests {
         std::fs::write(&explicit,
             "default_channels: [https://defaults.example.test/main]\ncustom_channels:\n  nvidia: https://cuda.example.test/channel\n",
         ).unwrap();
-        let paths = config_paths(Some(home), |name| {
+        let system = temp.path().join("system");
+        std::fs::create_dir_all(system.join("condarc.d")).unwrap();
+        std::fs::write(
+            system.join("condarc.d/system.yml"),
+            "channel_alias: https://system.example.test/\ncustom_channels: {community: https://system.example.test/}",
+        )
+        .unwrap();
+        let paths = config_paths(vec![system], Some(home), |name| {
             (name == "CONDARC").then(|| explicit.clone().into_os_string())
         });
-        let paths = paths
-            .into_iter()
-            .filter(|path| path.starts_with(temp.path()))
-            .collect::<Vec<_>>();
         let config = NativeChannels::read(&paths).unwrap().unwrap();
         let explicit_channels =
-            super::super::parse_channels("nvidia,conda-forge,defaults").unwrap();
+            super::super::parse_channels("nvidia,conda-forge,defaults,community").unwrap();
         assert_eq!(
             config
                 .urls(Some(&explicit_channels))
@@ -558,7 +566,8 @@ mod tests {
             [
                 "https://cuda.example.test/channel/nvidia/",
                 "https://alias.example.test/conda-forge/",
-                "https://defaults.example.test/main/"
+                "https://defaults.example.test/main/",
+                "https://system.example.test/community/"
             ]
         );
         assert_eq!(
@@ -594,12 +603,9 @@ custom_channels: {shared: https://new.example.test}
 "#,
         )
         .unwrap();
-        let paths = config_paths(Some(home), |name| {
+        let paths = config_paths(Vec::new(), Some(home), |name| {
             (name == "CONDA_PREFIX").then(|| prefix.clone().into_os_string())
-        })
-        .into_iter()
-        .filter(|path| path.starts_with(temp.path()))
-        .collect::<Vec<_>>();
+        });
         let config = NativeChannels::read(&paths).unwrap().unwrap();
         assert!(config.channels.is_none());
         assert_eq!(
