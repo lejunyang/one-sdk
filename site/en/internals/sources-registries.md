@@ -68,7 +68,7 @@ the requested project page and injects the winner as uv/pip's default index.
 
 ## Explicit sources for installed tools
 
-Dynamic fast reuse checks the current pin or `--source` against local provenance first. Cargo compares the exact sparse index; npm compares the registry and includes a selected registry in new install identities; Conda records solved channels and checks their source base. Missing or different provenance enters normal resolution and installation. Matching installs remain reusable offline. A failed new source leaves the old install and completion marker intact.
+Dynamic fast reuse checks the current pin or `--source` against local provenance first. Cargo compares the exact sparse index. Synthetic project npm installs compare the registry and include the selected registry in their install identities. Global npm installs use their own registry preflight and keep their existing install identity. Conda records solved channels and checks their source base. Missing or different provenance enters normal resolution and installation. Matching installs remain reusable offline. A failed new source leaves the old install and completion marker intact.
 
 ## Project registry preflight
 

@@ -921,9 +921,9 @@ Guide: [Agent skills](site/en/guide/ai/skills.md)
 ## Scenario: control sources, offline use, and trust
 
 Let osdk rank available sources, pin a preferred mirror, add a trusted internal
-source, or override the source for one command. Cargo, Conda, and npm tools also
-check provenance before reusing an installed version: switching an explicit source
-installs from that source, while a failed switch preserves the old installation.
+source, or override the source for one command. Cargo, Conda, and isolated project
+npm tools check the source before reusing an installed version. Switching sources
+installs from the selected source. A failed switch preserves the old installation.
 
 ```bash
 osdk source list node

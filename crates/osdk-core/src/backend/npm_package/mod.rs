@@ -256,20 +256,22 @@ impl NpmPackageBackend {
             &sources,
             crate::npm::resolve_package_version(ctx, &sources, &self.package, self.id(), req).await,
         )?;
-        if let Some(source) = ctx
-            .config
-            .tool_sources(self.id())
-            .and_then(|cfg| cfg.pin.as_deref())
-            .and_then(|pin| sources.iter().find(|source| source.id == pin))
-        {
-            version.options.insert(
-                "__osdk_npm_registry".into(),
-                source.download_url.trim_end_matches('/').into(),
-            );
-        }
         let scope = self
             .selected_scope(ctx, &version)?
             .unwrap_or(ToolScope::Project);
+        if !delegated && scope == ToolScope::Project {
+            if let Some(source) = ctx
+                .config
+                .tool_sources(self.id())
+                .and_then(|cfg| cfg.pin.as_deref())
+                .and_then(|pin| sources.iter().find(|source| source.id == pin))
+            {
+                version.options.insert(
+                    "__osdk_npm_registry".into(),
+                    source.download_url.trim_end_matches('/').into(),
+                );
+            }
+        }
         if let Some(node_version) = selected_node_version_for(ctx, scope) {
             version
                 .options
@@ -322,16 +324,17 @@ impl NpmPackageBackend {
             identity: None,
         }];
         let mut materials = BTreeMap::new();
-        let registry = tv.options.get("__osdk_npm_registry").cloned().or_else(|| {
-            let sources = crate::source::select::effective_sources(ctx, self);
-            let pin = ctx.config.tool_sources(self.id())?.pin.as_deref()?;
-            sources
-                .iter()
-                .find(|source| source.id == pin)
-                .map(|source| source.download_url.trim_end_matches('/').to_string())
-        });
-        if let Some(registry) = registry {
-            materials.insert("registry".into(), registry);
+        if scope == ToolScope::Project {
+            let registry = tv.options.get("__osdk_npm_registry").cloned().or_else(|| {
+                let pin = ctx.config.tool_sources(self.id())?.pin.as_deref()?;
+                crate::source::select::effective_sources(ctx, self)
+                    .into_iter()
+                    .find(|source| source.id == pin)
+                    .map(|source| source.download_url.trim_end_matches('/').to_string())
+            });
+            if let Some(registry) = registry {
+                materials.insert("registry".into(), registry);
+            }
         }
         if let Some(digest) = tv.options.get(LOCKED_NPM_LOCK_SHA256_OPTION) {
             materials.insert("lock-graph-sha256".into(), digest.to_ascii_lowercase());
@@ -682,7 +685,9 @@ impl NpmPackageBackend {
                 candidate
             };
             candidate.version = install.manifest.identity.version.clone();
-            if let Some(registry) = install.manifest.identity.materials.get("registry") {
+            if let (ToolScope::Project, Some(registry)) =
+                (scope, install.manifest.identity.materials.get("registry"))
+            {
                 candidate
                     .options
                     .insert("__osdk_npm_registry".into(), registry.clone());
@@ -3099,6 +3104,41 @@ scope = "project"
             &BuildPolicy::Deny,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn pinned_registry_is_material_only_for_project_npm_installs() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = offline_test_ctx(temp.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        ctx.config.sources.per_tool.insert(
+            backend.id().into(),
+            crate::config::ToolSources {
+                pin: Some("npm".into()),
+                ..Default::default()
+            },
+        );
+        let mut tv = npm_test_version(&backend, "3.6.2");
+        for (recorded, expected) in [
+            (None, "https://registry.npmjs.org"),
+            (
+                Some("https://recorded.example.test"),
+                "https://recorded.example.test",
+            ),
+        ] {
+            if let Some(registry) = recorded {
+                tv.options
+                    .insert("__osdk_npm_registry".into(), registry.into());
+            }
+            let global = backend
+                .install_identity(&ctx, &tv, ToolScope::Global)
+                .unwrap();
+            assert!(global.materials.is_empty());
+            let project = backend
+                .install_identity(&ctx, &tv, ToolScope::Project)
+                .unwrap();
+            assert_eq!(project.materials.get("registry").unwrap(), expected);
+        }
     }
 
     #[test]

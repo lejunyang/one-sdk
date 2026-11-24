@@ -86,7 +86,10 @@ pub(crate) fn inventory_validation_candidate(
         LOCKED_NPM_NODE_VERSION_OPTION.into(),
         exact_node_dependency(&manifest.identity)?.to_string(),
     );
-    if let Some(registry) = manifest.identity.materials.get("registry") {
+    if let (InstallScope::Isolated, Some(registry)) = (
+        manifest.identity.scope,
+        manifest.identity.materials.get("registry"),
+    ) {
         candidate
             .options
             .insert("__osdk_npm_registry".into(), registry.clone());

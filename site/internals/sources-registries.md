@@ -57,7 +57,7 @@ project 页面，并把结果注入 uv/pip 的 default index。
 
 ## 已安装工具的明确选源
 
-动态安装的快速复用先核对本次 pin 或 `--source` 的来源。Cargo 比较精确 sparse index；npm 比较 registry，选定 registry 参与新安装身份；Conda 保存求解频道清单并按源基础地址核对。来源缺失或不同会进入正常解析与安装，同源可离线复用。新源失败保留旧安装，不清除其完成标记。
+动态安装的快速复用先核对本次 pin 或 `--source` 的来源。Cargo 比较精确 sparse index。项目内的合成 npm 安装核对 registry，并将选定 registry 计入安装身份。全局 npm 安装用自己的 registry 预检规则，沿用原有安装身份。Conda 保存求解频道清单并按源基础地址核对。来源缺失或不同会进入正常解析与安装，同源可离线复用。新源失败保留旧安装，不清除其完成标记。
 
 ## 项目 registry 启动前预检
 
