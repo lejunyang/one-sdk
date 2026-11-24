@@ -100,7 +100,9 @@ CLI。流水线本来就把 attestation 证据当作 authenticated checksum，�
 因此"按版本与平台切换摘要来源"是 `[[archive.overrides]]` 的正常用例而非边缘情况。
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) 是运行时创建的命名空间 backend。它最多分页读取 1,000 个 release，忽略 draft，并按预发布策略过滤；随后按 OS、架构和 libc 为 asset 评分。显式规则可解决非标准 asset 名称。在线且启用签名校验时，可用的可信 minisign checksum manifest 会覆盖预载的静态摘要；否则使用静态摘要，再回退到普通 sidecar/shared checksum。配置的 GitHub attestation 策略独立应用。匿名请求仍使用规范化后的排序来源。设置令牌时默认排除内置镜像并还原旧锁已知代理前缀；显式 custom relay 保持配置。
-非 GitHub catalog/制品地址照常访问。校验沿用传输列表，Authorization 仅由官方 HTTPS API
+非 GitHub catalog/制品地址照常访问。带令牌且有明确 pin 时，在 backend 选源入口先收窄
+到该源，再执行共同传输策略；因此官方 pin 不会被 Custom 过滤替换成 relay。
+校验沿用传输列表，Authorization 仅由官方 HTTPS API
 请求生成；GitHub Enterprise 自定义 API 目前未支持。
 其受支持的 asset、平台、catalog 摘要、rename、bin 与 strip 选项会先作为公开身份输入
 校验，再写入 schema 1 动态安装 manifest。`catalog-url` 可用于获取，但会被刻意排除；必填的

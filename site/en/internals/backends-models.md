@@ -123,7 +123,9 @@ is the `[[archive.overrides]]` case rather than an edge case.
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. Anonymous requests retain ranked, normalized source candidates. With a token,
 default routing excludes built-in mirrors and normalizes known older-lock proxy
 prefixes; explicit custom relays remain configured routes. Non-GitHub catalogs and
-assets remain accessible. Checksums follow the transport list; only official HTTPS
+assets remain accessible. With a token and an explicit pin, backend source selection
+first narrows to that source, before the common transport policy. The Custom filter
+therefore cannot replace an official pin with a relay. Checksums follow the transport list; only official HTTPS
 API requests carry Authorization. Custom GitHub Enterprise APIs remain unsupported.
 Its supported asset, platform, catalog-digest, rename, bin, and strip options are
 validated as public identity inputs and stored in the schema-1 dynamic install manifest.

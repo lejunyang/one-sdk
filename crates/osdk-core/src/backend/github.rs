@@ -630,6 +630,24 @@ impl Backend for GithubBackend {
     }
 
     #[cfg(feature = "install")]
+    fn restrict_sources(&self, ctx: &Ctx, sources: Vec<Source>) -> Result<Vec<Source>> {
+        if http::github_token().is_some() {
+            if let Some(pin) = ctx
+                .config
+                .tool_sources(self.id())
+                .and_then(|cfg| cfg.pin.as_deref())
+            {
+                return sources
+                    .into_iter()
+                    .find(|source| source.id == pin)
+                    .map(|source| vec![source])
+                    .ok_or_else(|| Error::config(format!("unknown GitHub source `{pin}`")));
+            }
+        }
+        Ok(sources)
+    }
+
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let releases = self.releases(ctx, &sources).await?;
@@ -1981,6 +1999,47 @@ mod tests {
             },
             client: reqwest::Client::new(),
             show_progress: false,
+        }
+    }
+
+    #[test]
+    fn github_token_pin_selects_one_api_and_download_transport() {
+        const NAME: &str =
+            "backend::github::tests::github_token_pin_selects_one_api_and_download_transport";
+        if std::env::var_os("OSDK_TEST_GITHUB_SOURCE_PIN").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+                .env("OSDK_TEST_GITHUB_SOURCE_PIN", "1")
+                .env("OSDK_GITHUB_TOKEN", "fixture-token")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:fixture-owner/fixture-repo").unwrap();
+        let mut relay = Source::mirror("relay", "https://relay.example.test/download/", 1)
+            .with_index("https://relay.example.test/api/");
+        relay.kind = crate::source::SourceKind::Custom;
+        let api = "https://api.github.com/repos/fixture-owner/fixture-repo/releases";
+        let asset =
+            "https://github.com/fixture-owner/fixture-repo/releases/download/v1/fixture-tool";
+        for (pin, expected_api, expected_asset) in [
+            ("github", api.to_string(), asset.to_string()),
+            ("relay", "https://relay.example.test/api/repos/fixture-owner/fixture-repo/releases".into(), "https://relay.example.test/download/fixture-owner/fixture-repo/releases/download/v1/fixture-tool".into()),
+        ] {
+            ctx.config.sources.per_tool.insert(backend.id().into(), crate::config::ToolSources { pin: Some(pin.into()), custom: vec![relay.clone()], ..Default::default() });
+            let sources = backend.restrict_sources(&ctx, crate::source::select::effective_sources(&ctx, &backend)).unwrap();
+            assert_eq!(sources.len(),1); assert_eq!(sources[0].id,pin);
+            assert_eq!(http::github_release_url_candidates(&sources,api).unwrap(), vec![expected_api]);
+            assert_eq!(http::github_release_url_candidates(&sources,asset).unwrap(), vec![expected_asset]);
         }
     }
 

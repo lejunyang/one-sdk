@@ -644,7 +644,8 @@ Guide: [Go developer tools](site/en/guide/tools/go.md)
 
 `osdk install github:owner/repo` bypasses built-in mirrors when
 `OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is set. Explicit custom relays
-and catalog/artifact hosts remain usable without receiving the token. See
+and catalog/artifact hosts remain usable without receiving the token. An explicit
+`github` source pin keeps release lookup and downloads on official routes. See
 [GitHub Releases](site/en/guide/tools/github-releases.md).
 
 ## Scenario: work in each language ecosystem

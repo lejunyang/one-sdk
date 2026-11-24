@@ -117,7 +117,10 @@ download cache does not change this configuration.
 Token priority is `OSDK_GITHUB_TOKEN`, `GITHUB_TOKEN`, then `GH_TOKEN`.
 With a token, default release routing bypasses built-in mirrors and uses GitHub
 directly. Explicit custom `[sources]` relays remain configured routes, and remote
-static catalogs/assets may use non-GitHub hosts. Authorization goes only to the
+static catalogs/assets may use non-GitHub hosts. An explicit `--source github` or
+persistent `github` pin keeps release lookup and downloads on official routes without
+falling back to a configured relay. Selecting a custom relay uses only that relay.
+Authorization goes only to the
 official HTTPS API `api.github.com`, never to relays, catalogs or other asset hosts.
 GitHub Enterprise
 custom API addresses are currently unsupported.

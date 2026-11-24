@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use std::{io::Write, net::TcpListener, net::TcpStream};
 
 const ISOLATED_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+#[path = "support/github_selected_source.rs"]
+mod github_selected_source;
 #[path = "support/source_diagnostics.rs"]
 mod source_diagnostics;
 #[path = "support/source_switch.rs"]
