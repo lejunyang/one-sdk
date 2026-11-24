@@ -66,6 +66,10 @@ the sparse `config.json` and probes the exact `.crate` URL before fixing source
 identity, avoiding a rerun after build scripts may have started. `pypi:` probes
 the requested project page and injects the winner as uv/pip's default index.
 
+## Explicit sources for installed tools
+
+Dynamic fast reuse checks the current pin or `--source` against local provenance first. Cargo compares the exact sparse index; npm compares the registry and includes a selected registry in new install identities; Conda records solved channels and checks their source base. Missing or different provenance enters normal resolution and installation. Matching installs remain reusable offline. A failed new source leaves the old install and completion marker intact.
+
 ## Project registry preflight
 
 The planner lives in [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs), called by [`package_sources::apply`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_sources.rs). It handles only an explicit allow-list of commands that may fetch npm packages and first identifies the manager family. An unknown Yarn major is conservatively passed through.

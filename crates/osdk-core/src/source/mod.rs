@@ -75,6 +75,15 @@ pub fn canonical_upstream_url(url: &str, pairs: &[(String, String)]) -> String {
     }
 }
 
+/// Compare URL path boundaries, not a raw prefix (for example `/index-other`).
+pub fn url_is_under_base(value: &str, base: &str) -> bool {
+    let base = base.trim_end_matches('/');
+    value == base
+        || value
+            .strip_prefix(base)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
 /// A single download source for a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
@@ -254,6 +263,22 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_url_matching_requires_a_path_boundary() {
+        assert!(url_is_under_base(
+            "https://example.test/index/package",
+            "https://example.test/index/"
+        ));
+        assert!(!url_is_under_base(
+            "https://example.test/index-other/package",
+            "https://example.test/index/"
+        ));
+        assert!(!url_is_under_base(
+            "https://example.test.evil/index/package",
+            "https://example.test/index/"
+        ));
+    }
 
     #[test]
     fn score_prefers_higher_throughput() {

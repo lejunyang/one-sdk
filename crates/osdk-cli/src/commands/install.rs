@@ -1585,6 +1585,16 @@ pub(crate) fn installed_dynamic_match(
         .into_map();
     let platform = app.ctx.platform.to_string();
 
+    let source_pin = app
+        .ctx
+        .config
+        .tool_sources(backend.id())
+        .and_then(|cfg| cfg.pin.as_deref());
+    let sources = select::effective_sources(&app.ctx, backend);
+    let selected_source = source_pin.and_then(|pin| sources.iter().find(|source| source.id == pin));
+    if source_pin.is_some() && selected_source.is_none() {
+        return None;
+    }
     let candidates: Vec<&osdk_core::inventory::InstalledDynamicTool> = report
         .installs
         .iter()
@@ -1593,6 +1603,21 @@ pub(crate) fn installed_dynamic_match(
             identity.tool == backend.id()
                 && identity.platform == platform
                 && identity.material_options == wanted_options
+                && selected_source.is_none_or(|source| {
+                    backend
+                        .install_matches_source(
+                            &app.ctx,
+                            &ToolVersion {
+                                backend: backend.id().into(),
+                                version: identity.version.clone(),
+                                options: request.options.clone(),
+                            },
+                            &install.install_root,
+                            identity,
+                            source,
+                        )
+                        .unwrap_or(false)
+                })
         })
         .collect();
     if candidates.is_empty() {
@@ -1639,6 +1664,37 @@ pub(crate) fn installed_dynamic_match(
     // The scan happened a moment ago; confirm the directory and manifest are
     // still the same objects before letting them decide no install is needed.
     install.revalidate().ok()?;
+    if let Some(index) = install.manifest.identity.materials.get("registry-index") {
+        version.options.insert(
+            osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION.into(),
+            index.clone(),
+        );
+        if let Some(runtime) = install
+            .manifest
+            .identity
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.id == "rust")
+        {
+            version.options.insert(
+                osdk_core::backend::native_tool::LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
+                runtime.version.clone(),
+            );
+        }
+    }
+    if backend.id().starts_with("conda:") {
+        if let Some(checksum) = install.manifest.identity.materials.get("artifact-checksum") {
+            version.options.insert(
+                osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                checksum.clone(),
+            );
+        }
+    }
+    if let Some(registry) = install.manifest.identity.materials.get("registry") {
+        version
+            .options
+            .insert("__osdk_npm_registry".into(), registry.clone());
+    }
 
     Some(version)
 }
@@ -1769,6 +1825,16 @@ async fn install_one_with_resolution(
         // followed by shim generation, say) must not see the pre-install memo.
         app.invalidate_dynamic_scan();
         println!("{}", t!("msg.installed", tool = tv));
+    }
+    if backend.id().starts_with("conda:") {
+        if let Some(identity) = backend.dynamic_install_identity(&app.ctx, &tv)? {
+            if let Some(checksum) = identity.materials.get("artifact-checksum") {
+                tv.options.insert(
+                    osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                    checksum.clone(),
+                );
+            }
+        }
     }
     Ok((backend, tv))
 }

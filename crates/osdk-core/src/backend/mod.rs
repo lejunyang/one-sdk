@@ -88,6 +88,23 @@ pub trait Backend: Send + Sync {
         Ok(sources)
     }
 
+    /// Verify local provenance before reusing an install with an explicit source.
+    #[cfg(feature = "install")]
+    fn install_matches_source(
+        &self,
+        _ctx: &Ctx,
+        _tv: &ToolVersion,
+        install_root: &std::path::Path,
+        _identity: &crate::tool::InstallIdentity,
+        source: &Source,
+    ) -> Result<bool> {
+        Ok(
+            crate::pipeline::artifact_receipt_at(install_root).is_some_and(|receipt| {
+                crate::source::url_is_under_base(&receipt.url, &source.download_url)
+            }),
+        )
+    }
+
     /// The native environment variables that point this toolchain at a mirror,
     /// if it has any. Returning `Some` opts the backend into ranking an ambient
     /// value alongside its built-in sources; see [`crate::source::env`].

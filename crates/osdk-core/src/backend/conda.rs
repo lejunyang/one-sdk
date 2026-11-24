@@ -34,6 +34,7 @@ use channel_config::NativeChannels;
 
 /// The channel used when a definition does not name one.
 pub const DEFAULT_CHANNEL: &str = "conda-forge";
+const CHANNEL_RECEIPT: &str = ".osdk-conda-channels.json";
 
 /// Upstream channel host. Mirrors below serve the same layout under a prefix.
 const UPSTREAM_BASE: &str = "https://conda.anaconda.org";
@@ -267,10 +268,11 @@ fn conda_installed_locator(
     backend_id: &str,
     tv: &ToolVersion,
 ) -> Result<Option<InstallLocator>> {
-    match select_installed_identity(&ctx.dirs, ctx.platform, backend_id, tv)? {
-        Some(identity) => InstallLocator::new(&ctx.dirs, identity).map(Some),
-        None => Ok(None),
-    }
+    select_installed_identity_with(&ctx.dirs, ctx.platform, backend_id, tv, |root| {
+        conda_source_matches(ctx, backend_id, root)
+    })?
+    .map(|identity| InstallLocator::new(&ctx.dirs, identity))
+    .transpose()
 }
 
 /// The install identity of the prefix currently satisfying this request.
@@ -300,6 +302,16 @@ fn select_installed_identity(
     backend_id: &str,
     tv: &ToolVersion,
 ) -> Result<Option<InstallIdentity>> {
+    select_installed_identity_with(dirs, platform, backend_id, tv, |_| true)
+}
+
+fn select_installed_identity_with(
+    dirs: &Dirs,
+    platform: Platform,
+    backend_id: &str,
+    tv: &ToolVersion,
+    source_matches: impl Fn(&Path) -> bool,
+) -> Result<Option<InstallIdentity>> {
     let expected_options = crate::backend::dynamic::identity_options(backend_id, &tv.options)?;
     // Scan only this tool's own subtree: the filter below already requires
     // `identity.tool == backend_id`, so walking every other tool's installs
@@ -317,7 +329,12 @@ fn select_installed_identity(
             && identity.version == tv.version
             && identity.platform == platform.to_string()
             && identity.scope == InstallScope::Isolated
+            && source_matches(&install.install_root)
             && identity.material_options == expected_options
+            && tv
+                .options
+                .get(crate::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION)
+                .is_none_or(|digest| identity.materials.get("artifact-checksum") == Some(digest))
     });
     let Some(first) = candidates.next() else {
         return Ok(None);
@@ -329,6 +346,37 @@ fn select_installed_identity(
         )));
     }
     Ok(Some(first.manifest.identity))
+}
+
+fn conda_source_matches(ctx: &Ctx, backend: &str, root: &Path) -> bool {
+    let Some(pin) = ctx
+        .config
+        .tool_sources(backend)
+        .and_then(|cfg| cfg.pin.as_deref())
+    else {
+        return true;
+    };
+    let Some(backend) = CondaBackend::from_id(backend) else {
+        return false;
+    };
+    let sources = crate::source::select::effective_sources(ctx, &backend);
+    let Some(source) = sources.iter().find(|source| source.id == pin) else {
+        return false;
+    };
+    conda_channel_receipt_matches(root, source)
+}
+
+fn conda_channel_receipt_matches(root: &Path, source: &Source) -> bool {
+    let Ok(bytes) = std::fs::read(root.join(CHANNEL_RECEIPT)) else {
+        return false;
+    };
+    let Ok(channels) = serde_json::from_slice::<Vec<String>>(&bytes) else {
+        return false;
+    };
+    !channels.is_empty()
+        && channels
+            .iter()
+            .all(|channel| crate::source::url_is_under_base(channel, &source.download_url))
 }
 
 /// The prefix root for an installed version, or the legacy flat path.
@@ -1380,9 +1428,21 @@ impl Backend for CondaBackend {
         }
         std::fs::create_dir_all(&staging).map_err(|error| Error::io(&staging, error))?;
 
-        let result = self
-            .materialize(ctx, &routes.artifact_mirrors, &records, &staging)
-            .await;
+        let result = async {
+            self.materialize(ctx, &routes.artifact_mirrors, &records, &staging)
+                .await?;
+            let channels = records
+                .iter()
+                .map(|record| record.channel.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            std::fs::write(
+                staging.join(CHANNEL_RECEIPT),
+                serde_json::to_vec(&channels)?,
+            )
+            .map_err(|error| Error::io(staging.join(CHANNEL_RECEIPT), error))?;
+            Ok(())
+        }
+        .await;
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&staging);
             return result;
@@ -1400,6 +1460,18 @@ impl Backend for CondaBackend {
         // receipt are what let `osdk exec` resolve this prefix at all; the
         // completion marker alone is not enough for a dynamic namespace.
         finalize_conda_install(&locator)
+    }
+
+    #[cfg(feature = "install")]
+    fn install_matches_source(
+        &self,
+        _ctx: &Ctx,
+        _tv: &ToolVersion,
+        root: &Path,
+        _identity: &InstallIdentity,
+        source: &Source,
+    ) -> Result<bool> {
+        Ok(conda_channel_receipt_matches(root, source))
     }
 
     #[cfg(feature = "install")]
@@ -1502,6 +1574,15 @@ impl Backend for CondaBackend {
         Ok(crate::backend::bin_names_in_dirs(&self.bin_paths(ctx, tv)?))
     }
 
+    fn dynamic_install_identity(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<Option<InstallIdentity>> {
+        conda_installed_locator(ctx, self.id(), tv)
+            .map(|locator| locator.map(|locator| locator.identity().clone()))
+    }
+
     /// Validate a prefix the shim is about to expose.
     ///
     /// This does not delegate to the shared artifact validator, which rejects
@@ -1521,6 +1602,7 @@ impl Backend for CondaBackend {
         if identity.scope != InstallScope::Isolated
             || !install_root.join(".osdk-complete").is_file()
             || !DynamicToolManifest::manifest_path(install_root).is_file()
+            || !conda_source_matches(ctx, self.id(), install_root)
         {
             return Ok(false);
         }
@@ -2425,6 +2507,34 @@ mod tests {
     /// Mirrors must rank behind upstream. `Source::official` uses priority 0
     /// and lower wins, so a mirror with a *smaller* number would quietly
     /// become the metadata source and drag in whole-subdir repodata.
+    #[test]
+    fn explicit_source_reuse_requires_matching_conda_channels() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Source::official("anaconda", UPSTREAM_BASE);
+        assert!(!conda_channel_receipt_matches(temp.path(), &source));
+        for (channels, expected) in [
+            (vec![format!("{UPSTREAM_BASE}/conda-forge/")], true),
+            (vec![format!("{UPSTREAM_BASE}.evil/conda-forge/")], false),
+            (
+                vec![
+                    format!("{UPSTREAM_BASE}/conda-forge/"),
+                    "https://private.example.test/channel/".into(),
+                ],
+                false,
+            ),
+        ] {
+            std::fs::write(
+                temp.path().join(CHANNEL_RECEIPT),
+                serde_json::to_vec(&channels).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                conda_channel_receipt_matches(temp.path(), &source),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn mirrors_rank_behind_upstream() {
         let backend = CondaBackend::from_id("conda:ruff").unwrap();

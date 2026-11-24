@@ -55,6 +55,10 @@ Go command 工具有更严格的边界：存在 custom source 时只对这些 cu
 并探测精确 `.crate` URL，避免在 build script 可能启动后重跑。`pypi:` 的选择探测实际
 project 页面，并把结果注入 uv/pip 的 default index。
 
+## 已安装工具的明确选源
+
+动态安装的快速复用先核对本次 pin 或 `--source` 的来源。Cargo 比较精确 sparse index；npm 比较 registry，选定 registry 参与新安装身份；Conda 保存求解频道清单并按源基础地址核对。来源缺失或不同会进入正常解析与安装，同源可离线复用。新源失败保留旧安装，不清除其完成标记。
+
 ## 项目 registry 启动前预检
 
 registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs)，调用点是 [`package_sources::apply`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_sources.rs)。它只处理明确 allow-list 中可能拉取 npm 包的命令，并先识别 manager family；Yarn major 无法可靠确定时保守透传。

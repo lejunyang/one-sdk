@@ -102,6 +102,12 @@ prefix *without* solving (`bin_paths`, `uninstall`, the shim) recovers it from
 the inventory instead. An ambiguous match is an error rather than a guess:
 guessing wrong would run a different build than the one requested.
 
+## Source-aware reuse
+
+An explicit pin filters persisted solved-channel provenance before reuse. The returned
+tool version carries the selected closure digest so later shim selection and lock writing
+keep the exact prefix after a source switch. Old prefixes without provenance are revalidated.
+
 ## Why finalize_artifact_install is not reused
 
 The shared `dynamic::finalize_artifact_install` rejects any symlink under the

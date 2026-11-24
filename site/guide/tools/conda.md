@@ -104,7 +104,8 @@ CEP-16 分片索引（sharded repodata），镜像只有整个 subdir 的 `repod
 SHA-256 校验失败时逐源回退。
 
 如果你显式 `osdk source pin` 了某个镜像，osdk 会尊重你的选择，老实从镜像下载
-全量 repodata。
+全量 repodata。同一版本已经安装时，仍会核对它的频道来源；换源会安装新的 prefix，
+同源可快速复用。旧安装缺少来源记录时会重新验证，切换失败保留旧 prefix。
 
 ## 版本
 

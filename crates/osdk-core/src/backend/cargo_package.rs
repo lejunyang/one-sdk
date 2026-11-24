@@ -661,6 +661,20 @@ impl CargoPackageBackend {
             &ctx.dirs.installs,
             &crate::inventory::ScanOptions::default(),
         )?;
+        let pin_index = if matches!(self.source, CargoSource::Registry { .. }) {
+            ctx.config
+                .tool_sources(self.id())
+                .and_then(|cfg| cfg.pin.as_deref())
+                .and_then(|pin| {
+                    crate::source::select::effective_sources(ctx, self)
+                        .into_iter()
+                        .find(|source| source.id == pin)
+                })
+                .map(|source| registry_index(&source))
+                .transpose()?
+        } else {
+            None
+        };
         let mut matching = report.installs.into_iter().filter(|install| {
             let identity = &install.manifest.identity;
             identity.tool == self.id
@@ -668,6 +682,9 @@ impl CargoPackageBackend {
                 && identity.platform == ctx.platform.to_string()
                 && identity.scope == crate::tool::InstallScope::Isolated
                 && identity.material_options == expected_options
+                && pin_index
+                    .as_ref()
+                    .is_none_or(|index| identity.materials.get("registry-index") == Some(index))
                 && (tv.options.contains_key(LOCKED_CARGO_INDEX_OPTION)
                     && identity.materials == expected_materials
                     || !tv.options.contains_key(LOCKED_CARGO_INDEX_OPTION)
@@ -1562,6 +1579,21 @@ impl Backend for CargoPackageBackend {
         Ok(())
     }
 
+    #[cfg(feature = "install")]
+    fn install_matches_source(
+        &self,
+        _ctx: &Ctx,
+        _tv: &ToolVersion,
+        _root: &Path,
+        identity: &InstallIdentity,
+        source: &Source,
+    ) -> Result<bool> {
+        if matches!(self.source, CargoSource::Git { .. }) {
+            return Ok(true);
+        }
+        Ok(identity.materials.get("registry-index") == Some(&registry_index(source)?))
+    }
+
     fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         self.validate_replay_source(ctx, &tv.options)
     }
@@ -1649,6 +1681,20 @@ impl Backend for CargoPackageBackend {
                 != crate::backend::dynamic::identity_options(&self.id, &tv.options)?
         {
             return Ok(false);
+        }
+        if let Some(pin) = ctx
+            .config
+            .tool_sources(self.id())
+            .and_then(|cfg| cfg.pin.as_deref())
+        {
+            let sources = crate::source::select::effective_sources(ctx, self);
+            if let Some(source) = sources.iter().find(|source| source.id == pin) {
+                if matches!(self.source, CargoSource::Registry { .. })
+                    && identity.materials.get("registry-index") != Some(&registry_index(source)?)
+                {
+                    return Ok(false);
+                }
+            }
         }
         if !self.resolution_matches(tv, &load_resolution(install_root)?) {
             return Ok(false);
@@ -2781,6 +2827,41 @@ mod tests {
         assert!(lifecycle.install_root().join("bin/rg.exe").is_file());
         assert!(!lifecycle.install_root().join("home").exists());
         assert!(!lifecycle.install_root().join("target").exists());
+    }
+
+    #[test]
+    fn explicit_source_reuse_compares_the_exact_registry_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = context(temp.path(), true);
+        let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
+        let tv = ToolVersion::new(backend.id(), "1.2.3");
+        let mut identity = InstallIdentity::new(
+            backend.id(),
+            "1.2.3",
+            ctx.platform.to_string(),
+            crate::tool::InstallScope::Isolated,
+            &tv.options,
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let source =
+            Source::official("crates-io", "https://crates.io/").with_index(CRATES_IO_SPARSE_INDEX);
+        assert!(!backend
+            .install_matches_source(&ctx, &tv, temp.path(), &identity, &source)
+            .unwrap());
+        identity
+            .materials
+            .insert("registry-index".into(), RSPROXY_SPARSE_INDEX.into());
+        assert!(!backend
+            .install_matches_source(&ctx, &tv, temp.path(), &identity, &source)
+            .unwrap());
+        identity
+            .materials
+            .insert("registry-index".into(), CRATES_IO_SPARSE_INDEX.into());
+        assert!(backend
+            .install_matches_source(&ctx, &tv, temp.path(), &identity, &source)
+            .unwrap());
     }
 
     #[tokio::test]

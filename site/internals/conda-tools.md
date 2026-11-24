@@ -79,7 +79,8 @@ repodata 仍按原来的分片优先级回退，归档仍按原先的源顺序�
 
 由于摘要只有求解后才知道，所有"不求解就要拿到 prefix"的路径——`bin_paths`、
 `uninstall`、shim——都改为从 inventory 反查已安装身份。匹配到多个时报错而不是
-猜一个：猜错就会运行到另一个 build。
+猜一个：猜错就会运行到另一个 build。明确 pin 时先按已保存的求解频道筛选，
+返回的工具版本携带选中闭包摘要，避免换源后多份同版本 prefix 在后续 shim 或锁写入中混淆。
 
 ## 为什么不复用 finalize_artifact_install
 

@@ -256,6 +256,17 @@ impl NpmPackageBackend {
             &sources,
             crate::npm::resolve_package_version(ctx, &sources, &self.package, self.id(), req).await,
         )?;
+        if let Some(source) = ctx
+            .config
+            .tool_sources(self.id())
+            .and_then(|cfg| cfg.pin.as_deref())
+            .and_then(|pin| sources.iter().find(|source| source.id == pin))
+        {
+            version.options.insert(
+                "__osdk_npm_registry".into(),
+                source.download_url.trim_end_matches('/').into(),
+            );
+        }
         let scope = self
             .selected_scope(ctx, &version)?
             .unwrap_or(ToolScope::Project);
@@ -311,6 +322,17 @@ impl NpmPackageBackend {
             identity: None,
         }];
         let mut materials = BTreeMap::new();
+        let registry = tv.options.get("__osdk_npm_registry").cloned().or_else(|| {
+            let sources = crate::source::select::effective_sources(ctx, self);
+            let pin = ctx.config.tool_sources(self.id())?.pin.as_deref()?;
+            sources
+                .iter()
+                .find(|source| source.id == pin)
+                .map(|source| source.download_url.trim_end_matches('/').to_string())
+        });
+        if let Some(registry) = registry {
+            materials.insert("registry".into(), registry);
+        }
         if let Some(digest) = tv.options.get(LOCKED_NPM_LOCK_SHA256_OPTION) {
             materials.insert("lock-graph-sha256".into(), digest.to_ascii_lowercase());
         }
@@ -660,6 +682,11 @@ impl NpmPackageBackend {
                 candidate
             };
             candidate.version = install.manifest.identity.version.clone();
+            if let Some(registry) = install.manifest.identity.materials.get("registry") {
+                candidate
+                    .options
+                    .insert("__osdk_npm_registry".into(), registry.clone());
+            }
             candidate
                 .options
                 .insert(LOCKED_NPM_SCOPE_OPTION.into(), scope.as_str().into());
@@ -1363,6 +1390,30 @@ impl Backend for NpmPackageBackend {
                 self.id
             ))),
         }
+    }
+
+    #[cfg(feature = "install")]
+    fn install_matches_source(
+        &self,
+        _ctx: &Ctx,
+        _tv: &ToolVersion,
+        root: &Path,
+        identity: &InstallIdentity,
+        source: &Source,
+    ) -> Result<bool> {
+        if let Some(registry) = identity.materials.get("registry") {
+            return Ok(registry == source.download_url.trim_end_matches('/'));
+        }
+        // Old installs retain the synthetic installer's exact registry setting.
+        let Ok(npmrc) = std::fs::read_to_string(root.join(PROJECT_DIR).join(".npmrc")) else {
+            return Ok(false);
+        };
+        Ok(npmrc
+            .lines()
+            .find_map(|line| line.strip_prefix("registry="))
+            .is_some_and(|registry| {
+                registry.trim_end_matches('/') == source.download_url.trim_end_matches('/')
+            }))
     }
 
     #[cfg(feature = "install")]
@@ -3048,6 +3099,42 @@ scope = "project"
             &BuildPolicy::Deny,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn explicit_source_reuse_checks_legacy_npmrc_and_registry_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temp.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let tv = npm_test_version(&backend, "3.6.2");
+        let mut identity = backend
+            .install_identity(&ctx, &tv, ToolScope::Project)
+            .unwrap();
+        let source = Source::official("npm", "https://registry.npmjs.org/");
+        assert!(!backend
+            .install_matches_source(&ctx, &tv, temp.path(), &identity, &source)
+            .unwrap());
+        std::fs::create_dir(temp.path().join(PROJECT_DIR)).unwrap();
+        std::fs::write(
+            temp.path().join(PROJECT_DIR).join(".npmrc"),
+            "registry=https://registry.npmjs.org/\n",
+        )
+        .unwrap();
+        assert!(backend
+            .install_matches_source(&ctx, &tv, temp.path(), &identity, &source)
+            .unwrap());
+        identity
+            .materials
+            .insert("registry".into(), "https://registry.npmjs.org.evil".into());
+        assert!(!backend
+            .install_matches_source(&ctx, &tv, temp.path(), &identity, &source)
+            .unwrap());
+        identity
+            .materials
+            .insert("registry".into(), "https://registry.npmjs.org".into());
+        assert!(backend
+            .install_matches_source(&ctx, &tv, temp.path(), &identity, &source)
+            .unwrap());
     }
 
     #[test]

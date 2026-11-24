@@ -119,7 +119,9 @@ each solved package URL is rebased across the ranked sources with per-candidate
 download and SHA-256 verification.
 
 If you explicitly `osdk source pin` a mirror, osdk respects that choice and
-downloads the full repodata from it.
+downloads the full repodata from it. An installed version is reused only when its
+recorded channels match the selected source. Switching sources installs a new prefix;
+missing old provenance is revalidated, and a failed switch leaves the old prefix intact.
 
 ## Versions
 
