@@ -679,11 +679,12 @@ measured scan rooted at the current directory next to a `target/` tree took
 2,827.91 ms against 61.26 ms from the correct starting point — 46x. Prefer
 patterns with a directory prefix; a bare `**/*.rs` walks everything.
 
-Use `/` as the path separator in shared configurations. Backslashes follow the
-platform's glob rules. They escape characters on Unix and separate path
-segments on Windows. On Unix, `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
-tracks files named `[slug].tsx` under `src/`. At the project root, use
-`\[slug\].tsx` or `./\[slug\].tsx`.
+Use `/` as the path separator in shared configurations. Use `[[]` and `[]]`
+to match literal `[` and `]` in filenames. For example,
+`sources = ['src/**/[[]slug[]].tsx']` tracks files named `[slug].tsx` under
+`src/` on both Unix and Windows. At the project root, use `[[]slug[]].tsx`.
+On Unix, backslashes escape characters, so `src/**/\[slug\].tsx` also works.
+On Windows, backslashes separate path segments.
 
 Prefix a pattern with `!` to exclude. Both positive and exclusion patterns
 allow optional standalone `.` path segments and treat consecutive path separators

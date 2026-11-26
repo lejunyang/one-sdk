@@ -232,31 +232,52 @@ freshness = 'hash'
     assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
 }
 
-#[cfg(all(unix, feature = "scripts"))]
+#[cfg(feature = "scripts")]
 #[test]
 fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
-    assert_hash_task_tracks_glob("src/routes/[slug].tsx", r"src/**/\[slug\].tsx");
-    assert_hash_task_tracks_glob("[slug].tsx", r"\[slug\].tsx");
-    assert_hash_task_tracks_glob("[slug].tsx", r"./\[slug\].tsx");
-    assert_hash_task_tracks_glob("page.[slug].tsx", r"page\.\[slug\].tsx");
-    assert_hash_task_tracks_glob("page-[slug].tsx", r"page-\[slug\]\.tsx");
-}
-
-#[cfg(all(windows, feature = "scripts"))]
-#[test]
-fn hash_task_rebuilds_when_a_windows_style_source_glob_changes() {
-    assert_hash_task_tracks_glob("src/main.rs", r"src\*.rs");
-    assert_hash_task_tracks_glob("src/a.rs", r"src\[ab].rs");
-    assert_hash_task_tracks_glob("src/pages/]index.tsx", r"src\pages\]index.tsx");
+    let pattern = "src/**/[[]slug[]].tsx";
+    assert_hash_task_glob_freshness("src/pages/[slug].tsx", pattern, true);
+    assert_hash_task_glob_freshness("src/pages/s.tsx", pattern, false);
+    assert_hash_task_glob_freshness("[slug].tsx", "./[[]slug[]].tsx", true);
 }
 
 #[cfg(feature = "scripts")]
-fn assert_hash_task_tracks_glob(source_path: &str, pattern: &str) {
+#[test]
+fn hash_task_source_globs_use_backslashes_as_windows_separators() {
+    let windows = cfg!(windows);
+    assert_hash_task_glob_freshness("src/main.rs", r"src\*.rs", windows);
+    assert_hash_task_glob_freshness("src/a.rs", r"src\[ab].rs", windows);
+    assert_hash_task_glob_freshness("src/pages/]index.tsx", r"src\pages\]index.tsx", windows);
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_source_globs_use_backslashes_as_unix_escapes() {
+    let unix = cfg!(unix);
+    for (source, pattern) in [
+        ("src[ab].rs", r"src\[ab].rs"),
+        ("src/pages/[slug].tsx", r"src/**/\[slug\].tsx"),
+        ("[slug].tsx", r"\[slug\].tsx"),
+        ("[slug].tsx", r"./\[slug\].tsx"),
+        ("page.[slug].tsx", r"page\.\[slug\].tsx"),
+        ("page-[slug].tsx", r"page-\[slug\]\.tsx"),
+    ] {
+        assert_hash_task_glob_freshness(source, pattern, unix);
+    }
+    if unix {
+        // Windows does not allow a literal `*` in a filename.
+        assert_hash_task_glob_freshness("src*.rs", r"src\*.rs", true);
+    }
+}
+
+#[cfg(feature = "scripts")]
+fn assert_hash_task_glob_freshness(source_path: &str, pattern: &str, tracked: bool) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
     let source = root.join(source_path);
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, "original").unwrap();
+    // Keep one input matched even when the glob intentionally misses the source.
     std::fs::write(root.join("manifest.json"), "{}").unwrap();
     std::fs::write(
         root.join("osdk.toml"),
@@ -282,14 +303,22 @@ freshness = "hash"
     assert_eq!(std::fs::read(&result).unwrap(), b"original");
     let unchanged = run(&["run", "build"]);
     assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+    assert!(!unchanged.contains("TASK_EXECUTED"), "{unchanged}");
 
     std::fs::write(&source, "updated").unwrap();
-    let rebuilt = run(&["run", "build"]);
-    assert!(
-        rebuilt.contains("TASK_EXECUTED"),
-        "{pattern} did not track {source_path}: {rebuilt}"
+    let changed = run(&["run", "build"]);
+    assert_eq!(
+        changed.contains("TASK_EXECUTED"),
+        tracked,
+        "{pattern} tracking {source_path}: {changed}"
     );
-    assert_eq!(std::fs::read(&result).unwrap(), b"updated");
+    assert_eq!(
+        changed.contains("up to date, skipped"),
+        !tracked,
+        "{pattern} tracking {source_path}: {changed}"
+    );
+    let expected = if tracked { "updated" } else { "original" };
+    assert_eq!(std::fs::read(&result).unwrap(), expected.as_bytes());
 }
 
 #[cfg(feature = "scripts")]
