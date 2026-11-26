@@ -515,28 +515,59 @@ fn skills_update_resolves_a_changed_pin_before_writing_the_lock() {
     let locked = format!(
         "schema = 4\n\n[skills.demo]\nsource = \"github:acme/demo\"\n\
          content_hash = \"b3-v2:old\"\nrequested_ref = \"rev:{old}\"\n\
-         resolved_commit = \"{old}\"\ninstall_mode = \"copy\"\nagents = [\"codex\"]\n"
+         resolved_commit = \"{old}\"\ninstall_mode = \"copy\"\nagents = [\"codex\", \"claude-code\"]\n"
     );
     std::fs::write(&lock, &locked).unwrap();
-    let declaration = |commit| {
+    let installed = [
+        project.join(".agents/skills/demo/SKILL.md"),
+        project.join(".claude/skills/demo/SKILL.md"),
+    ];
+    for path in &installed {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, DEMO_SKILL).unwrap();
+    }
+    let declaration = |commit, agents| {
         format!(
             "[skills.demo]\nsource = \"github:acme/demo\"\n\
-             ref = \"rev:{commit}\"\nagents = [\"codex\"]\n"
+             ref = \"rev:{commit}\"\nagents = [{agents}]\n"
         )
     };
     let args = ["--offline", "skills", "update", "demo"];
 
-    std::fs::write(&config, declaration(old)).unwrap();
+    std::fs::write(&config, declaration(old, "\"codex\", \"claude-code\"")).unwrap();
     let unchanged = osdk(root, &project, &args);
     assert!(unchanged.status.success(), "{unchanged:?}");
     assert_eq!(std::fs::read_to_string(&lock).unwrap(), locked);
 
-    std::fs::write(&config, declaration(new)).unwrap();
+    std::fs::write(&config, declaration(new, "\"claude-code\"")).unwrap();
     let changed = osdk(root, &project, &args);
     assert!(!changed.status.success(), "{changed:?}");
     let stderr = String::from_utf8_lossy(&changed.stderr);
     assert!(stderr.contains("offline metadata cache miss"), "{stderr}");
     assert!(stderr.contains(new), "{stderr}");
+    assert_eq!(std::fs::read_to_string(lock).unwrap(), locked);
+    for path in &installed {
+        assert_eq!(std::fs::read(path).unwrap(), DEMO_SKILL.as_bytes());
+    }
+}
+
+#[test]
+fn skills_update_keeps_an_unchanged_short_pin_offline() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(
+        root,
+        "[skills.demo]\nsource = \"github:acme/demo\"\nref = \"rev:0123456\"\nagents = [\"codex\"]\n",
+    );
+    let lock = project.join("osdk.lock");
+    let locked = "schema = 4\n\n[skills.demo]\nsource = \"github:acme/demo\"\n\
+        content_hash = \"b3-v2:old\"\nrequested_ref = \"rev:0123456\"\n\
+        resolved_commit = \"0123456789abcdef0123456789abcdef01234567\"\n\
+        install_mode = \"copy\"\nagents = [\"codex\"]\n";
+    std::fs::write(&lock, locked).unwrap();
+
+    let update = osdk(root, &project, &["--offline", "skills", "update", "demo"]);
+    assert!(update.status.success(), "{update:?}");
     assert_eq!(std::fs::read_to_string(lock).unwrap(), locked);
 }
 

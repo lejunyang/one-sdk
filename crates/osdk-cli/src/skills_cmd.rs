@@ -522,27 +522,19 @@ fn declared_agents(app: &App, name: &str) -> Option<Vec<String>> {
     (!agents.is_empty()).then(|| agents.clone())
 }
 
-/// Bring a locked skill's agents in line with its declaration.
-///
-/// `update` only ever re-resolved the source, so editing `agents` in osdk.toml
-/// (dropping `claude-code`, say) changed nothing: the lock kept the old list
-/// and the skill stayed installed where the project no longer asks for it.
-/// Dropped agents are unlinked the way `remove --agent` does it; added ones
-/// get the copy the lock already pins. Returns whether the lock changed.
-async fn reconcile_declared_agents(
+/// Install a prepared replacement on the final set of agents, or use the
+/// locked bytes for newly declared agents. Unlink dropped agents after linking
+/// succeeds and return whether the Agent list changed.
+async fn update_skill_targets(
     app: &App,
-    lock: &mut lockfile::Lockfile,
     name: &str,
+    entry: &mut LockedSkill,
     scope_root: &Path,
     global: bool,
     mode: LinkMode,
+    replacement: Option<PathBuf>,
 ) -> Result<bool> {
-    let Some(declared) = declared_agents(app, name) else {
-        return Ok(false);
-    };
-    let Some(entry) = lock.skills.get(name).cloned() else {
-        return Ok(false);
-    };
+    let declared = declared_agents(app, name).unwrap_or_else(|| entry.agents.clone());
     let removed: Vec<String> = entry
         .agents
         .iter()
@@ -554,34 +546,30 @@ async fn reconcile_declared_agents(
         .filter(|agent| !entry.agents.contains(agent))
         .cloned()
         .collect();
-    if removed.is_empty() && added.is_empty() {
-        return Ok(false);
-    }
     for agent in &added {
         agent_target(agent).with_context(|| {
             format!("unknown agent `{agent}` (run `osdk skills agents` for the list)")
         })?;
     }
 
-    if !removed.is_empty() {
-        let kept: Vec<String> = entry
-            .agents
-            .iter()
-            .filter(|agent| declared.contains(agent))
-            .cloned()
-            .collect();
-        unlink_agents(name, &removed, &kept, scope_root, global)?;
-    }
-    if !added.is_empty() {
-        let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
-        if !staged.exists() {
-            staged = refetch_staged(app, name, &entry, mode)
-                .await?
-                .with_context(|| {
-                    format!("skill `{name}` has no staged copy to install for the added agents")
-                })?;
+    let installation = match replacement {
+        Some(staged) => Some((&declared, staged)),
+        None if !added.is_empty() => {
+            let mut staged =
+                install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
+            if !staged.exists() {
+                staged = refetch_staged(app, name, entry, mode)
+                    .await?
+                    .with_context(|| {
+                        format!("skill `{name}` has no staged copy to install for the added agents")
+                    })?;
+            }
+            Some((&added, staged))
         }
-        let targets = added
+        None => None,
+    };
+    if let Some((agents, staged)) = installation {
+        let targets = agents
             .iter()
             .filter_map(|agent| agent_target(agent))
             .collect::<Vec<_>>();
@@ -589,11 +577,15 @@ async fn reconcile_declared_agents(
             install::link_into(agent_dir, name, &staged, mode)?;
         }
     }
-    if let Some(existing) = lock.skills.get_mut(name) {
-        existing.agents = declared.clone();
+    if !removed.is_empty() {
+        unlink_agents(name, &removed, &declared, scope_root, global)?;
     }
-    println!("`{name}`: agents now {}", declared.join(", "));
-    Ok(true)
+    let agents_changed = !removed.is_empty() || !added.is_empty();
+    if agents_changed {
+        println!("`{name}`: agents now {}", declared.join(", "));
+        entry.agents = declared;
+    }
+    Ok(agents_changed)
 }
 
 fn declaration_applies(app: &App, declaration: &SkillDeclaration) -> bool {
@@ -838,10 +830,9 @@ async fn refetch_staged(
 
 /// Update installed skills to the latest resolution of their source.
 ///
-/// For each targeted skill, re-resolve its GitHub source's ref to the current
-/// commit; if that differs from the lock, re-download, re-stage, re-link the
-/// agents it was in, and rewrite the lock. Local sources and commit-pinned
-/// GitHub sources have nothing to re-resolve and are reported as up to date.
+/// Resolve and stage changes to a GitHub source before changing agent
+/// directories. Local skills and GitHub skills that keep their current commit
+/// can still update their agent list.
 async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
     let lock_path = lock_path_for(app, global);
     if !lock_path.is_file() {
@@ -863,15 +854,10 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
     let fallback_mode = link_mode(app, false);
     let mut changed = false;
     for name in &names {
-        let Some(entry) = lock.skills.get(name).cloned() else {
+        let Some(entry) = lock.skills.get_mut(name) else {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
-        let mode = install_mode_for_entry(&entry, name, &scope_root, global, fallback_mode)?;
-        if reconcile_declared_agents(app, &mut lock, name, &scope_root, global, mode).await? {
-            changed = true;
-        }
-        // Re-read: the re-link below must target the agents now declared.
-        let entry = lock.skills.get(name).cloned().expect("entry checked above");
+        let mode = install_mode_for_entry(entry, name, &scope_root, global, fallback_mode)?;
         let source = SkillSource::parse(&entry.source)?;
         let SkillSource::GitHub {
             owner,
@@ -879,6 +865,8 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             subdir,
         } = &source
         else {
+            changed |=
+                update_skill_targets(app, name, entry, &scope_root, global, mode, None).await?;
             println!("`{name}`: local source, nothing to update");
             continue;
         };
@@ -892,9 +880,20 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             .map(|declaration| declaration.r#ref.as_deref());
         let requested_reference = configured_reference.unwrap_or(entry.requested_ref.as_deref());
         let reference = reference_for_update(requested_reference);
+        let requested_ref = normalized_requested_ref(requested_reference);
+        // An abbreviated pin can reuse a resolution made for that same request.
         let pinned_commit = reference.and_then(|reference| reference.strip_prefix("rev:"));
         let commit = match &entry.resolved_commit {
-            Some(commit) if pinned_commit.is_some_and(|pin| pin.eq_ignore_ascii_case(commit)) => {
+            Some(commit)
+                if pinned_commit.is_some_and(|pin| {
+                    pin.eq_ignore_ascii_case(commit)
+                        || (entry.requested_ref == requested_ref
+                            && !pin.is_empty()
+                            && commit
+                                .get(..pin.len())
+                                .is_some_and(|prefix| pin.eq_ignore_ascii_case(prefix)))
+                }) =>
+            {
                 commit.clone()
             }
             _ => skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
@@ -902,12 +901,11 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
                 .with_context(|| format!("re-resolving {owner}/{repo}"))?,
         };
         if Some(&commit) == entry.resolved_commit.as_ref() {
-            let requested_ref = normalized_requested_ref(requested_reference);
+            changed |=
+                update_skill_targets(app, name, entry, &scope_root, global, mode, None).await?;
             if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
-                if let Some(existing) = lock.skills.get_mut(name) {
-                    existing.requested_ref = requested_ref;
-                    existing.install_mode = Some(mode);
-                }
+                entry.requested_ref = requested_ref;
+                entry.install_mode = Some(mode);
                 changed = true;
                 println!(
                     "`{name}`: already at {}, migrated lock metadata",
@@ -925,38 +923,31 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
         let skill_root = recorded_skill_root(&root, wanted_dir)?;
         let package = install::read_skill_dir(&skill_root)?;
         let content_hash = package.content_hash();
-        let requested_ref = normalized_requested_ref(requested_reference);
-        if content_hash == entry.content_hash {
-            if let Some(existing) = lock.skills.get_mut(name) {
-                existing.requested_ref = requested_ref;
-                existing.resolved_commit = Some(commit.clone());
-                existing.install_mode = Some(mode);
-            }
-            changed = true;
+        let content_changed = content_hash != entry.content_hash;
+        let staged = if content_changed {
+            Some(install::stage(
+                &app.ctx.dirs,
+                &source.canonical(),
+                &package,
+                mode,
+            )?)
+        } else {
+            None
+        };
+        update_skill_targets(app, name, entry, &scope_root, global, mode, staged).await?;
+        entry.requested_ref = requested_ref;
+        entry.resolved_commit = Some(commit.clone());
+        entry.content_hash = content_hash;
+        entry.install_mode = Some(mode);
+        changed = true;
+        if content_changed {
+            println!("`{name}`: updated to {}", &commit[..commit.len().min(12)]);
+        } else {
             println!(
                 "`{name}`: source advanced to {}, skill content unchanged",
                 &commit[..commit.len().min(12)]
             );
-            continue;
         }
-
-        let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
-        let targets = entry
-            .agents
-            .iter()
-            .filter_map(|agent_id| agent_target(agent_id))
-            .collect::<Vec<_>>();
-        for agent_dir in agent_dirs_by_path(&targets, &scope_root, global)?.keys() {
-            install::link_into(agent_dir, name, &staged, mode)?;
-        }
-        if let Some(existing) = lock.skills.get_mut(name) {
-            existing.requested_ref = requested_ref;
-            existing.resolved_commit = Some(commit.clone());
-            existing.content_hash = content_hash;
-            existing.install_mode = Some(mode);
-        }
-        changed = true;
-        println!("`{name}`: updated to {}", &commit[..commit.len().min(12)]);
     }
 
     if changed {
