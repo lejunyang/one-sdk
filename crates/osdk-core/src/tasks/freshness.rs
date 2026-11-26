@@ -120,29 +120,49 @@ fn split_patterns(patterns: &[String]) -> Vec<Pattern<'_>> {
         .collect()
 }
 
-/// Match files and patterns using the same spelling of each path.
-fn normalize_slash_segments(
-    path: Cow<'_, str>,
-    is_separator: impl FnMut(char) -> bool,
-    backslash_escape: bool,
-) -> Cow<'_, str> {
+fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
+    let backslash_escape = !std::path::is_separator('\\');
     let has_escaped_dot = backslash_escape
-        && (path.starts_with(r"\./") || path.contains(r"/\./") || path.ends_with(r"/\."));
-    if !path.starts_with("./")
-        && !path.contains("/./")
-        && !path.contains("//")
-        && !path.ends_with("/.")
+        && (pattern.starts_with(r"\./") || pattern.contains(r"/\./") || pattern.ends_with(r"/\."));
+    if !pattern.starts_with("./")
+        && !pattern.contains("/./")
+        && !pattern.contains("//")
+        && !pattern.ends_with("/.")
         && !has_escaped_dot
     {
-        return path;
+        return Cow::Borrowed(pattern);
     }
 
-    let mut normalized = String::with_capacity(path.len());
-    if path.starts_with('/') {
+    // Slashes in a character class or behind an escape belong to glob syntax.
+    // After an optional class negation, the first `]` can be a literal.
+    enum State {
+        Text,
+        Escape,
+        ClassStart,
+        ClassFirst,
+        Class,
+    }
+    let mut state = State::Text;
+    let segments = pattern.split(|ch| {
+        state = match (&state, ch) {
+            (State::Text, '/') => return true,
+            (State::Text, '\\') if backslash_escape => State::Escape,
+            (State::Text, '[') => State::ClassStart,
+            (State::ClassStart, '!' | '^') => State::ClassFirst,
+            (State::ClassStart | State::ClassFirst, _) => State::Class,
+            (State::Class, ']') => State::Text,
+            (State::Class, _) => State::Class,
+            (State::Text | State::Escape, _) => State::Text,
+        };
+        false
+    });
+
+    let mut normalized = String::with_capacity(pattern.len());
+    if pattern.starts_with('/') {
         normalized.push('/');
     }
     let mut ends_in_directory = false;
-    for segment in path.split(is_separator) {
+    for segment in segments {
         ends_in_directory = matches!(segment, "" | ".") || (backslash_escape && segment == r"\.");
         if ends_in_directory {
             continue;
@@ -163,12 +183,11 @@ fn normalize_slash_segments(
 fn normalize(path: &Path, root: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let text = relative.to_str()?;
-    let text = if std::path::MAIN_SEPARATOR == '\\' {
-        Cow::Owned(text.replace('\\', "/"))
+    Some(if std::path::MAIN_SEPARATOR == '\\' {
+        text.replace('\\', "/")
     } else {
-        Cow::Borrowed(text)
-    };
-    Some(normalize_slash_segments(text, |ch| ch == '/', false).into_owned())
+        text.to_owned()
+    })
 }
 
 /// How much of the tree a scan actually touched.
@@ -182,37 +201,6 @@ fn normalize(path: &Path, root: &Path) -> Option<String> {
 pub struct ScanCost {
     /// Directory entries the walker yielded, files and directories alike.
     pub visited: usize,
-}
-
-fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
-    // Slashes in a character class or behind an escape belong to glob syntax.
-    // After an optional class negation, the first `]` can be a literal.
-    enum State {
-        Text,
-        Escape,
-        ClassStart,
-        ClassFirst,
-        Class,
-    }
-    let mut state = State::Text;
-    let backslash_escape = !std::path::is_separator('\\');
-    normalize_slash_segments(
-        Cow::Borrowed(pattern),
-        |ch| {
-            state = match (&state, ch) {
-                (State::Text, '/') => return true,
-                (State::Text, '\\') if backslash_escape => State::Escape,
-                (State::Text, '[') => State::ClassStart,
-                (State::ClassStart, '!' | '^') => State::ClassFirst,
-                (State::ClassStart | State::ClassFirst, _) => State::Class,
-                (State::Class, ']') => State::Text,
-                (State::Class, _) => State::Class,
-                (State::Text | State::Escape, _) => State::Text,
-            };
-            false
-        },
-        backslash_escape,
-    )
 }
 
 fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, GlobSet)> {
