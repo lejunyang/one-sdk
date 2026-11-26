@@ -60,6 +60,9 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Only the task named on the command line records and compares its
+    /// arguments. Dependencies and group members use their own run records
+    /// because they execute without those arguments.
     pub fn freshness_inputs<'a>(
         &self,
         task: &'a PlannedTask,
