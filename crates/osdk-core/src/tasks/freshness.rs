@@ -24,6 +24,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use super::args::Values;
 use crate::error::{Error, Result};
 
 /// How a task decides whether its inputs changed.
@@ -342,6 +343,15 @@ fn definition_hash(definition: &str) -> String {
     blake3::hash(definition.as_bytes()).to_hex().to_string()
 }
 
+fn argument_hash(arguments: Option<&Values>) -> String {
+    // Include the parsed map and the ordered argv array. Joining argv with
+    // spaces would make one argument containing spaces look like several.
+    let empty = Values::default();
+    let encoded = serde_json::to_vec(arguments.unwrap_or(&empty))
+        .expect("task argument strings can always be serialized");
+    blake3::hash(&encoded).to_hex().to_string()
+}
+
 /// Where a project's freshness state belongs inside the cache directory.
 ///
 /// Derived data, so it lives under the managed cache rather than beside
@@ -376,6 +386,9 @@ pub struct TaskState {
     /// Task definition fingerprint for `freshness = "mtime"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_hash: Option<String>,
+    /// Fingerprint of the effective arguments, including an empty invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hash: Option<String>,
     /// Unix **nanoseconds** of the last successful run, as a decimal string.
     ///
     /// Seconds are not enough: file mtimes carry sub-second precision, so a task
@@ -420,6 +433,8 @@ pub struct Inputs<'a> {
     pub freshness: Freshness,
     /// Serialized task definition, so editing commands invalidates the result.
     pub definition: &'a str,
+    /// Parsed arguments for the named task, absent for other tasks in the plan.
+    pub arguments: Option<&'a Values>,
 }
 
 /// Decide whether a task needs to run.
@@ -440,6 +455,25 @@ pub fn decide(inputs: &Inputs<'_>, state: &FreshnessState) -> Result<Decision> {
     )?;
     let previous = state.tasks.get(inputs.name);
 
+    if inputs.freshness == Freshness::Mtime {
+        let Some(recorded_definition) = previous.and_then(|state| state.definition_hash.as_deref())
+        else {
+            return Ok(Decision::Run("no recorded task definition".into()));
+        };
+        if recorded_definition != definition_hash(inputs.definition) {
+            return Ok(Decision::Run("task definition changed".into()));
+        }
+    }
+
+    if let Some(previous) = previous {
+        let Some(recorded_arguments) = previous.argument_hash.as_deref() else {
+            return Ok(Decision::Run("no recorded task arguments".into()));
+        };
+        if recorded_arguments != argument_hash(inputs.arguments) {
+            return Ok(Decision::Run("task arguments changed".into()));
+        }
+    }
+
     if inputs.freshness == Freshness::Hash {
         let hash = input_hash(&sources, inputs.definition)?;
         return Ok(match previous.and_then(|state| state.hash.as_deref()) {
@@ -458,14 +492,6 @@ pub fn decide(inputs: &Inputs<'_>, state: &FreshnessState) -> Result<Decision> {
             Some(_) => Decision::Run("inputs changed".into()),
             None => Decision::Run("no recorded run".into()),
         });
-    }
-
-    let Some(recorded_definition) = previous.and_then(|state| state.definition_hash.as_deref())
-    else {
-        return Ok(Decision::Run("no recorded task definition".into()));
-    };
-    if recorded_definition != definition_hash(inputs.definition) {
-        return Ok(Decision::Run("task definition changed".into()));
     }
 
     let newest_source = newest(&sources)?;
@@ -532,6 +558,7 @@ pub fn record(inputs: &Inputs<'_>, state: &mut FreshnessState) -> Result<()> {
         TaskState {
             hash,
             definition_hash,
+            argument_hash: Some(argument_hash(inputs.arguments)),
             ran_at,
         },
     );
@@ -564,6 +591,7 @@ mod tests {
             outputs,
             freshness,
             definition: "run = \"cargo build\"",
+            arguments: None,
         }
     }
 
@@ -991,6 +1019,7 @@ mod tests {
             TaskState {
                 hash: Some("abc".into()),
                 definition_hash: Some("def".into()),
+                argument_hash: Some("arg".into()),
                 ran_at: Some("42000000000".into()),
             },
         );
@@ -1003,6 +1032,7 @@ mod tests {
             Some("def")
         );
         assert_eq!(loaded.tasks["build"].ran_at.as_deref(), Some("42000000000"));
+        assert_eq!(loaded.tasks["build"].argument_hash.as_deref(), Some("arg"));
     }
 
     #[test]

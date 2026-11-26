@@ -610,10 +610,11 @@ $ osdk run deploy -- prod 'x & echo pwned > bad.txt'
 Pipes, redirection and globbing still belong in `run = "..."`, which simply does
 not substitute. To pass arguments, use `argv` or a script file.
 
-Every value is also exported as an environment variable (`osdk_arg_env`,
-`osdk_args`). That path has no escaping problem at all — values enter the child's
-environment block without passing through a parser — so anyone who knows their
-own shell can use them inside a `run` string at their own risk.
+Arguments are also exported as environment variables such as `osdk_arg_env` and
+`osdk_args` for the task named on the command line. Values enter the child's
+environment block verbatim. Prerequisites and members of `{ tasks = [...] }`
+groups receive their own task environment.
+When reading the values in a `run` string, follow the shell's quoting rules.
 
 ## Incremental: skip when inputs have not changed
 
@@ -625,7 +626,7 @@ outputs = ["target/release/osdk.exe"]
 ```
 
 In the default mode, a previously successful task is skipped when its definition
-is unchanged and every source is older than every matching output:
+and arguments are unchanged and every source is older than every matching output:
 
 ```
 $ osdk run build
@@ -644,6 +645,11 @@ Both `mtime` and `hash` compare the task definition with its last successful run
 Editing `run` triggers a rerun even when the source files are unchanged. If the
 cache lacks the record required by the current mode, such as after clearing the
 cache or upgrading from an older version, the task runs once.
+
+Both modes compare the parsed argument values. Using a default and explicitly
+passing the same value are equivalent. Changing a value, the order of remaining
+arguments, or their boundaries triggers a rerun. This applies to the task named
+on the command line. `--dry-run` uses the same argument check.
 
 Even when the hash matches, the task reruns if any positive `outputs` pattern
 has no matching file. Files excluded by a `!` pattern do not count.

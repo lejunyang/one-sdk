@@ -554,13 +554,9 @@ pub async fn run_task(
     // Parse against the named task's declaration, before anything runs: a bad
     // `choices` value or a missing required argument should not surface halfway
     // through a pipeline that already had effects.
-    let resolved = set
-        .resolve(&task)
-        .ok_or_else(|| anyhow!("unknown task `{task}`"))?
-        .to_string();
-    let spec = set.tasks[&resolved].spec.clone();
+    let spec = &set.tasks[&plan.root].spec;
     let has_spec = !spec.is_empty();
-    let values = osdk_core::tasks::args::parse(&resolved, &spec, &args)?;
+    let values = osdk_core::tasks::args::parse(&plan.root, spec, &args)?;
 
     let config_root = task_config_root(app);
     let tool_requests = task_tool_requests(app, &plan)?;
@@ -572,17 +568,10 @@ pub async fn run_task(
         // Substitute arguments first. A preview that still shows `{{env}}`
         // describes the template, not the command -- and the whole purpose of
         // --dry-run is seeing what will actually happen.
-        let previewed = runner::resolve_for_preview(&plan, &resolved, &values, has_spec)?;
+        let previewed = runner::resolve_for_preview(&plan, &values, has_spec)?;
         for planned in previewed.steps.iter().filter(|step| step.standalone) {
             let verdict = osdk_core::tasks::freshness::decide(
-                &osdk_core::tasks::freshness::Inputs {
-                    root: &config_root,
-                    name: &planned.name,
-                    sources: &planned.sources,
-                    outputs: &planned.outputs,
-                    freshness: planned.freshness,
-                    definition: &planned.definition,
-                },
+                &previewed.freshness_inputs(planned, &config_root, &values),
                 &state,
             )?;
             match verdict.reason() {
@@ -668,8 +657,7 @@ pub async fn run_task(
         env,
         defs,
         base_path,
-        arg_env: values.env_vars(),
-        arg_values: values.clone(),
+        arguments: (plan.root.clone(), values.clone()),
         // Set per task by the runner; this is just the initial value.
         timeout: None,
         project_root: config_root.clone(),

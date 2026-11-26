@@ -121,6 +121,15 @@ fn run_isolated_in(root: &Path, cwd: &Path, args: &[&str]) -> Output {
 }
 
 #[cfg(feature = "scripts")]
+fn run_freshness_fixture(root: &Path, args: &[&str]) -> String {
+    let output = run_isolated_in_with_env(root, root, args, &[("OSDK_LANG", "en")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    format!("{stdout}\n{stderr}")
+}
+
+#[cfg(feature = "scripts")]
 #[test]
 fn hash_task_recreates_a_deleted_output() {
     let temporary = tempfile::tempdir().unwrap();
@@ -142,13 +151,7 @@ freshness = "hash"
     )
     .unwrap();
 
-    let run = |args: &[&str]| {
-        let output = run_isolated_in_with_env(root, root, args, &[("OSDK_LANG", "en")]);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{stdout}\n{stderr}");
-        format!("{stdout}\n{stderr}")
-    };
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
     run(&["--yes", "trust", "./osdk.toml"]);
     let result = root.join("dist/result.txt");
     assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
@@ -164,6 +167,86 @@ freshness = "hash"
     let rebuilt = run(&["run", "build"]);
     assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
     assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn task_arguments_drive_hash_freshness_in_run_and_preview() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        r#"
+[tasks.prepare]
+lua = "osdk.fs.write('dist/prepared.txt', osdk.env('osdk_arg_variant') or 'none')"
+sources = ["input.txt"]
+outputs = ["dist/prepared.txt"]
+freshness = "hash"
+
+[tasks.member]
+lua = "osdk.fs.write('dist/member.txt', osdk.args.variant or 'none')"
+sources = ["input.txt"]
+outputs = ["dist/member.txt"]
+freshness = "hash"
+
+[tasks.build]
+lua = """
+assert(osdk.args.variant == osdk.env('osdk_arg_variant'))
+osdk.fs.write('dist/result.txt', osdk.args.variant)
+print('TASK_EXECUTED')
+"""
+depends = ["prepare"]
+run_post = [{ tasks = ["member"] }]
+sources = ["input.txt"]
+outputs = ["dist/result.txt"]
+freshness = "hash"
+
+[tasks.build.options.variant]
+default = "debug"
+choices = ["debug", "release"]
+"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/result.txt");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    assert_eq!(std::fs::read(&result).unwrap(), b"debug");
+
+    let same = run(&["run", "build", "--", "--variant=debug"]);
+    assert!(same.contains("build: up to date, skipped"), "{same}");
+    assert!(!same.contains("TASK_EXECUTED"), "{same}");
+    let preview = run(&["run", "build", "--dry-run", "--", "--variant=release"]);
+    assert!(
+        preview.contains("build:  (task arguments changed)"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("prepare:  (up to date, would be skipped)"),
+        "{preview}"
+    );
+    assert_eq!(std::fs::read(&result).unwrap(), b"debug");
+
+    let changed = run(&["run", "build", "--", "--variant=release"]);
+    assert!(changed.contains("TASK_EXECUTED"), "{changed}");
+    assert!(
+        changed.contains("prepare: up to date, skipped"),
+        "{changed}"
+    );
+    assert_eq!(std::fs::read(&result).unwrap(), b"release");
+    assert_eq!(
+        std::fs::read(root.join("dist/prepared.txt")).unwrap(),
+        b"none"
+    );
+    assert_eq!(
+        std::fs::read(root.join("dist/member.txt")).unwrap(),
+        b"none"
+    );
+    let same = run(&["run", "build", "--", "--variant", "release"]);
+    assert!(same.contains("build: up to date, skipped"), "{same}");
+    assert!(!same.contains("TASK_EXECUTED"), "{same}");
 }
 
 fn run_isolated_in_with_env(

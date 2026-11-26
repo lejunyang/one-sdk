@@ -56,6 +56,7 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 `mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。
 `mtime` 比较源文件与匹配产物的修改时间，省略 `outputs` 时改用上次成功运行的时间。
 哈希命中时，每个正向 `outputs` 模式都必须匹配至少一个未被 `!` 模式排除的文件。
+两种模式都比较解析后的实参，包括默认值和保留顺序、边界的剩余参数。实参只影响命令行点名的任务。
 
 `argv` 步骤里的 `{{name}}` 与 `{{args}}` 按 argv 边界展开；不要把不可信参数插进 shell
 字符串。Lua 完整 API、短名、exec capture、fs/path/JSON/TOML 见

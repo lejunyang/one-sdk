@@ -150,7 +150,7 @@ impl Spec {
 }
 
 /// Parsed argument values, ready for substitution.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Values {
     /// Every declared name mapped to its resolved value, for `{{name}}`.
     pub named: BTreeMap<String, String>,
