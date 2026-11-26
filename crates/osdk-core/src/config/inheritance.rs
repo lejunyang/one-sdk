@@ -95,7 +95,6 @@ fn located(path: &Path, text: &str, error: &toml::de::Error) -> String {
     format!("{}:{line}:{column}", path.display())
 }
 
-#[derive(Debug)]
 pub(super) struct LoadedConfig {
     pub value: toml::Value,
     #[cfg(feature = "install")]
@@ -116,7 +115,14 @@ impl LoadedConfig {
     }
 }
 
-pub(super) fn load(path: &Path, rel_base: Option<&Path>) -> Result<LoadedConfig> {
+pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
+    Ok(load_with_skill_sources(path, rel_base)?.value)
+}
+
+pub(super) fn load_with_skill_sources(
+    path: &Path,
+    rel_base: Option<&Path>,
+) -> Result<LoadedConfig> {
     let direct = raw(path)?;
     let mut config = LoadedConfig {
         value: toml::Value::Table(Default::default()),
@@ -332,7 +338,7 @@ pub fn deps_anchor(path: &Path, rel_base: Option<&Path>) -> Result<PathBuf> {
 
 #[cfg(feature = "install")]
 pub fn deps_file(path: &Path, rel_base: Option<&Path>) -> Result<super::DepsConfig> {
-    match load(path, rel_base)?.value.get("deps") {
+    match load(path, rel_base)?.get("deps") {
         Some(value) => value.clone().try_into().map_err(|e: toml::de::Error| {
             Error::config(format!("{}: {}", path.display(), e.message()))
         }),
@@ -481,7 +487,7 @@ mod tests {
             "extends='../osdk.toml'\n[deps.uv]\nauto=false\noutputs=[]\nenv={B='2'}",
         )
         .unwrap();
-        let value = load(&child.join("osdk.toml"), None).unwrap().value;
+        let value = load(&child.join("osdk.toml"), None).unwrap();
         assert_eq!(value["deps"]["uv"]["auto"].as_bool(), Some(false));
         assert!(value["deps"]["uv"]["outputs"]
             .as_array()

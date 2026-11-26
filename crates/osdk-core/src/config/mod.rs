@@ -2560,7 +2560,7 @@ fn warn_unknown_top_level_keys(path: &Path, value: &toml::Value) {
 }
 
 fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> {
-    let loaded = inheritance::load(path, rel_base)?;
+    let loaded = inheritance::load_with_skill_sources(path, rel_base)?;
     warn_unknown_top_level_keys(path, &loaded.value);
     let mut file: ConfigFile = loaded
         .value
@@ -2801,7 +2801,6 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
             let mut precedence = toml::Value::try_from(&cfg.settings.precedence)
                 .map_err(|_| Error::config("cannot serialize precedence"))?;
             if let Some(overlay) = inheritance::load(&path, rel_base.as_deref())?
-                .value
                 .get("settings")
                 .and_then(|s| s.get("precedence"))
             {
