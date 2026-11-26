@@ -172,24 +172,38 @@ freshness = "hash"
 #[cfg(feature = "scripts")]
 #[test]
 fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
+    assert_hash_task_tracks_glob("src/routes/[slug].tsx", r"src/**/\[slug\].tsx");
+    assert_hash_task_tracks_glob("page-[slug].tsx", r"./page-\[slug\].tsx");
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_rebuilds_when_a_windows_style_source_glob_changes() {
+    assert_hash_task_tracks_glob("src/main.rs", r"src\*.rs");
+}
+
+#[cfg(feature = "scripts")]
+fn assert_hash_task_tracks_glob(source_path: &str, pattern: &str) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
-    std::fs::create_dir_all(root.join("src/routes")).unwrap();
-    let source = root.join("src/routes/[slug].tsx");
+    let source = root.join(source_path);
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, "original").unwrap();
     std::fs::write(root.join("manifest.json"), "{}").unwrap();
     std::fs::write(
         root.join("osdk.toml"),
-        r#"
+        format!(
+            r#"
 [tasks.build]
 lua = """
-assert(osdk.fs.write('dist/result.txt', assert(osdk.fs.read('src/routes/[slug].tsx'))))
+assert(osdk.fs.write('dist/result.txt', assert(osdk.fs.read('{source_path}'))))
 print('TASK_EXECUTED')
 """
-sources = ['manifest.json', 'src/**/\[slug\].tsx']
+sources = ['manifest.json', '{pattern}']
 outputs = ["dist/result.txt"]
 freshness = "hash"
-"#,
+"#
+        ),
     )
     .unwrap();
 

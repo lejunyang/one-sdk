@@ -150,22 +150,14 @@ pub struct ScanCost {
 }
 
 fn normalize_pattern(pattern: &str) -> Cow<'_, str> {
-    // Use glob escapes with forward-slash paths. With no forward slash, an
-    // unescaped backslash before an ordinary character identifies a Windows
-    // path, including patterns such as `dist\*\result.txt`.
-    if !pattern.contains('/') {
-        let mut chars = pattern.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '\\'
-                && chars.next().is_some_and(|next| {
-                    !matches!(next, '*' | '?' | '[' | ']' | '{' | '}' | ',' | '!' | '\\')
-                })
-            {
-                return Cow::Owned(pattern.replace('\\', "/"));
-            }
-        }
+    // Slash-separated globs use backslash escapes. In a Windows-style glob a
+    // backslash after a path component separates it even before a wildcard.
+    // A bare filename can start with an escape, as in `\[slug\].tsx`.
+    if pattern.contains('\\') && !pattern.contains('/') && !pattern.starts_with('\\') {
+        Cow::Owned(pattern.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(pattern)
     }
-    Cow::Borrowed(pattern)
 }
 
 fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, GlobSet)> {
