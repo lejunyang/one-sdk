@@ -5934,9 +5934,14 @@ fn rust_override_import_requires_a_project_for_the_target() {
         let output = run_isolated_in(temp.path(), cwd, args);
         assert!(!output.status.success(), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("no osdk project configuration"), "{stderr}");
         let target = dunce::canonicalize(&b).unwrap();
-        assert!(stderr.contains(&*target.to_string_lossy()), "{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "no osdk project config found for {}",
+                target.display()
+            )),
+            "{stderr}"
+        );
         assert_eq!(std::fs::read(&a_config).unwrap(), original);
         assert!(!b.join("osdk.toml").exists());
     }

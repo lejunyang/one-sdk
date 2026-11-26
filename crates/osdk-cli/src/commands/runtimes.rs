@@ -1551,10 +1551,7 @@ pub(crate) fn rust_override(app: &App, command: RustOverrideCommand) -> Result<(
             let canonical = dunce_path(&directory)?;
             let project = osdk_core::project::discover(&canonical, &app.ctx.dirs.config)?
                 .ok_or_else(|| {
-                    anyhow!(
-                        "no osdk project configuration found for {}",
-                        canonical.display()
-                    )
+                    anyhow!("no osdk project config found for {}", canonical.display())
                 })?;
             let output = osdk_core::backend::rust::RustBackend::run_rustup(
                 &app.ctx,
