@@ -185,7 +185,9 @@ to a single destination and uses automatic linking
 for multiple destinations unless `[skills].link_mode` is set. Custom `endpoint`
 support is pending. Setting it on a declaration with no lock entry produces an error.
 
-Existing entries are replayed from the lock. Use `osdk skills update <name>` to
+Existing entries are replayed from the lock. If a declaration's `when` filter
+does not match the current platform, sync skips installation and keeps the
+entry for other platforms. Use `osdk skills update <name>` to
 apply changes to a ref or Agent list. To change the source or skill selection,
 run `osdk skills remove <name>` and sync again, or install explicitly with
 `skills add`. When removing a declaration, use `osdk skills remove <name>` to

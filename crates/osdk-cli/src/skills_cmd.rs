@@ -694,15 +694,16 @@ async fn sync(app: &App, global: bool) -> Result<()> {
     let declarations = &app.ctx.config.skills;
     let flag = if global { " -g" } else { "" };
     let mut pending = Vec::new();
-    for (name, declaration) in declarations {
-        if !declaration_applies(app, declaration) {
+    for (name, declaration) in declarations
+        .iter()
+        .filter(|(name, _)| !skills.contains_key(*name))
+    {
+        if declaration_applies(app, declaration) {
+            pending.push((name, declaration));
+        } else {
             println!(
                 "skipping declaration `{name}`: its `when` filter does not match this platform"
             );
-        } else if let Some(entry) = skills.get(name) {
-            report_declaration_changes(app, name, declaration, entry, flag);
-        } else {
-            pending.push((name, declaration));
         }
     }
     if pending.is_empty() && skills.is_empty() {
@@ -749,11 +750,21 @@ async fn sync(app: &App, global: bool) -> Result<()> {
     let fallback_mode = link_mode(app, false);
     let mut missing = Vec::new();
     for (name, entry) in &skills {
-        if !declarations.is_empty() && !declarations.contains_key(name) {
-            println!(
+        match declarations.get(name) {
+            Some(declaration) => {
+                if !declaration_applies(app, declaration) {
+                    println!(
+                        "skipping locked skill `{name}`: its `when` filter does not match this platform; keeping its lock entry"
+                    );
+                    continue;
+                }
+                report_declaration_changes(app, name, declaration, entry, flag);
+            }
+            None if !declarations.is_empty() => println!(
                 "skill `{name}` is locked without a declaration in osdk.toml; using the lock. \
                  Run `osdk skills remove {name}{flag}` to remove it."
-            );
+            ),
+            None => {}
         }
         let mode = install_mode_for_entry(entry, name, &scope_root, global, fallback_mode)?;
         let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);

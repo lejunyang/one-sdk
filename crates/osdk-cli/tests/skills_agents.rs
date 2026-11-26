@@ -309,6 +309,34 @@ fn skills_sync_filters_platforms_and_uses_default_agents() {
 }
 
 #[test]
+fn skills_sync_skips_replaying_a_locked_skill_on_another_platform() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(root, DEMO_DECLARATION);
+    let sync = osdk(root, &project, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+    let lock = project.join("osdk.lock");
+    let before = std::fs::read(&lock).unwrap();
+    assert_demo_installed(&project, &read_lock(&lock));
+    std::fs::remove_dir_all(project.join(".agents/skills/demo")).unwrap();
+
+    let other = if cfg!(windows) { "linux" } else { "windows" };
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!("{DEMO_DECLARATION}when = {{ os = [\"{other}\"] }}\n"),
+    )
+    .unwrap();
+
+    let sync = osdk(root, &project, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+    assert!(!project.join(".agents/skills/demo").exists());
+    assert_eq!(std::fs::read(lock).unwrap(), before);
+    let stdout = String::from_utf8_lossy(&sync.stdout);
+    assert!(stdout.contains("skipping locked skill `demo`"), "{stdout}");
+    assert!(stdout.contains("keeping its lock entry"), "{stdout}");
+}
+
+#[test]
 fn skills_sync_reports_missing_agents_in_a_non_interactive_session() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

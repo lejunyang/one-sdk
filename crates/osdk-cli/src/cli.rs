@@ -1204,7 +1204,8 @@ pub enum SkillsCommand {
     },
     /// Reproduce locked skills and install missing declarations from osdk.toml.
     ///
-    /// New installs are recorded in the lock so later syncs can reproduce them.
+    /// New installs are recorded in the lock. A declaration's `when` filter
+    /// also applies to locked skills, whose entries stay available to other platforms.
     Sync {
         /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
