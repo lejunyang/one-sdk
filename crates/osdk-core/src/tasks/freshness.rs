@@ -232,21 +232,31 @@ fn scan_files(
 fn output_scan_root(root: &Path, prefix: &Path) -> Result<Option<PathBuf>> {
     // A literal prefix may start below a symlink, bypassing WalkDir's link
     // settings. Check its parents in order before handing it to the walker.
-    let mut start = root.to_path_buf();
-    let mut components = prefix.components().peekable();
-    while let Some(component) = components.next() {
-        start.push(component);
-        if components.peek().is_none() {
-            break;
-        }
-        match start.symlink_metadata() {
+    // A trailing `/.` also makes the preceding component a directory that
+    // WalkDir would otherwise reach through a symlink.
+    let parents = if prefix
+        .to_string_lossy()
+        .rsplit(std::path::is_separator)
+        .next()
+        == Some(".")
+    {
+        prefix
+    } else {
+        prefix.parent().unwrap_or(Path::new(""))
+    };
+    let mut parent = root.to_path_buf();
+    for component in parents.components() {
+        parent.push(component);
+        match parent.symlink_metadata() {
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => return Ok(None),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(Error::io(&start, error)),
+            Err(error) => return Err(Error::io(&parent, error)),
         }
     }
-    Ok(Some(start))
+    // Keep internal `./` components in the walk path so it still matches the
+    // compiled glob. Path::components() elides them during the checks above.
+    Ok(Some(root.join(prefix)))
 }
 
 /// Every positive output pattern must match a file after exclusions.
@@ -899,6 +909,39 @@ mod tests {
     }
 
     #[test]
+    fn a_hash_match_accepts_an_output_with_an_internal_dot_component() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        let sources = ["input.txt".into()];
+
+        for pattern in [
+            "dist/./libs/result.txt",
+            "dist/././libs/result.txt",
+            "dist/libs/./*.txt",
+            r"dist\.\libs\result.txt",
+        ] {
+            let result = write(root, "dist/libs/result.txt", "built");
+            let outputs = [pattern.into()];
+            let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+            let mut state = FreshnessState::default();
+            record(&spec, &mut state).unwrap();
+            assert_eq!(
+                decide(&spec, &state).unwrap(),
+                Decision::UpToDate,
+                "{pattern}"
+            );
+
+            std::fs::remove_file(result).unwrap();
+            assert_eq!(
+                decide(&spec, &state).unwrap(),
+                Decision::Run("outputs missing".into()),
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
     fn a_hash_match_excludes_outputs_using_a_dot_slash_pattern() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -957,6 +1000,8 @@ mod tests {
             "dist/linked",
             "dist/linked/**/result.txt",
             "dist/linked/nested/result.txt",
+            "dist/linked/./**/result.txt",
+            "dist/linked/./nested/result.txt",
         ] {
             assert!(
                 !outputs_present(root, &[pattern.into()], "test", &mut ScanCost::default())

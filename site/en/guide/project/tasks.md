@@ -687,6 +687,8 @@ at the project root.
 
 Prefix a pattern with `!` to exclude. The leading `./` is optional, so
 `!./src/generated/**` and `!src/generated/**` are equivalent.
+For an output declared by its full relative path, `dist/./libs/result.txt`
+and `dist/libs/result.txt` match the same file.
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]
