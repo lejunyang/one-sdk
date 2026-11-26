@@ -238,6 +238,106 @@ fn skills_sync_rejects_an_unimplemented_endpoint() {
     assert!(!project.join("osdk.lock").exists());
 }
 
+#[test]
+fn skills_commands_use_the_configured_global_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let global_config = format!("[skills]\nscope = \"global\"\n\n{DEMO_DECLARATION}");
+    let project = local_project(root, &global_config);
+    let installed = root.join("home/.codex/skills/demo/SKILL.md");
+    let user_lock = root.join("state/config/osdk.lock");
+
+    let add = osdk(
+        root,
+        &project,
+        &["--yes", "skills", "add", "./fixture/demo", "-a", "codex"],
+    );
+    assert!(add.status.success(), "{add:?}");
+    assert_eq!(std::fs::read(&installed).unwrap(), DEMO_SKILL.as_bytes());
+    assert!(read_lock(&user_lock)["skills"].get("demo").is_some());
+    assert!(!project.join("osdk.lock").exists());
+    assert!(!project.join(".agents/skills").exists());
+
+    for (args, message) in [
+        (&["skills", "list"][..], "demo  <- local:./fixture/demo"),
+        (&["skills", "update", "demo"][..], "local source"),
+    ] {
+        let output = osdk(root, &project, args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains(message));
+    }
+    let config_path = project.join("osdk.toml");
+    std::fs::write(&config_path, "[skills]\nscope = \"project\"\n").unwrap();
+    let local_bytes = format!("{DEMO_SKILL}\nProject copy\n");
+    std::fs::write(project.join("fixture/demo/SKILL.md"), &local_bytes).unwrap();
+    let project_add = osdk(
+        root,
+        &project,
+        &["--yes", "skills", "add", "./fixture/demo", "-a", "codex"],
+    );
+    assert!(project_add.status.success(), "{project_add:?}");
+    std::fs::write(config_path, global_config).unwrap();
+
+    let path = osdk(root, &project, &["skills", "path", "demo"]);
+    assert!(path.status.success(), "{path:?}");
+    assert_eq!(
+        std::fs::read(Path::new(String::from_utf8_lossy(&path.stdout).trim()).join("SKILL.md"))
+            .unwrap(),
+        DEMO_SKILL.as_bytes()
+    );
+
+    std::fs::remove_file(&installed).unwrap();
+    let sync = osdk(root, &project, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+    assert_eq!(std::fs::read(&installed).unwrap(), DEMO_SKILL.as_bytes());
+    let remove = osdk(root, &project, &["skills", "remove", "demo"]);
+    assert!(remove.status.success(), "{remove:?}");
+    assert!(!installed.exists());
+    assert!(read_lock(&user_lock).get("skills").is_none());
+    assert_eq!(
+        std::fs::read(project.join(".agents/skills/demo/SKILL.md")).unwrap(),
+        local_bytes.as_bytes()
+    );
+}
+
+#[test]
+fn skills_global_flag_overrides_project_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(
+        root,
+        &format!("[skills]\nscope = \"project\"\n\n{DEMO_DECLARATION}"),
+    );
+    let sync = osdk(root, &project, &["skills", "sync", "-g"]);
+    assert!(sync.status.success(), "{sync:?}");
+    assert_eq!(
+        std::fs::read(root.join("home/.codex/skills/demo/SKILL.md")).unwrap(),
+        DEMO_SKILL.as_bytes()
+    );
+    assert!(read_lock(&root.join("state/config/osdk.lock"))["skills"]
+        .get("demo")
+        .is_some());
+    assert!(!project.join("osdk.lock").exists());
+}
+
+#[test]
+fn skills_rejects_invalid_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(
+        root,
+        &format!("[skills]\nscope = \"invalid\"\n\n{DEMO_DECLARATION}"),
+    );
+    let sync = osdk(root, &project, &["skills", "sync", "-g"]);
+    assert!(!sync.status.success(), "{sync:?}");
+    let stderr = String::from_utf8_lossy(&sync.stderr);
+    for name in ["[skills].scope", "invalid", "project", "global"] {
+        assert!(stderr.contains(name), "{stderr}");
+    }
+    assert!(!project.join("osdk.lock").exists());
+    assert!(!root.join("state/config/osdk.lock").exists());
+}
+
 /// Editing a skill's `agents` in osdk.toml must reach the lock and the disk on
 /// `skills update`. It used to re-resolve only the source, so an agent removed
 /// from the declaration stayed installed and recorded.

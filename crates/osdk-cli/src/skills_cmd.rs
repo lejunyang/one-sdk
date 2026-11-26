@@ -14,10 +14,19 @@ use crate::cli::SkillsCommand;
 use crate::lockfile::{self, LockedSkill};
 
 pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
+    let default_global = match app.ctx.config.skills_defaults.scope.as_deref() {
+        None => None,
+        Some("project") => Some(false),
+        Some("global") => Some(true),
+        Some(value) => anyhow::bail!(
+            "invalid `[skills].scope` value `{value}`: expected `project` or `global`"
+        ),
+    };
+    let effective_global = |flag| flag || default_global.unwrap_or(false);
     match command {
         SkillsCommand::Agents => agents(),
-        SkillsCommand::List { global } => list(app, global),
-        SkillsCommand::Path { name } => path(app, &name),
+        SkillsCommand::List { global } => list(app, effective_global(global)),
+        SkillsCommand::Path { name } => path(app, &name, default_global),
         SkillsCommand::Add {
             source,
             skills,
@@ -34,7 +43,7 @@ pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
                     source,
                     skills,
                     agents,
-                    global,
+                    global: effective_global(global),
                     copy,
                     reference: r#ref,
                     list_only: list,
@@ -47,9 +56,11 @@ pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
             name,
             global,
             agents,
-        } => remove(app, &name, global, &agents),
-        SkillsCommand::Sync { global } => sync(app, global).await,
-        SkillsCommand::Update { skills, global } => update(app, &skills, global).await,
+        } => remove(app, &name, effective_global(global), &agents),
+        SkillsCommand::Sync { global } => sync(app, effective_global(global)).await,
+        SkillsCommand::Update { skills, global } => {
+            update(app, &skills, effective_global(global)).await
+        }
         SkillsCommand::Use {
             source,
             skill,
@@ -115,10 +126,15 @@ fn list(app: &App, global: bool) -> Result<()> {
 }
 
 /// Print the staged store path of an installed skill.
-fn path(app: &App, name: &str) -> Result<()> {
+fn path(app: &App, name: &str, default_global: Option<bool>) -> Result<()> {
     osdk_core::skills::validate_skill_name(name)?;
+    let scopes: &[bool] = match default_global {
+        Some(true) => &[true],
+        Some(false) => &[false],
+        None => &[false, true],
+    };
     // Prefer the recorded content hash so the path is the exact staged copy.
-    for global in [false, true] {
+    for &global in scopes {
         let lock_path = lock_path_for(app, global);
         if !lock_path.is_file() {
             continue;

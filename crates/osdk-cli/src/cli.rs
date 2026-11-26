@@ -1166,7 +1166,7 @@ pub enum SkillsCommand {
         /// prompts when none is configured.
         #[arg(short = 'a', long = "agent", value_name = "ID")]
         agents: Vec<String>,
-        /// Install into each agent's user-level directory instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
         /// Copy the skill into each agent directory instead of linking it.
@@ -1185,7 +1185,7 @@ pub enum SkillsCommand {
     /// List installed skills and the agents they are linked into.
     #[command(alias = "ls")]
     List {
-        /// Inspect the user-level agent directories instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
     },
@@ -1194,7 +1194,7 @@ pub enum SkillsCommand {
     Remove {
         /// Skill name to remove.
         name: String,
-        /// Remove from user-level agent directories instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
         /// Limit removal to these agents (repeatable). Default: every agent that
@@ -1206,11 +1206,14 @@ pub enum SkillsCommand {
     ///
     /// New installs are recorded in the lock so later syncs can reproduce them.
     Sync {
-        /// Install into user-level agent directories instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
     },
     /// Print the staged store path of an installed skill.
+    ///
+    /// Uses the configured scope, or checks the project then the user lock
+    /// when `[skills].scope` is unset.
     Path {
         /// Skill name.
         name: String,
@@ -1242,7 +1245,7 @@ pub enum SkillsCommand {
     Update {
         /// Skills to update by name; omit to update all.
         skills: Vec<String>,
-        /// Update only the user-level lock instead of the project lock.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
     },

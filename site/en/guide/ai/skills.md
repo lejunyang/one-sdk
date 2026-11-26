@@ -185,6 +185,12 @@ Existing entries are replayed from the lock. Use `osdk skills update <name>` to
 apply changes to a ref or Agent list. To change the source or skill selection,
 run `osdk skills remove <name>` and sync again, or install explicitly with
 `skills add`. When removing a declaration, use `osdk skills remove <name>` to
-drop the lock entry too. The top-level `[skills]` table also accepts `scope`
-(`project` or `global`). See `reference/configuration/skills.md` in the
-`osdk-guide` skill for the full field reference.
+drop the lock entry too.
+
+`[skills].scope` sets the default scope. The default `project` uses project Agent
+directories and the project lock. Set `global` to use user-level Agent directories
+and the `osdk.lock` in the user configuration directory. Pass `-g` to explicitly
+select user scope. `skills path` uses the configured scope. With `scope` unset,
+it checks the project lock first, then the user lock. See
+`reference/configuration/skills.md` in the `osdk-guide` skill for the full field
+reference.

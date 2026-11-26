@@ -886,6 +886,8 @@ to install applicable declarations and record their resolutions alongside existi
 entries in `osdk.lock`. Use `skills update` to refresh a locked GitHub ref or apply
 changes to the Agent list. Pin a GitHub skill with `ref = "rev:<commit>"` to keep it
 at that commit across updates.
+Set `[skills].scope = "global"` to use user-level Agent directories by default,
+or pass `-g` on an individual command.
 
 Guide: [Agent skills](site/en/guide/ai/skills.md)
 

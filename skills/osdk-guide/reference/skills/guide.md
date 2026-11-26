@@ -9,7 +9,7 @@
 | `remove <NAME>`（`rm`） | `-g`、`-a/--agent` 可重复 | 摘除全部或指定 Agent 链接 |
 | `sync` | `-g` | 精确复现已锁定的 skill，按 `osdk.toml` 安装适用且缺锁的声明并写锁 |
 | `update [SKILL...]` | `-g` | 重解析 `requested_ref`；仅目标 skill 内容哈希变化时重装，仓库其他变更只推进 lock；仅显式 `rev:<commit>` 固定不动，旧裸 commit 迁移为默认分支意图；同时让 Agent 跟随声明的 `agents`（删掉的取消链接、新增的装入、改写 lock） |
-| `path <NAME>` | — | 打印内容寻址落地目录 |
+| `path <NAME>` | — | 按配置的范围查锁并打印落地目录。未配置时先查项目锁，再查用户锁 |
 | `find [QUERY...]`（`search`） | `--owner`、`--limit 1..50` | 匿名搜索 GitHub；限流后才用 token，不访问 skills.sh |
 | `use <SOURCE>` | `-s/--skill`、`-a/--agent`、`--ref` | 不安装；打印 prompt 或交互启动 Agent |
 | `init [NAME]` | — | 创建不覆盖已有 `SKILL.md` 的模板 |
@@ -24,6 +24,7 @@ osdk skills sync
 osdk skills update name
 ```
 
+配置 `[skills].scope = "global"` 可默认使用用户级 Agent 目录和用户锁，`-g` 可显式选择该范围。
 来源支持 `github:owner/repo`、`owner/repo`、GitHub URL 和本地路径。缺锁声明在打印摘要后
 安装，默认单目录复制、多目录自动链接。用 `update` 应用 ref 或 Agent 列表变更。换来源或
 技能时，移除锁条目再同步，或显式调用 `add`。配置见

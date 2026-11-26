@@ -150,6 +150,9 @@ agents = ["claude-code", "codex"]
 
 已有锁条目继续按锁复现。要应用声明中的 `ref` 或 Agent 改动，运行 `osdk skills update <名>`。
 要换来源或技能，运行 `osdk skills remove <名>` 后重新同步，也可以显式用 `skills add` 安装。
-从配置去掉一项后，运行 `osdk skills remove <名>` 删除对应锁条目。顶层 `[skills]` 还接受
-`scope`（`project` 或 `global`）。完整字段说明见 `osdk-guide` 的
-`reference/configuration/skills.md`。
+从配置去掉一项后，运行 `osdk skills remove <名>` 删除对应锁条目。
+
+`[skills].scope` 设置默认范围。默认值 `project` 使用项目 Agent 目录和项目锁。`global`
+使用用户级 Agent 目录与用户配置目录下的 `osdk.lock`。传 `-g` 可显式选择用户范围。
+`skills path` 按配置选择范围。未配置 `scope` 时，先查项目锁，再查用户锁。
+完整字段说明见 `osdk-guide` 的 `reference/configuration/skills.md`。
