@@ -53,6 +53,9 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 | `freshness` | `mtime`（默认）/ `hash` / `always` |
 | `args` / `options` / `flags` | 声明位置参数、命名选项和布尔 flag |
 
+glob 建议用 `/` 分隔路径段。需要匹配文件名里的方括号等特殊字符时可用反斜杠转义，
+如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']`。
+
 `mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。
 `mtime` 比较源文件与匹配产物的修改时间，省略 `outputs` 时改用上次成功运行的时间。
 哈希命中时，每个正向 `outputs` 模式都必须匹配至少一个未被 `!` 模式排除的文件。

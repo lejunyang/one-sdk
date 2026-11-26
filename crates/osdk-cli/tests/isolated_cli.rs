@@ -171,6 +171,44 @@ freshness = "hash"
 
 #[cfg(feature = "scripts")]
 #[test]
+fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::create_dir_all(root.join("src/routes")).unwrap();
+    let source = root.join("src/routes/[slug].tsx");
+    std::fs::write(&source, "original").unwrap();
+    std::fs::write(root.join("manifest.json"), "{}").unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        r#"
+[tasks.build]
+lua = """
+assert(osdk.fs.write('dist/result.txt', assert(osdk.fs.read('src/routes/[slug].tsx'))))
+print('TASK_EXECUTED')
+"""
+sources = ['manifest.json', 'src/**/\[slug\].tsx']
+outputs = ["dist/result.txt"]
+freshness = "hash"
+"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/result.txt");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    assert_eq!(std::fs::read(&result).unwrap(), b"original");
+    let unchanged = run(&["run", "build"]);
+    assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+
+    std::fs::write(&source, "updated").unwrap();
+    let rebuilt = run(&["run", "build"]);
+    assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
+    assert_eq!(std::fs::read(&result).unwrap(), b"updated");
+}
+
+#[cfg(feature = "scripts")]
+#[test]
 fn task_arguments_drive_hash_freshness_in_run_and_preview() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

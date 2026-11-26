@@ -677,6 +677,10 @@ measured scan rooted at the current directory next to a `target/` tree took
 2,827.91 ms against 61.26 ms from the correct starting point — 46x. Prefer
 patterns with a directory prefix; a bare `**/*.rs` walks everything.
 
+Use `/` to separate path components in globs. A backslash can escape a special
+character in a filename. For example, `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
+tracks the file named `[slug].tsx` as an input.
+
 Prefix a pattern with `!` to exclude:
 
 ```toml

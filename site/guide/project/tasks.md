@@ -605,6 +605,9 @@ matches nothing would make this task's freshness check silently meaningless
 要 2,827.91 ms，而正确起点只需 61.26 ms，相差 46 倍。写 pattern 时尽量带上目录
 前缀，`**/*.rs` 这种没有前缀的写法会走遍整棵树。
 
+建议用 `/` 分隔 glob 的路径段。需要匹配文件名里的方括号等特殊字符时，可以用反斜杠转义。
+例如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']` 会把 `[slug].tsx` 算作输入。
+
 `!` 前缀表示排除：
 
 ```toml

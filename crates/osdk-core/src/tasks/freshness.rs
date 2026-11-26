@@ -16,11 +16,12 @@
 //!   task is skipped forever, or -- depending on which side is empty -- runs
 //!   every time. Either way nothing is reported and the config looks fine.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -64,8 +65,8 @@ impl Decision {
     }
 }
 
-/// The literal directory prefix of a glob, i.e. everything before the first
-/// component containing a metacharacter.
+/// The literal directory prefix of a normalized glob, stopping before any
+/// component that needs glob parsing.
 ///
 /// `crates/**/*.rs` -> `crates`; `src/main.rs` -> `src`; `**/*.rs` -> `` (the
 /// root). Starting the walk here is what keeps a `target/`-adjacent scan from
@@ -73,23 +74,15 @@ impl Decision {
 /// matches, so narrowing the start cannot change the answer.
 pub fn literal_prefix(pattern: &str) -> PathBuf {
     let mut prefix = PathBuf::new();
-    for component in pattern.split(['/', '\\']) {
-        if component.contains(['*', '?', '[', '{']) {
+    let mut components = pattern.split('/').peekable();
+    while let Some(component) = components.next() {
+        if component.contains(['*', '?', '[', '{', '\\']) {
             break;
         }
-        // A trailing literal is the file name, not a directory to descend into;
-        // including it is harmless because the walk handles files too, but
-        // stopping before an obvious file keeps the root sensible.
-        prefix.push(component);
-    }
-    // `src/main.rs` should start at `src`, not at the file itself.
-    if pattern
-        .rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|last| !last.contains(['*', '?', '[', '{']))
-        && prefix.extension().is_some()
-    {
-        prefix.pop();
+        // For an obvious file name, start in its parent directory.
+        if components.peek().is_some() || Path::new(component).extension().is_none() {
+            prefix.push(component);
+        }
     }
     prefix
 }
@@ -135,9 +128,12 @@ fn split_patterns(patterns: &[String]) -> Vec<Pattern<'_>> {
 fn normalize(path: &Path, root: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let text = relative.to_str()?;
-    let text = text.replace('\\', "/");
-    let text = text.strip_prefix("./").unwrap_or(&text).to_string();
-    Some(text)
+    let text = if std::path::MAIN_SEPARATOR == '\\' {
+        Cow::Owned(text.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(text)
+    };
+    Some(text.strip_prefix("./").unwrap_or(&text).to_owned())
 }
 
 /// How much of the tree a scan actually touched.
@@ -153,17 +149,39 @@ pub struct ScanCost {
     pub visited: usize,
 }
 
+fn normalize_pattern(pattern: &str) -> Cow<'_, str> {
+    // Use glob escapes with forward-slash paths. With no forward slash, an
+    // unescaped backslash before an ordinary character identifies a Windows
+    // path, including patterns such as `dist\*\result.txt`.
+    if !pattern.contains('/') {
+        let mut chars = pattern.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\'
+                && chars.next().is_some_and(|next| {
+                    !matches!(next, '*' | '?' | '[' | ']' | '{' | '}' | ',' | '!' | '\\')
+                })
+            {
+                return Cow::Owned(pattern.replace('\\', "/"));
+            }
+        }
+    }
+    Cow::Borrowed(pattern)
+}
+
 fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, GlobSet)> {
     let mut include = Vec::new();
     let mut exclude = GlobSetBuilder::new();
     for pattern in split_patterns(patterns) {
-        let normalized = pattern.glob.replace('\\', "/");
-        let glob = Glob::new(&normalized).map_err(|error| {
-            Error::config(format!(
-                "{label}: invalid pattern `{}`: {error}",
-                pattern.glob
-            ))
-        })?;
+        let normalized = normalize_pattern(pattern.glob);
+        let glob = GlobBuilder::new(&normalized)
+            .backslash_escape(true)
+            .build()
+            .map_err(|error| {
+                Error::config(format!(
+                    "{label}: invalid pattern `{}`: {error}",
+                    pattern.glob
+                ))
+            })?;
         if pattern.negated {
             exclude.add(glob);
         } else {
@@ -601,6 +619,10 @@ mod tests {
         assert_eq!(literal_prefix("src/main.rs"), PathBuf::from("src"));
         assert_eq!(literal_prefix("**/*.rs"), PathBuf::new());
         assert_eq!(literal_prefix("a/b/c/*.txt"), PathBuf::from("a/b/c"));
+        assert_eq!(
+            literal_prefix(r"src/\[slug\]/index.tsx"),
+            PathBuf::from("src")
+        );
     }
 
     /// The 46x lesson, asserted on traversal rather than on the result.
