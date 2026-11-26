@@ -150,21 +150,36 @@ pub struct ScanCost {
 }
 
 fn normalize_pattern(pattern: &str) -> Cow<'_, str> {
-    // Slash-separated globs use backslash escapes. In a Windows-style glob a
-    // backslash after a path component separates it even before a wildcard.
-    // An escaped closing bracket or an opening bracket without a closing one
-    // marks a literal bracket in a bare filename. Keep Windows classes such
-    // as `src\[ab].rs` working with a separator before the class.
-    let escaped_bracket =
-        pattern.contains(r"\]") || (pattern.contains(r"\[") && !pattern.contains(']'));
-    if pattern.contains('\\')
-        && !pattern.contains('/')
-        && !pattern.starts_with('\\')
-        && !escaped_bracket
-    {
-        Cow::Owned(pattern.replace('\\', "/"))
-    } else {
+    // A forward slash (including a leading `./`) selects glob escapes.
+    if !pattern.contains('\\') || pattern.contains('/') || pattern.starts_with('\\') {
+        return Cow::Borrowed(pattern);
+    }
+
+    let mut chars = pattern.chars();
+    let mut escaped_opening = false;
+    let mut escaped_closing = false;
+    let mut unescaped_closing = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some('[') => escaped_opening = true,
+                Some(']') => escaped_closing = true,
+                Some('*' | '?' | '{' | '}' | ',' | '!' | '\\') | None => {}
+                // A separator before an ordinary character selects Windows
+                // syntax for the whole path, including later `\*` or `\]`.
+                Some(_) => return Cow::Owned(pattern.replace('\\', "/")),
+            },
+            ']' => unescaped_closing = true,
+            _ => {}
+        }
+    }
+
+    // Preserve literal brackets in a bare filename. A Windows character class
+    // such as `src\[ab].rs` has an unescaped closing bracket.
+    if escaped_closing || (escaped_opening && !unescaped_closing) {
         Cow::Borrowed(pattern)
+    } else {
+        Cow::Owned(pattern.replace('\\', "/"))
     }
 }
 

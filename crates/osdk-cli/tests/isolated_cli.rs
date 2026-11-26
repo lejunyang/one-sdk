@@ -182,6 +182,7 @@ fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
 fn hash_task_rebuilds_when_a_windows_style_source_glob_changes() {
     assert_hash_task_tracks_glob("src/main.rs", r"src\*.rs");
     assert_hash_task_tracks_glob("src/a.rs", r"src\[ab].rs");
+    assert_hash_task_tracks_glob("src/pages/]index.tsx", r"src\pages\]index.tsx");
 }
 
 #[cfg(feature = "scripts")]

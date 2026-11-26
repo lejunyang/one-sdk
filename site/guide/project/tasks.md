@@ -606,8 +606,9 @@ matches nothing would make this task's freshness check silently meaningless
 要 2,827.91 ms，而正确起点只需 61.26 ms，相差 46 倍。写 pattern 时尽量带上目录
 前缀，`**/*.rs` 这种没有前缀的写法会走遍整棵树。
 
-`src\*.rs` 这样的 Windows 风格 glob 也可以使用。需要对方括号等特殊字符用反斜杠转义时，
-请用 `/` 分隔路径段。例如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
+`src\*.rs` 和 `src\pages\]index.tsx` 这样的 Windows 风格 glob 也可以使用。
+需要对方括号等特殊字符用反斜杠转义时，请用 `/` 分隔路径段。
+例如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
 会把 `[slug].tsx` 算作输入。跟踪根目录的 `page-[slug].tsx` 时可直接写 `page-\[slug\].tsx`。
 
 `!` 前缀表示排除。模式开头的 `./` 可以省略，`!./src/generated/**` 与 `!src/generated/**` 等效。
