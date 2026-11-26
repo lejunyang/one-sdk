@@ -124,11 +124,15 @@ fn split_patterns(patterns: &[String]) -> Vec<Pattern<'_>> {
 fn normalize_slash_segments(
     path: Cow<'_, str>,
     is_separator: impl FnMut(char) -> bool,
+    backslash_escape: bool,
 ) -> Cow<'_, str> {
+    let has_escaped_dot = backslash_escape
+        && (path.starts_with(r"\./") || path.contains(r"/\./") || path.ends_with(r"/\."));
     if !path.starts_with("./")
         && !path.contains("/./")
         && !path.contains("//")
         && !path.ends_with("/.")
+        && !has_escaped_dot
     {
         return path;
     }
@@ -137,17 +141,19 @@ fn normalize_slash_segments(
     if path.starts_with('/') {
         normalized.push('/');
     }
-    for segment in path.split(is_separator).filter(|s| !matches!(*s, "" | ".")) {
+    let mut ends_in_directory = false;
+    for segment in path.split(is_separator) {
+        ends_in_directory = matches!(segment, "" | ".") || (backslash_escape && segment == r"\.");
+        if ends_in_directory {
+            continue;
+        }
         if !normalized.is_empty() && !normalized.ends_with('/') {
             normalized.push('/');
         }
         normalized.push_str(segment);
     }
-    // A trailing slash or `/.` denotes a directory, even after normalization.
-    if (path.ends_with('/') || path.ends_with("/."))
-        && !normalized.is_empty()
-        && !normalized.ends_with('/')
-    {
+    // A trailing slash or dot segment still denotes a directory.
+    if ends_in_directory && !normalized.is_empty() && !normalized.ends_with('/') {
         normalized.push('/');
     }
     Cow::Owned(normalized)
@@ -162,7 +168,7 @@ fn normalize(path: &Path, root: &Path) -> Option<String> {
     } else {
         Cow::Borrowed(text)
     };
-    Some(normalize_slash_segments(text, |ch| ch == '/').into_owned())
+    Some(normalize_slash_segments(text, |ch| ch == '/', false).into_owned())
 }
 
 /// How much of the tree a scan actually touched.
@@ -189,19 +195,24 @@ fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
         Class,
     }
     let mut state = State::Text;
-    normalize_slash_segments(Cow::Borrowed(pattern), |ch| {
-        state = match (&state, ch) {
-            (State::Text, '/') => return true,
-            (State::Text, '\\') if !std::path::is_separator('\\') => State::Escape,
-            (State::Text, '[') => State::ClassStart,
-            (State::ClassStart, '!' | '^') => State::ClassFirst,
-            (State::ClassStart | State::ClassFirst, _) => State::Class,
-            (State::Class, ']') => State::Text,
-            (State::Class, _) => State::Class,
-            (State::Text | State::Escape, _) => State::Text,
-        };
-        false
-    })
+    let backslash_escape = !std::path::is_separator('\\');
+    normalize_slash_segments(
+        Cow::Borrowed(pattern),
+        |ch| {
+            state = match (&state, ch) {
+                (State::Text, '/') => return true,
+                (State::Text, '\\') if backslash_escape => State::Escape,
+                (State::Text, '[') => State::ClassStart,
+                (State::ClassStart, '!' | '^') => State::ClassFirst,
+                (State::ClassStart | State::ClassFirst, _) => State::Class,
+                (State::Class, ']') => State::Text,
+                (State::Class, _) => State::Class,
+                (State::Text | State::Escape, _) => State::Text,
+            };
+            false
+        },
+        backslash_escape,
+    )
 }
 
 fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, GlobSet)> {
@@ -814,8 +825,10 @@ mod tests {
         let hidden = write(root, "dist/.hidden.txt", "");
         write(root, "dist/xhidden.txt", "");
 
-        let found = resolve(root, &["dist/./[/./]hidden.txt".into()], "test").unwrap();
-        assert_eq!(found, [hidden]);
+        for pattern in ["dist/./[/./]hidden.txt", r"dist/./[/\./]hidden.txt"] {
+            let found = resolve(root, &[pattern.into()], "test").unwrap();
+            assert_eq!(found.as_slice(), std::slice::from_ref(&hidden), "{pattern}");
+        }
     }
 
     #[test]
@@ -954,6 +967,8 @@ mod tests {
             "dist/libs/./*.txt",
             "dist/*/./result.txt",
             "dist//libs//result.txt",
+            #[cfg(unix)]
+            r"dist/\./libs/result.txt",
         ] {
             let result = write(root, "dist/libs/result.txt", "built");
             let outputs = [pattern.into()];
@@ -1036,6 +1051,7 @@ mod tests {
             ("dist/linked/nested/result.txt", 1),
             ("dist/linked/./**/result.txt", 1),
             ("dist/linked/./nested/result.txt", 1),
+            (r"dist/linked/\./nested/result.txt", 1),
             ("dist/linked//*.txt", 1),
         ] {
             let mut cost = ScanCost::default();

@@ -172,12 +172,20 @@ freshness = "hash"
 #[cfg(feature = "scripts")]
 #[test]
 fn hash_task_recreates_an_output_when_only_excluded_files_remain() {
+    assert_hash_task_excludes_temporary_output("!dist/libs/*.tmp.so");
+    #[cfg(unix)]
+    assert_hash_task_excludes_temporary_output(r"!dist/\./libs/*.tmp.so");
+}
+
+#[cfg(feature = "scripts")]
+fn assert_hash_task_excludes_temporary_output(exclusion: &str) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
     std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
     std::fs::write(
         root.join("osdk.toml"),
-        r#"
+        format!(
+            r#"
 [tasks.build]
 lua = """
 assert(osdk.fs.write('dist/libs/libdemo.so', assert(osdk.fs.read('input.txt'))))
@@ -185,9 +193,10 @@ assert(osdk.fs.write('dist/libs/libdemo.tmp.so', 'temporary'))
 print('TASK_EXECUTED')
 """
 sources = ['input.txt']
-outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']
+outputs = ['dist/./libs/*.so', '{exclusion}']
 freshness = 'hash'
 "#,
+        ),
     )
     .unwrap();
 
@@ -201,7 +210,10 @@ freshness = 'hash'
     std::fs::remove_file(&result).unwrap();
     assert!(root.join("dist/libs/libdemo.tmp.so").is_file());
     let preview = run(&["run", "build", "--dry-run"]);
-    assert!(preview.contains("outputs missing"), "{preview}");
+    assert!(
+        preview.contains("outputs missing"),
+        "{exclusion}: {preview}"
+    );
     let rebuilt = run(&["run", "build"]);
     assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
     assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");

@@ -58,6 +58,7 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 根目录中的同名文件可写作 `\[slug\].tsx` 或 `./\[slug\].tsx`。
 正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
 `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
+在 Unix 上，完整的 `\.` 路径段也等同于 `.`，如 `!dist/\./libs/*.tmp.so`。
 
 `mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。
 `mtime` 比较源文件与匹配产物的修改时间，省略 `outputs` 时改用上次成功运行的时间。

@@ -613,6 +613,7 @@ Unix 用它转义字符，Windows 用它分隔路径段。在 Unix 上，
 
 `!` 前缀表示排除。正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
 例如 `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
+在 Unix 上，完整的 `\.` 路径段同样等同于 `.`，所以 `!dist/\./libs/*.tmp.so` 会排除同一批文件。
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]

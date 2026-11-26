@@ -689,6 +689,8 @@ Prefix a pattern with `!` to exclude. Both positive and exclusion patterns
 allow optional `./` path segments and treat consecutive `/` as a single `/`.
 For example, `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` excludes
 temporary libraries in `dist/libs/`.
+On Unix, an entire `\.` path segment is equivalent to `.`, so
+`!dist/\./libs/*.tmp.so` excludes the same files.
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]
