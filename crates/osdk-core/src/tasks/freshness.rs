@@ -118,13 +118,40 @@ fn split_patterns(patterns: &[String]) -> Vec<Pattern<'_>> {
         .collect()
 }
 
-/// Normalize a path for glob matching: relative to `root`, forward slashes, no
-/// `./` prefix.
-///
-/// The `./` part is not cosmetic. A `WalkDir` rooted at `.` yields `./src/x.rs`
-/// while the pattern says `src/*.rs`, so every match fails and freshness turns
-/// into a silent no-op. That exact mismatch is why `matching_is_checked_both_ways`
-/// asserts on both directions.
+/// Match files and patterns using the same spelling of each path.
+fn normalize_slash_segments(
+    path: Cow<'_, str>,
+    is_separator: impl FnMut(char) -> bool,
+) -> Cow<'_, str> {
+    if !path.starts_with("./")
+        && !path.contains("/./")
+        && !path.contains("//")
+        && !path.ends_with("/.")
+    {
+        return path;
+    }
+
+    let mut normalized = String::with_capacity(path.len());
+    if path.starts_with('/') {
+        normalized.push('/');
+    }
+    for segment in path.split(is_separator).filter(|s| !matches!(*s, "" | ".")) {
+        if !normalized.is_empty() && !normalized.ends_with('/') {
+            normalized.push('/');
+        }
+        normalized.push_str(segment);
+    }
+    // A trailing slash or `/.` denotes a directory, even after normalization.
+    if (path.ends_with('/') || path.ends_with("/."))
+        && !normalized.is_empty()
+        && !normalized.ends_with('/')
+    {
+        normalized.push('/');
+    }
+    Cow::Owned(normalized)
+}
+
+/// Normalize a candidate relative to `root` for glob matching.
 fn normalize(path: &Path, root: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let text = relative.to_str()?;
@@ -133,7 +160,7 @@ fn normalize(path: &Path, root: &Path) -> Option<String> {
     } else {
         Cow::Borrowed(text)
     };
-    Some(text.strip_prefix("./").unwrap_or(&text).to_owned())
+    Some(normalize_slash_segments(text, |ch| ch == '/').into_owned())
 }
 
 /// How much of the tree a scan actually touched.
@@ -189,12 +216,38 @@ fn normalize_pattern(pattern: &str) -> Cow<'_, str> {
     }
 }
 
+fn normalize_glob_segments(pattern: Cow<'_, str>) -> Cow<'_, str> {
+    // Slashes in a character class or behind an escape belong to glob syntax.
+    // After an optional class negation, the first `]` can be a literal.
+    enum State {
+        Text,
+        Escape,
+        ClassStart,
+        ClassFirst,
+        Class,
+    }
+    let mut state = State::Text;
+    normalize_slash_segments(pattern, |ch| {
+        state = match (&state, ch) {
+            (State::Text, '/') => return true,
+            (State::Text, '\\') => State::Escape,
+            (State::Text, '[') => State::ClassStart,
+            (State::ClassStart, '!' | '^') => State::ClassFirst,
+            (State::ClassStart | State::ClassFirst, _) => State::Class,
+            (State::Class, ']') => State::Text,
+            (State::Class, _) => State::Class,
+            (State::Text | State::Escape, _) => State::Text,
+        };
+        false
+    })
+}
+
 fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, GlobSet)> {
     let mut include = Vec::new();
     let mut exclude = GlobSetBuilder::new();
     for pattern in split_patterns(patterns) {
-        let normalized = normalize_pattern(pattern.glob);
-        let glob = GlobBuilder::new(normalized.trim_start_matches("./"))
+        let normalized = normalize_glob_segments(normalize_pattern(pattern.glob));
+        let glob = GlobBuilder::new(&normalized)
             .backslash_escape(true)
             .build()
             .map_err(|error| {
@@ -253,31 +306,23 @@ fn scan_files(
 fn output_scan_root(root: &Path, prefix: &Path) -> Result<Option<PathBuf>> {
     // A literal prefix may start below a symlink, bypassing WalkDir's link
     // settings. Check its parents in order before handing it to the walker.
-    // A trailing `/.` also makes the preceding component a directory that
-    // WalkDir would otherwise reach through a symlink.
-    let parents = if prefix
-        .to_string_lossy()
-        .rsplit(std::path::is_separator)
-        .next()
-        == Some(".")
-    {
-        prefix
-    } else {
-        prefix.parent().unwrap_or(Path::new(""))
-    };
-    let mut parent = root.to_path_buf();
-    for component in parents.components() {
-        parent.push(component);
-        match parent.symlink_metadata() {
+    // Build the actual walk path from the checked components, keeping trailing
+    // separators away from the final component's no-follow check in WalkDir.
+    let mut start = root.to_path_buf();
+    let mut components = prefix.components().peekable();
+    while let Some(component) = components.next() {
+        start.push(component);
+        if components.peek().is_none() {
+            break;
+        }
+        match start.symlink_metadata() {
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => return Ok(None),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(Error::io(&parent, error)),
+            Err(error) => return Err(Error::io(&start, error)),
         }
     }
-    // Keep internal `./` components in the walk path so it still matches the
-    // compiled glob. Path::components() elides them during the checks above.
-    Ok(Some(root.join(prefix)))
+    Ok(Some(start))
 }
 
 /// Every positive output pattern must match a file after exclusions.
@@ -804,6 +849,17 @@ mod tests {
     }
 
     #[test]
+    fn normalizing_path_segments_preserves_glob_character_classes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let hidden = write(root, "dist/.hidden.txt", "");
+        write(root, "dist/xhidden.txt", "");
+
+        let found = resolve(root, &["dist/./[/./]hidden.txt".into()], "test").unwrap();
+        assert_eq!(found, [hidden]);
+    }
+
+    #[test]
     fn negation_excludes_and_can_be_escaped() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -940,6 +996,8 @@ mod tests {
             "dist/./libs/result.txt",
             "dist/././libs/result.txt",
             "dist/libs/./*.txt",
+            "dist/*/./result.txt",
+            "dist//libs//result.txt",
             r"dist\.\libs\result.txt",
         ] {
             let result = write(root, "dist/libs/result.txt", "built");
@@ -1016,18 +1074,24 @@ mod tests {
         std::fs::create_dir(root.join("dist")).unwrap();
         std::os::unix::fs::symlink("../outside", root.join("dist/linked")).unwrap();
 
-        for pattern in [
-            "dist/**/result.txt",
-            "dist/linked",
-            "dist/linked/**/result.txt",
-            "dist/linked/nested/result.txt",
-            "dist/linked/./**/result.txt",
-            "dist/linked/./nested/result.txt",
+        for (pattern, max_entries) in [
+            ("dist/**/result.txt", 2),
+            ("dist/linked", 1),
+            ("dist/linked/**/result.txt", 1),
+            ("dist/linked/nested/result.txt", 1),
+            ("dist/linked/./**/result.txt", 1),
+            ("dist/linked/./nested/result.txt", 1),
+            ("dist/linked//*.txt", 1),
+            (r"dist\linked\\*.txt", 1),
         ] {
+            let mut cost = ScanCost::default();
             assert!(
-                !outputs_present(root, &[pattern.into()], "test", &mut ScanCost::default())
-                    .unwrap(),
+                !outputs_present(root, &[pattern.into()], "test", &mut cost).unwrap(),
                 "{pattern} reached the target of a directory symlink"
+            );
+            assert!(
+                cost.visited <= max_entries,
+                "{pattern} scanned into the link: {cost:?}"
             );
         }
     }

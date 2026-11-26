@@ -686,10 +686,10 @@ To escape special characters with `\`, use `/` as the path separator. For exampl
 track `page-[slug].tsx` at the project root. Prefix a root-level pattern with
 `./` to explicitly select escape syntax.
 
-Prefix a pattern with `!` to exclude. The leading `./` is optional, so
-`!./src/generated/**` and `!src/generated/**` are equivalent.
-For an output declared by its full relative path, `dist/./libs/result.txt`
-and `dist/libs/result.txt` match the same file.
+Prefix a pattern with `!` to exclude. Both positive and exclusion patterns
+allow optional `./` path segments and treat consecutive `/` as a single `/`.
+For example, `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` excludes
+temporary libraries in `dist/libs/`.
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]

@@ -171,6 +171,44 @@ freshness = "hash"
 
 #[cfg(feature = "scripts")]
 #[test]
+fn hash_task_recreates_an_output_when_only_excluded_files_remain() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        r#"
+[tasks.build]
+lua = """
+assert(osdk.fs.write('dist/libs/libdemo.so', assert(osdk.fs.read('input.txt'))))
+assert(osdk.fs.write('dist/libs/libdemo.tmp.so', 'temporary'))
+print('TASK_EXECUTED')
+"""
+sources = ['input.txt']
+outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']
+freshness = 'hash'
+"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/libs/libdemo.so");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    let unchanged = run(&["run", "build"]);
+    assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+
+    std::fs::remove_file(&result).unwrap();
+    assert!(root.join("dist/libs/libdemo.tmp.so").is_file());
+    let preview = run(&["run", "build", "--dry-run"]);
+    assert!(preview.contains("outputs missing"), "{preview}");
+    let rebuilt = run(&["run", "build"]);
+    assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
+    assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
+}
+
+#[cfg(feature = "scripts")]
+#[test]
 fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
     assert_hash_task_tracks_glob("src/routes/[slug].tsx", r"src/**/\[slug\].tsx");
     assert_hash_task_tracks_glob("page-[slug].tsx", r"./page-\[slug\].tsx");

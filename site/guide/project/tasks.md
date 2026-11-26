@@ -612,8 +612,8 @@ matches nothing would make this task's freshness check silently meaningless
 会把 `[slug].tsx` 算作输入。跟踪根目录的 `page-[slug].tsx` 时，`page-\[slug\].tsx`
 和 `page-\[slug\]\.tsx` 都可以。根目录的模式也可以加 `./` 明确表示使用转义语法。
 
-`!` 前缀表示排除。模式开头的 `./` 可以省略，`!./src/generated/**` 与 `!src/generated/**` 等效。
-产物用完整相对路径声明时，`dist/./libs/result.txt` 与 `dist/libs/result.txt` 匹配同一文件。
+`!` 前缀表示排除。正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
+例如 `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]

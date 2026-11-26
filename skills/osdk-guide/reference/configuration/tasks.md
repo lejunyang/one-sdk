@@ -57,8 +57,8 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 用反斜杠转义文件名里的特殊字符时，用 `/` 分隔路径段，如 `src/**/\[slug\].tsx`。
 根目录的 `page-[slug].tsx` 可写成 `page-\[slug\].tsx` 或 `page-\[slug\]\.tsx`。
 根目录的模式也可以加 `./` 明确表示使用转义语法。
-模式开头的 `./` 可以省略，`!./dist/ignored/**` 与 `!dist/ignored/**` 等效。
-产物用完整相对路径声明时，`dist/./libs/result.txt` 与 `dist/libs/result.txt` 匹配同一文件。
+正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
+`outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
 
 `mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。
 `mtime` 比较源文件与匹配产物的修改时间，省略 `outputs` 时改用上次成功运行的时间。
