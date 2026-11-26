@@ -5664,7 +5664,7 @@ fn compile_windows_fixture(source: &Path, output: &Path, crate_name: &str) -> bo
 /// `None` means this environment cannot build that executable at all (see
 /// [`compile_windows_fixture`]); the caller skips instead of failing.
 #[cfg(windows)]
-fn write_fake_rustup(root: &Path, project: &Path) -> Option<PathBuf> {
+fn write_fake_rustup(root: &Path, project: &Path, toolchain: &str) -> Option<PathBuf> {
     let rustup = root.join("data/cargo/bin/rustup.exe");
     std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
     let log = root.join("rustup-calls.log");
@@ -5703,8 +5703,7 @@ fn main() {{
     }} else if joined.starts_with("check") {{
         print!("stable - Up to date\n");
     }} else if joined.starts_with("override list") {{
-        print!(r#"{project}"#);
-        print!(" stable-x86_64-pc-windows-msvc\n");
+        print!("{{:<40}}\t{{:<20}}\n", r#"{project}"#, "{toolchain}");
     }}
 }}
 "##,
@@ -5722,7 +5721,7 @@ fn main() {{
 /// Always `Some` on Unix: a shell script needs no compiler. The `Option` exists
 /// only so both platforms present one signature to the call sites.
 #[cfg(unix)]
-fn write_fake_rustup(root: &Path, project: &Path) -> Option<PathBuf> {
+fn write_fake_rustup(root: &Path, project: &Path, toolchain: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
     let rustup = root.join("data/cargo/bin/rustup");
@@ -5737,7 +5736,7 @@ case "$1 $2" in
   "component list") printf 'rustfmt-x86_64-unknown-linux-gnu (installed)\n' ;;
   "target list") printf 'x86_64-unknown-linux-gnu (installed)\n' ;;
   "check ") printf 'stable - Up to date\n' ;;
-  "override list") printf '{} stable-x86_64-unknown-linux-gnu\n' ;;
+  "override list") printf '%-40s\t%-20s\n' '{}' '{toolchain}' ;;
 esac
 "#,
             log.display(),
@@ -5756,7 +5755,8 @@ fn rust_lifecycle_commands_use_isolated_rustup_and_repair_markers() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     // Unix-only test: the fixture is a shell script and cannot fail to build.
-    write_fake_rustup(temp.path(), &project).expect("the unix fixture is always available");
+    write_fake_rustup(temp.path(), &project, "stable")
+        .expect("the unix fixture is always available");
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
     let stale = temp.path().join("installs/rust/stale");
     std::fs::create_dir_all(&stale).unwrap();
@@ -5829,7 +5829,9 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     // Unix-only test: the fixture is a shell script and cannot fail to build.
-    write_fake_rustup(temp.path(), &project).expect("the unix fixture is always available");
+    let toolchain = "local-dev";
+    write_fake_rustup(temp.path(), &project, toolchain)
+        .expect("the unix fixture is always available");
 
     let import = run_isolated_in(temp.path(), &project, &["rust", "override", "import"]);
     assert!(
@@ -5838,7 +5840,7 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
         String::from_utf8_lossy(&import.stderr)
     );
     let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
-    assert!(config.contains("rust = \"stable-x86_64-unknown-linux-gnu\""));
+    assert!(config.contains("rust = \"local-dev\""));
 
     let export = run_isolated_in(temp.path(), &project, &["rust", "override", "export"]);
     assert!(
@@ -5874,7 +5876,7 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     );
     let calls = std::fs::read_to_string(temp.path().join("rustup-calls.log")).unwrap();
     assert!(calls.contains("override list"));
-    assert!(calls.contains("override set stable-x86_64-unknown-linux-gnu --path"));
+    assert!(calls.contains("override set local-dev --path"));
     assert!(calls.contains("toolchain link local-dev"));
 }
 
@@ -6017,7 +6019,7 @@ fn rust_target_add_drives_the_selected_source_over_an_ambient_mirror() {
     std::fs::create_dir_all(&project).unwrap();
     // The recorder must be a runnable executable; where it cannot be built this
     // contract is unobservable rather than broken.
-    if write_fake_rustup(temp.path(), &project).is_none() {
+    if write_fake_rustup(temp.path(), &project, "stable").is_none() {
         return;
     }
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
@@ -6078,7 +6080,7 @@ fn local_rust_operations_do_not_inherit_an_ambient_mirror() {
     std::fs::create_dir_all(&project).unwrap();
     // The recorder must be a runnable executable; where it cannot be built this
     // contract is unobservable rather than broken.
-    if write_fake_rustup(temp.path(), &project).is_none() {
+    if write_fake_rustup(temp.path(), &project, "stable").is_none() {
         return;
     }
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();

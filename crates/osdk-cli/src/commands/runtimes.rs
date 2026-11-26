@@ -1642,9 +1642,16 @@ pub(crate) fn dunce_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
 
 pub(crate) fn parse_rustup_override(text: &str, path: &std::path::Path) -> Option<String> {
     text.lines().find_map(|line| {
-        let (directory, toolchain) = line.rsplit_once(char::is_whitespace)?;
-        (dunce::canonicalize(directory).ok().as_deref() == Some(path))
-            .then(|| toolchain.trim().to_string())
+        // rustup left-aligns both columns and separates them with a tab.
+        let line = line.trim_end();
+        if line == "no overrides" {
+            return None;
+        }
+        let (directory, toolchain) = line
+            .rsplit_once('\t')
+            .or_else(|| line.rsplit_once(char::is_whitespace))?;
+        (dunce::canonicalize(directory.trim_end()).ok().as_deref() == Some(path))
+            .then(|| toolchain.to_string())
     })
 }
 
@@ -1963,9 +1970,57 @@ pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std
 
 #[cfg(test)]
 mod tests {
-    use super::restore_endpoint;
+    use super::{parse_rustup_override, restore_endpoint};
     use crate::lockfile::LockedModel;
     use osdk_core::model::ProviderId;
+
+    #[test]
+    fn parse_rustup_override_accepts_rustup_column_padding() {
+        // Use a short printed path regardless of the host's temp directory.
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let relative = std::path::Path::new(temp.path().file_name().unwrap());
+        let short = relative.join("project with spaces");
+        let long = relative.join("project with spaces and a path wider than the rustup column");
+        for (directory, toolchain) in [
+            (&short, "local-dev"),
+            (&long, "local-dev"),
+            (&long, "linked-rust-for-sibling-import"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+            let canonical = dunce::canonicalize(directory).unwrap();
+            let text = format!("{:<40}\t{toolchain:<20}\n", directory.display());
+            assert_eq!(
+                parse_rustup_override(&text, &canonical).as_deref(),
+                Some(toolchain),
+                "override list row: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rustup_override_ignores_unavailable_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = dunce::canonicalize(temp.path()).unwrap();
+        let missing = directory.join("removed directory");
+        let missing_label = format!("{} (not a directory)", missing.display());
+        let text = format!("{missing_label:<40}\t{:<20}\n", "local-dev");
+
+        assert_eq!(parse_rustup_override(&text, &directory), None);
+        assert_eq!(parse_rustup_override("no overrides\n", &directory), None);
+    }
+
+    #[test]
+    fn parse_rustup_override_accepts_space_separated_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("project with spaces");
+        std::fs::create_dir(&directory).unwrap();
+        let directory = dunce::canonicalize(directory).unwrap();
+        let text = format!("{} local-dev\n", directory.display());
+        assert_eq!(
+            parse_rustup_override(&text, &directory).as_deref(),
+            Some("local-dev")
+        );
+    }
 
     fn locked(provider: ProviderId, endpoint: &str) -> LockedModel {
         LockedModel {
