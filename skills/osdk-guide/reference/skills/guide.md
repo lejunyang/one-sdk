@@ -8,7 +8,7 @@
 | `list`（`ls`） | `-g` | 从项目或用户 lock 列已安装 skill 与 Agent |
 | `remove <NAME>`（`rm`） | `-g`、`-a/--agent` 可重复 | 摘除全部或指定 Agent 链接 |
 | `sync` | `-g` | 精确复现已锁定的 skill，按 `osdk.toml` 安装适用且缺锁的声明并写锁。替换内容不同的未锁定 skill 前确认 |
-| `update [SKILL...]` | `-g` | 重解析 `requested_ref`；仅目标 skill 内容哈希变化时重装，仓库其他变更只推进 lock；仅显式 `rev:<commit>` 固定不动，旧裸 commit 迁移为默认分支意图；同时让 Agent 跟随声明的 `agents`（删掉的取消链接、新增的装入、改写 lock） |
+| `update [SKILL...]` | `-g` | 重解析 `requested_ref` 或应用声明的新 ref，包括新的 `rev:<commit>`。仅目标 skill 内容哈希变化时重装，仓库其他变更只推进 lock。未变更的 `rev:<commit>` 保持固定，旧裸 commit 迁移为默认分支意图。同时让 Agent 跟随声明的 `agents`（删掉的取消链接、新增的装入、改写 lock） |
 | `path <NAME>` | — | 按配置的范围查锁并打印落地目录。未配置时先查项目锁，再查用户锁 |
 | `find [QUERY...]`（`search`） | `--owner`、`--limit 1..50` | 匿名搜索 GitHub；限流后才用 token，不访问 skills.sh |
 | `use <SOURCE>` | `-s/--skill`、`-a/--agent`、`--ref` | 不安装；打印 prompt 或交互启动 Agent |

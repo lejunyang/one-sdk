@@ -48,7 +48,8 @@ It also installs applicable declarations that have no lock entry and records the
 repository commit advances but the selected skill's content hash does not, only the
 lock commit advances; changed skill content is reinstalled. A bare 40-hex commit
 left by an older project is migrated to default-branch intent; spell an intentional
-permanent pin as `ref = "rev:<commit>"`. `update` also makes the install follow the
+permanent pin as `ref = "rev:<commit>"`. To switch to a different pinned commit,
+edit `ref` and run `skills update`. `update` also makes the install follow the
 project's `[skills.<name>].agents` (or `[skills].default_agents` when empty): an agent
 removed there is unlinked, keeping a directory a still-declared agent shares, an added
 one gets the copy the lock pins, and the lock's `agents` is rewritten. `use` installs nothing and writes no

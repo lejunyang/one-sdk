@@ -444,6 +444,43 @@ fn skills_rejects_invalid_scope() {
     assert!(!root.join("state/config/osdk.lock").exists());
 }
 
+#[test]
+fn skills_update_resolves_a_changed_pin_before_writing_the_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(root, "");
+    let old = "0123456789abcdef0123456789abcdef01234567";
+    let new = "abcdef0123456789abcdef0123456789abcdef01";
+    let config = project.join("osdk.toml");
+    let lock = project.join("osdk.lock");
+    let locked = format!(
+        "schema = 4\n\n[skills.demo]\nsource = \"github:acme/demo\"\n\
+         content_hash = \"b3-v2:old\"\nrequested_ref = \"rev:{old}\"\n\
+         resolved_commit = \"{old}\"\ninstall_mode = \"copy\"\nagents = [\"codex\"]\n"
+    );
+    std::fs::write(&lock, &locked).unwrap();
+    let declaration = |commit| {
+        format!(
+            "[skills.demo]\nsource = \"github:acme/demo\"\n\
+             ref = \"rev:{commit}\"\nagents = [\"codex\"]\n"
+        )
+    };
+    let args = ["--offline", "skills", "update", "demo"];
+
+    std::fs::write(&config, declaration(old)).unwrap();
+    let unchanged = osdk(root, &project, &args);
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), locked);
+
+    std::fs::write(&config, declaration(new)).unwrap();
+    let changed = osdk(root, &project, &args);
+    assert!(!changed.status.success(), "{changed:?}");
+    let stderr = String::from_utf8_lossy(&changed.stderr);
+    assert!(stderr.contains("offline metadata cache miss"), "{stderr}");
+    assert!(stderr.contains(new), "{stderr}");
+    assert_eq!(std::fs::read_to_string(lock).unwrap(), locked);
+}
+
 /// Editing a skill's `agents` in osdk.toml must reach the lock and the disk on
 /// `skills update`. It used to re-resolve only the source, so an agent removed
 /// from the declaration stayed installed and recorded.

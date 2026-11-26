@@ -40,7 +40,8 @@ osdk skills agents
 `update` 重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
 前进但目标 skill 内容哈希未变时只推进 lock，不重装；内容变化才重新落地。已有项目保存的裸
 40 位 commit 只视为安装快照，迁移为默认分支意图；需要永久固定时明确写
-`ref = "rev:<commit>"`。`update` 还会让安装位置跟随项目声明：`[skills.<名>].agents`（为空时用
+`ref = "rev:<commit>"`。要改用另一个固定 commit，修改 `ref` 后运行 `skills update`。
+`update` 还会让安装位置跟随项目声明：`[skills.<名>].agents`（为空时用
 `[skills].default_agents`）删掉的 Agent 会被取消链接（与仍在用的 Agent 共享的目录保留），新增的
 Agent 装入 lock 已固定的那份内容，lock 的 `agents` 随之改写。
 `use` 不安装、不写 lock，临时取用一个 skill：无 `-a` 时把生成的 prompt 打到 stdout（可

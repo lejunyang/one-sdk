@@ -889,26 +889,16 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             .get(name)
             .map(|declaration| declaration.r#ref.as_deref());
         let requested_reference = configured_reference.unwrap_or(entry.requested_ref.as_deref());
-        let reference = match reference_for_update(requested_reference) {
-            UpdateReference::Pinned(reference) => {
-                let requested_ref = normalized_requested_ref(Some(reference));
-                if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
-                    if let Some(existing) = lock.skills.get_mut(name) {
-                        existing.requested_ref = requested_ref;
-                        existing.install_mode = Some(mode);
-                    }
-                    changed = true;
-                    println!("`{name}`: pinned at {reference}; migrated lock metadata");
-                } else {
-                    println!("`{name}`: pinned at {reference}; nothing to update");
-                }
-                continue;
+        let reference = reference_for_update(requested_reference);
+        let pinned_commit = reference.and_then(|reference| reference.strip_prefix("rev:"));
+        let commit = match &entry.resolved_commit {
+            Some(commit) if pinned_commit.is_some_and(|pin| pin.eq_ignore_ascii_case(commit)) => {
+                commit.clone()
             }
-            UpdateReference::Resolve(reference) => reference,
+            _ => skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
+                .await
+                .with_context(|| format!("re-resolving {owner}/{repo}"))?,
         };
-        let commit = skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
-            .await
-            .with_context(|| format!("re-resolving {owner}/{repo}"))?;
         if Some(&commit) == entry.resolved_commit.as_ref() {
             let requested_ref = normalized_requested_ref(requested_reference);
             if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
@@ -973,14 +963,6 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateReference<'a> {
-    /// Re-resolve the default branch or this floating branch/tag name.
-    Resolve(Option<&'a str>),
-    /// An explicitly immutable `rev:` selector never advances.
-    Pinned(&'a str),
-}
-
 /// Interpret a declaration ref for an explicit `skills update`.
 ///
 /// Existing projects can carry the commit selected at install time as a bare
@@ -989,17 +971,15 @@ enum UpdateReference<'a> {
 /// declarations through the unambiguous `rev:` spelling;
 /// every other selector is a moving update target, while a bare 40-hex snapshot
 /// follows the source's default branch for backward compatibility.
-fn reference_for_update(reference: Option<&str>) -> UpdateReference<'_> {
+fn reference_for_update(reference: Option<&str>) -> Option<&str> {
     match reference.map(str::trim).filter(|value| !value.is_empty()) {
-        Some("default") => UpdateReference::Resolve(None),
-        Some(reference) if reference.starts_with("rev:") => UpdateReference::Pinned(reference),
+        Some("default") => None,
         Some(reference)
             if reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
         {
-            UpdateReference::Resolve(None)
+            None
         }
-        Some(reference) => UpdateReference::Resolve(Some(reference)),
-        None => UpdateReference::Resolve(None),
+        reference => reference,
     }
 }
 
@@ -2024,31 +2004,22 @@ mod tests {
     #[test]
     fn update_reference_advances_bare_commit_snapshots() {
         let snapshot = "02a2f2b3142ded7d73554aaee629a24966a62313";
-        assert_eq!(
-            reference_for_update(Some(snapshot)),
-            UpdateReference::Resolve(None)
-        );
-        assert_eq!(reference_for_update(None), UpdateReference::Resolve(None));
+        assert_eq!(reference_for_update(Some(snapshot)), None);
+        assert_eq!(reference_for_update(None), None);
     }
 
     #[test]
     fn update_reference_preserves_explicit_pins_and_floating_refs() {
         assert_eq!(
             reference_for_update(Some("rev:02a2f2b3142ded7d73554aaee629a24966a62313")),
-            UpdateReference::Pinned("rev:02a2f2b3142ded7d73554aaee629a24966a62313")
+            Some("rev:02a2f2b3142ded7d73554aaee629a24966a62313")
         );
         assert_eq!(
             reference_for_update(Some("branch:main")),
-            UpdateReference::Resolve(Some("branch:main"))
+            Some("branch:main")
         );
-        assert_eq!(
-            reference_for_update(Some("tag:v1")),
-            UpdateReference::Resolve(Some("tag:v1"))
-        );
-        assert_eq!(
-            reference_for_update(Some("release")),
-            UpdateReference::Resolve(Some("release"))
-        );
+        assert_eq!(reference_for_update(Some("tag:v1")), Some("tag:v1"));
+        assert_eq!(reference_for_update(Some("release")), Some("release"));
     }
 
     #[test]

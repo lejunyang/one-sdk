@@ -782,6 +782,7 @@ osdk skills remove web-design-guidelines
 在 `osdk.toml` 的 `[skills.<名>]` 中声明团队技能。执行 `osdk skills sync` 会安装当前平台
 适用的缺锁声明，并将结果追加到 `osdk.lock`。用 `skills update` 更新已锁定的 GitHub ref 或
 应用 Agent 列表变更。要在更新时仍固定到同一 GitHub commit，配置 `ref = "rev:<commit>"`。
+要更换固定 commit，修改 `ref` 后运行 `skills update`。
 设置 `[skills].scope = "global"` 默认使用用户级 Agent 目录，也可为单次命令传 `-g`。
 
 指南：[Agent skills](site/guide/ai/skills.md)
