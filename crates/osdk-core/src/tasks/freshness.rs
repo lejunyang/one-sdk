@@ -23,7 +23,7 @@ use std::time::SystemTime;
 
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use super::args::Values;
 use crate::error::{Error, Result};
@@ -194,35 +194,59 @@ fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, Glob
     Ok((include, exclude))
 }
 
-/// Visit normalized file entries until the visitor asks to stop.
+/// Visit normalized file and symlink entries until the visitor asks to stop.
 fn scan_files(
     root: &Path,
-    start: &Path,
+    walk: WalkDir,
     label: &str,
     cost: &mut ScanCost,
-    mut stop: impl FnMut(&Path, &str) -> bool,
+    mut stop: impl FnMut(&DirEntry, &str) -> bool,
 ) -> Result<bool> {
-    if !start
-        .try_exists()
-        .map_err(|error| Error::io(start, error))?
-    {
-        return Ok(false);
-    }
-    for entry in WalkDir::new(start).follow_links(false) {
+    for entry in walk.follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error)
+                if error.depth() == 0
+                    && error
+                        .io_error()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(Error::other(format!("{label}: cannot scan: {error}"))),
+        };
         cost.visited += 1;
-        let entry =
-            entry.map_err(|error| Error::other(format!("{label}: cannot scan: {error}")))?;
-        if !entry.file_type().is_file() {
+        if !entry.file_type().is_file() && !entry.path_is_symlink() {
             continue;
         }
         let Some(relative) = normalize(entry.path(), root) else {
             continue;
         };
-        if stop(entry.path(), &relative) {
+        if stop(&entry, &relative) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn output_scan_root(root: &Path, prefix: &Path) -> Result<Option<PathBuf>> {
+    // A literal prefix may start below a symlink, bypassing WalkDir's link
+    // settings. Check its parents in order before handing it to the walker.
+    let mut start = root.to_path_buf();
+    let mut components = prefix.components().peekable();
+    while let Some(component) = components.next() {
+        start.push(component);
+        if components.peek().is_none() {
+            break;
+        }
+        match start.symlink_metadata() {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Error::io(&start, error)),
+        }
+    }
+    Ok(Some(start))
 }
 
 /// Every positive output pattern must match a file after exclusions.
@@ -234,10 +258,15 @@ fn outputs_present(
 ) -> Result<bool> {
     let (include, exclude) = compile_patterns(patterns, label)?;
     for glob in include {
-        let start = root.join(literal_prefix(glob.glob()));
+        let Some(start) = output_scan_root(root, &literal_prefix(glob.glob()))? else {
+            return Ok(false);
+        };
+        let walk = WalkDir::new(start).follow_root_links(false);
         let matcher = glob.compile_matcher();
-        if !scan_files(root, &start, label, cost, |_, relative| {
-            matcher.is_match(relative) && !exclude.is_match(relative)
+        if !scan_files(root, walk, label, cost, |entry, relative| {
+            matcher.is_match(relative)
+                && !exclude.is_match(relative)
+                && (entry.file_type().is_file() || entry.path().is_file())
         })? {
             return Ok(false);
         }
@@ -291,12 +320,21 @@ pub fn resolve_measured(
     let mut found = Vec::new();
     let mut cost = ScanCost::default();
     for start in pruned {
-        scan_files(root, &start, label, &mut cost, |path, relative| {
-            if include.is_match(relative) && !exclude.is_match(relative) {
-                found.push(path.to_path_buf());
-            }
-            false
-        })?;
+        scan_files(
+            root,
+            WalkDir::new(start),
+            label,
+            &mut cost,
+            |entry, relative| {
+                if entry.file_type().is_file()
+                    && include.is_match(relative)
+                    && !exclude.is_match(relative)
+                {
+                    found.push(entry.path().to_path_buf());
+                }
+                false
+            },
+        )?;
     }
     found.sort();
     found.dedup();
@@ -844,6 +882,53 @@ mod tests {
         let mut cost = ScanCost::default();
         assert!(outputs_present(root, &["dist/*.txt".into()], "test", &mut cost).unwrap());
         assert_eq!(cost.visited, 2, "one directory and its first matching file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hash_match_accepts_only_file_symlinks_with_existing_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        let target = write(root, "dist/libdemo.so.1", "built");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/libdemo.so".into(), "dist/libdemo".into()];
+        for link in &outputs {
+            std::os::unix::fs::symlink("libdemo.so.1", root.join(link)).unwrap();
+        }
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+
+        std::fs::remove_file(target).unwrap();
+        assert_eq!(
+            decide(&spec, &state).unwrap(),
+            Decision::Run("outputs missing".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checking_output_presence_does_not_walk_symlinked_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "outside/nested/result.txt", "built");
+        std::fs::create_dir(root.join("dist")).unwrap();
+        std::os::unix::fs::symlink("../outside", root.join("dist/linked")).unwrap();
+
+        for pattern in [
+            "dist/**/result.txt",
+            "dist/linked",
+            "dist/linked/**/result.txt",
+            "dist/linked/nested/result.txt",
+        ] {
+            assert!(
+                !outputs_present(root, &[pattern.into()], "test", &mut ScanCost::default())
+                    .unwrap(),
+                "{pattern} reached the target of a directory symlink"
+            );
+        }
     }
 
     #[test]

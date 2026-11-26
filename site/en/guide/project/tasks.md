@@ -653,6 +653,8 @@ on the command line. `--dry-run` uses the same argument check.
 
 Even when the hash matches, the task reruns if any positive `outputs` pattern
 has no matching file. Files excluded by a `!` pattern do not count.
+A symlink counts if it points to an existing regular file. A dangling symlink
+counts as missing. The output scan skips symlinked directories.
 
 In `mtime` mode, omitting `outputs` makes osdk compare source modification times
 against the last successful run. The record lives in the cache directory.
