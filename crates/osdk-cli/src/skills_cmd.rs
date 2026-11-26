@@ -575,18 +575,11 @@ async fn prepare_declared_skill(
         None if target_dirs.len() == 1 => LinkMode::Copy,
         None => LinkMode::Auto,
     };
-    let base = app
-        .ctx
-        .config
-        .project_config_path
-        .as_deref()
-        .and_then(Path::parent)
-        .unwrap_or(&app.ctx.dirs.config);
     let selector = declaration.skill.as_deref().unwrap_or(name);
     let source = resolve_source(
         app,
         &declaration.source,
-        Some(base),
+        declaration.source_dir.as_deref(),
         &[selector.to_string()],
         declaration.r#ref.as_deref(),
     )

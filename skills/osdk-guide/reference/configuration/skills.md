@@ -21,7 +21,8 @@ when = { os = ["linux", "macos"] }
 对没有锁条目的声明，它按 `when` 筛选本平台适用的技能，打印安装摘要、安装并写入锁。
 
 - 声明名是锁键和安装目录名。`source` 必填，支持 GitHub 来源或本地路径。相对本地路径从
-  `osdk.toml` 所在目录解析。一个来源有多个技能时，`skill` 按目录选取，缺省取声明名。
+  声明 `source` 的配置文件所在目录解析，外置项目配置以实际项目根目录为基准。
+  一个来源有多个技能时，`skill` 按目录选取，缺省取声明名。
 - `ref` 只用于 GitHub。用 `osdk skills update <名>` 应用 ref 或 Agent 列表变更。更新时只有
   `ref = "rev:<commit>"` 会保持永久固定，旧配置的裸 40 位 commit 仍按安装快照处理。
   换来源或技能时，用 `osdk skills remove <名>` 后重新同步，或显式调用 `skills add`。

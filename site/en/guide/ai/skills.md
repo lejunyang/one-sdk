@@ -173,7 +173,8 @@ agents = ["claude-code", "codex"]
 
 The declaration name is the lock key and the installation directory name. For a
 collection, `skill` selects a directory and defaults to the declaration name.
-Relative local paths are resolved from the directory containing `osdk.toml`.
+Relative local paths are resolved from the config file that declares `source`.
+For an external project config, they are relative to the actual project root.
 `ref` applies to GitHub sources. An empty `agents` list falls back to
 `[skills].default_agents` and then to agent detection. In CI, set agents in the
 config or pass `--yes` to accept detection. `sync` prints a summary and proceeds

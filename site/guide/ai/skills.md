@@ -143,7 +143,8 @@ agents = ["claude-code", "codex"]
 ```
 
 声明名用作锁键和安装目录名。来源包含多个技能时，`skill` 选择其中一个目录，省略时按声明名查找。
-本地相对路径以 `osdk.toml` 所在目录为基准。`ref` 仅用于 GitHub 来源。声明的 `agents` 为空时用
+本地相对路径以声明该 `source` 的配置文件所在目录为基准，外置项目配置以实际项目根目录为基准。
+`ref` 仅用于 GitHub 来源。声明的 `agents` 为空时用
 `[skills].default_agents`，再为空则检测已安装的 Agent。CI 可以声明 Agent 或传 `--yes` 接受检测结果。
 `sync` 首次安装会打印摘要并继续安装。默认单目录复制，多目录自动链接，可用
 `[skills].link_mode` 覆盖。自定义 `endpoint` 尚未实现。缺锁的声明设置该字段时会报错。

@@ -156,6 +156,41 @@ fn skills_sync_uses_the_selected_project_lock() {
 }
 
 #[test]
+fn skills_sync_resolves_an_inherited_source_from_its_declaring_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let parent = local_project(
+        root,
+        "[skills.demo]\nsource = \"./fixture/demo\"\nagents = [\"claude-code\"]\n",
+    );
+    let child = local_project(
+        &parent,
+        "extends = \"../osdk.toml\"\n\n[skills.demo]\nagents = [\"codex\"]\n",
+    );
+    std::fs::write(
+        child.join("fixture/demo/SKILL.md"),
+        format!("{DEMO_SKILL}\nDifferent child content\n"),
+    )
+    .unwrap();
+
+    let sync = osdk(root, &child, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+    assert_eq!(
+        std::fs::read(child.join(".agents/skills/demo/SKILL.md")).unwrap(),
+        DEMO_SKILL.as_bytes()
+    );
+    let lock = read_lock(&child.join("osdk.lock"));
+    let demo = &lock["skills"]["demo"];
+    assert_eq!(demo["source"].as_str(), Some("local:./fixture/demo"));
+    assert_eq!(locked_agents(&child), ["codex"]);
+    let package = osdk_core::skills::install::read_skill_dir(&parent.join("fixture/demo")).unwrap();
+    assert_eq!(
+        demo["content_hash"].as_str(),
+        Some(package.content_hash().as_str())
+    );
+}
+
+#[test]
 fn skills_sync_replays_cached_bytes_and_ignores_changed_declaration() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
