@@ -638,7 +638,7 @@ The default comparison is modification time. Three choices:
 | `freshness` | Behaviour | When |
 | --- | --- | --- |
 | `"mtime"` (default) | Compare modification times | Cheap, but `git checkout` and CI cache restores rewrite timestamps |
-| `"hash"` | Compare input content hashes and check that every output pattern matches a file | Ignores timestamp-only changes, at the cost of reading every input |
+| `"hash"` | Compare input content hashes and check that every positive output pattern matches a non-excluded file | Ignores timestamp-only changes, at the cost of reading every input |
 | `"always"` | Never skip | Opt out of incrementality |
 
 Both `mtime` and `hash` compare the task definition with its last successful run.
