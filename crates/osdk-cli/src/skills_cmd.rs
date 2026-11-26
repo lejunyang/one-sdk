@@ -328,11 +328,7 @@ impl SkillInstallation {
             self.target_dirs.keys().any(|agent_dir| {
                 let destination = agent_dir.join(&skill.name);
                 destination.symlink_metadata().is_ok()
-                    && !destination_matches_package(
-                        &destination,
-                        &self.source.canonical,
-                        &skill.package,
-                    )
+                    && !destination_matches_package(&destination, &skill.package)
             })
         })
     }
@@ -375,11 +371,7 @@ impl SkillInstallation {
     }
 }
 
-fn destination_matches_package(
-    destination: &Path,
-    source: &str,
-    package: &install::SkillPackage,
-) -> bool {
+fn destination_matches_package(destination: &Path, package: &install::SkillPackage) -> bool {
     let mut files: BTreeMap<_, _> = package
         .files
         .iter()
@@ -394,9 +386,8 @@ fn destination_matches_package(
         if relative == Path::new(MANIFEST_FILE)
             && !files.contains_key(relative)
             && entry.file_type().is_file()
-            && Manifest::load(destination).is_ok_and(|manifest| {
-                manifest.tool == source && manifest.version == package.content_hash()
-            })
+            && Manifest::load(destination)
+                .is_ok_and(|manifest| manifest.version == package.content_hash())
         {
             continue;
         }

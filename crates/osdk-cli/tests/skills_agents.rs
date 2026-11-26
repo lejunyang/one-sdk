@@ -230,6 +230,37 @@ fn skills_sync_confirms_before_replacing_unlocked_contents() {
 }
 
 #[test]
+fn skills_sync_adopts_an_identical_unlocked_skill_added_by_absolute_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(root, DEMO_DECLARATION);
+    let absolute = project.join("fixture/demo");
+    let add = osdk(
+        root,
+        &project,
+        &[
+            "--yes",
+            "skills",
+            "add",
+            absolute.to_str().unwrap(),
+            "-a",
+            "codex",
+            "--no-lock",
+        ],
+    );
+    assert!(add.status.success(), "{add:?}");
+    let lock = project.join("osdk.lock");
+    assert!(!lock.exists());
+    let manifest =
+        osdk_core::store::manifest::Manifest::load(&project.join(".agents/skills/demo")).unwrap();
+    assert_ne!(manifest.tool, "local:./fixture/demo");
+
+    let sync = osdk(root, &project, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+    assert_demo_installed(&project, &read_lock(&lock));
+}
+
+#[test]
 fn skills_sync_replays_cached_bytes_and_ignores_changed_declaration() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
