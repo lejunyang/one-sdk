@@ -611,8 +611,9 @@ Unix 用它转义字符，Windows 用它分隔路径段。在 Unix 上，
 `sources = ['manifest.json', 'src/**/\[slug\].tsx']` 会跟踪 `src/` 下名为 `[slug].tsx`
 的源文件。跟踪项目根目录下的同名文件时，写 `\[slug\].tsx` 或 `./\[slug\].tsx`。
 
-`!` 前缀表示排除。正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
+`!` 前缀表示排除。正向模式和排除模式都可以省略独立的 `.` 路径段，连续的路径分隔符等同于一个。
 例如 `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
+在 Windows 上，`!dist\.\libs\*.tmp.so` 会排除同一批文件。
 在 Unix 上，完整的 `\.` 路径段同样等同于 `.`，所以 `!dist/\./libs/*.tmp.so` 会排除同一批文件。
 
 ```toml

@@ -124,7 +124,9 @@ fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
     let backslash_escape = !std::path::is_separator('\\');
     let has_escaped_dot = backslash_escape
         && (pattern.starts_with(r"\./") || pattern.contains(r"/\./") || pattern.ends_with(r"/\."));
-    if !pattern.starts_with("./")
+    let has_windows_separator = !backslash_escape && pattern.contains('\\');
+    if !has_windows_separator
+        && !pattern.starts_with("./")
         && !pattern.contains("/./")
         && !pattern.contains("//")
         && !pattern.ends_with("/.")
@@ -133,7 +135,7 @@ fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
         return Cow::Borrowed(pattern);
     }
 
-    // Slashes in a character class or behind an escape belong to glob syntax.
+    // Separators in a character class or behind a Unix escape belong to glob syntax.
     // After an optional class negation, the first `]` can be a literal.
     enum State {
         Text,
@@ -145,7 +147,7 @@ fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
     let mut state = State::Text;
     let segments = pattern.split(|ch| {
         state = match (&state, ch) {
-            (State::Text, '/') => return true,
+            (State::Text, ch) if std::path::is_separator(ch) => return true,
             (State::Text, '\\') if backslash_escape => State::Escape,
             (State::Text, '[') => State::ClassStart,
             (State::ClassStart, '!' | '^') => State::ClassFirst,
@@ -158,7 +160,7 @@ fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
     });
 
     let mut normalized = String::with_capacity(pattern.len());
-    if pattern.starts_with('/') {
+    if pattern.starts_with(std::path::is_separator) {
         normalized.push('/');
     }
     let mut ends_in_directory = false;
@@ -813,7 +815,12 @@ mod tests {
         let hidden = write(root, "dist/.hidden.txt", "");
         write(root, "dist/xhidden.txt", "");
 
-        for pattern in ["dist/./[/./]hidden.txt", r"dist/./[/\./]hidden.txt"] {
+        for pattern in [
+            "dist/./[/./]hidden.txt",
+            r"dist/./[/\./]hidden.txt",
+            #[cfg(windows)]
+            r"dist\.\[\.\]hidden.txt",
+        ] {
             let found = resolve(root, &[pattern.into()], "test").unwrap();
             assert_eq!(found.as_slice(), std::slice::from_ref(&hidden), "{pattern}");
         }
@@ -957,6 +964,12 @@ mod tests {
             "dist//libs//result.txt",
             #[cfg(unix)]
             r"dist/\./libs/result.txt",
+            #[cfg(windows)]
+            r"dist\.\libs\result.txt",
+            #[cfg(windows)]
+            r"dist\*\.\result.txt",
+            #[cfg(windows)]
+            r"dist\\libs\/result.txt",
         ] {
             let result = write(root, "dist/libs/result.txt", "built");
             let outputs = [pattern.into()];

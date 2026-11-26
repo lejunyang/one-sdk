@@ -686,9 +686,11 @@ tracks files named `[slug].tsx` under `src/`. At the project root, use
 `\[slug\].tsx` or `./\[slug\].tsx`.
 
 Prefix a pattern with `!` to exclude. Both positive and exclusion patterns
-allow optional `./` path segments and treat consecutive `/` as a single `/`.
+allow optional standalone `.` path segments and treat consecutive path separators
+as a single separator.
 For example, `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` excludes
 temporary libraries in `dist/libs/`.
+On Windows, `!dist\.\libs\*.tmp.so` excludes the same files.
 On Unix, an entire `\.` path segment is equivalent to `.`, so
 `!dist/\./libs/*.tmp.so` excludes the same files.
 

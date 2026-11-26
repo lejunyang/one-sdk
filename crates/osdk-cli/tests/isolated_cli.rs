@@ -172,13 +172,19 @@ freshness = "hash"
 #[cfg(feature = "scripts")]
 #[test]
 fn hash_task_recreates_an_output_when_only_excluded_files_remain() {
-    assert_hash_task_excludes_temporary_output("!dist/libs/*.tmp.so");
+    assert_hash_task_excludes_temporary_output("dist/./libs/*.so", "!dist/libs/*.tmp.so");
     #[cfg(unix)]
-    assert_hash_task_excludes_temporary_output(r"!dist/\./libs/*.tmp.so");
+    assert_hash_task_excludes_temporary_output("dist/./libs/*.so", r"!dist/\./libs/*.tmp.so");
+}
+
+#[cfg(all(windows, feature = "scripts"))]
+#[test]
+fn hash_task_recreates_an_output_with_a_windows_dot_segment_in_the_exclusion() {
+    assert_hash_task_excludes_temporary_output(r"dist\libs\*.so", r"!dist\.\libs\*.tmp.so");
 }
 
 #[cfg(feature = "scripts")]
-fn assert_hash_task_excludes_temporary_output(exclusion: &str) {
+fn assert_hash_task_excludes_temporary_output(include: &str, exclusion: &str) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
     std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
@@ -193,7 +199,7 @@ assert(osdk.fs.write('dist/libs/libdemo.tmp.so', 'temporary'))
 print('TASK_EXECUTED')
 """
 sources = ['input.txt']
-outputs = ['dist/./libs/*.so', '{exclusion}']
+outputs = ['{include}', '{exclusion}']
 freshness = 'hash'
 "#,
         ),
@@ -204,8 +210,14 @@ freshness = 'hash'
     run(&["--yes", "trust", "./osdk.toml"]);
     let result = root.join("dist/libs/libdemo.so");
     assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    let preview = run(&["run", "build", "--dry-run"]);
+    assert!(
+        preview.contains("up to date, would be skipped"),
+        "{include}, {exclusion}: {preview}"
+    );
     let unchanged = run(&["run", "build"]);
     assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+    assert!(!unchanged.contains("TASK_EXECUTED"), "{unchanged}");
 
     std::fs::remove_file(&result).unwrap();
     assert!(root.join("dist/libs/libdemo.tmp.so").is_file());
@@ -214,6 +226,7 @@ freshness = 'hash'
         preview.contains("outputs missing"),
         "{exclusion}: {preview}"
     );
+    assert!(!result.exists(), "dry-run must not recreate the output");
     let rebuilt = run(&["run", "build"]);
     assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
     assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
@@ -229,7 +242,15 @@ fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
     assert_hash_task_tracks_glob("page-[slug].tsx", r"page-\[slug\]\.tsx");
 }
 
-#[cfg(all(unix, feature = "scripts"))]
+#[cfg(all(windows, feature = "scripts"))]
+#[test]
+fn hash_task_rebuilds_when_a_windows_style_source_glob_changes() {
+    assert_hash_task_tracks_glob("src/main.rs", r"src\*.rs");
+    assert_hash_task_tracks_glob("src/a.rs", r"src\[ab].rs");
+    assert_hash_task_tracks_glob("src/pages/]index.tsx", r"src\pages\]index.tsx");
+}
+
+#[cfg(feature = "scripts")]
 fn assert_hash_task_tracks_glob(source_path: &str, pattern: &str) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

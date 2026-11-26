@@ -56,8 +56,9 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 跨平台的 glob 用 `/` 分隔路径段。Unix 上的反斜杠用于转义字符，Windows 上用于分隔路径段。
 在 Unix 上，`src/**/\[slug\].tsx` 跟踪 `src/` 下名为 `[slug].tsx` 的源文件，
 根目录中的同名文件可写作 `\[slug\].tsx` 或 `./\[slug\].tsx`。
-正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
+正向模式和排除模式都可以省略独立的 `.` 路径段，连续的路径分隔符等同于一个。
 `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
+在 Windows 上，`!dist\.\libs\*.tmp.so` 会排除同一批文件。
 在 Unix 上，完整的 `\.` 路径段也等同于 `.`，如 `!dist/\./libs/*.tmp.so`。
 
 `mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。
