@@ -683,7 +683,8 @@ Use `/` to separate path components in globs. A backslash can escape a special
 character in a filename. For example, `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
 tracks the file named `[slug].tsx` as an input.
 
-Prefix a pattern with `!` to exclude:
+Prefix a pattern with `!` to exclude. The leading `./` is optional, so
+`!./src/generated/**` and `!src/generated/**` are equivalent.
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]

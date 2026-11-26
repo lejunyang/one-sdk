@@ -609,7 +609,7 @@ matches nothing would make this task's freshness check silently meaningless
 建议用 `/` 分隔 glob 的路径段。需要匹配文件名里的方括号等特殊字符时，可以用反斜杠转义。
 例如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']` 会把 `[slug].tsx` 算作输入。
 
-`!` 前缀表示排除：
+`!` 前缀表示排除。模式开头的 `./` 可以省略，`!./src/generated/**` 与 `!src/generated/**` 等效。
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]

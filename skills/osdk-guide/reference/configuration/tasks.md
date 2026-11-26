@@ -55,6 +55,7 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 
 glob 建议用 `/` 分隔路径段。需要匹配文件名里的方括号等特殊字符时可用反斜杠转义，
 如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']`。
+模式开头的 `./` 可以省略，`!./dist/ignored/**` 与 `!dist/ignored/**` 等效。
 
 `mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。
 `mtime` 比较源文件与匹配产物的修改时间，省略 `outputs` 时改用上次成功运行的时间。

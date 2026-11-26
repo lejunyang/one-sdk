@@ -173,7 +173,7 @@ fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, Glob
     let mut exclude = GlobSetBuilder::new();
     for pattern in split_patterns(patterns) {
         let normalized = normalize_pattern(pattern.glob);
-        let glob = GlobBuilder::new(&normalized)
+        let glob = GlobBuilder::new(normalized.trim_start_matches("./"))
             .backslash_escape(true)
             .build()
             .map_err(|error| {
@@ -766,10 +766,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         write(root, "a.marker", "");
-        // The pattern has no `./`; the walk yields absolute paths that are
-        // stripped back to `a.marker`.
-        let found = resolve(root, &["**/*.marker".to_string()], "test").unwrap();
-        assert_eq!(found.len(), 1, "{found:?}");
+        for pattern in ["**/*.marker", "./**/*.marker", r".\a.marker"] {
+            let found = resolve(root, &[pattern.into()], "test").unwrap();
+            assert_eq!(found, [root.join("a.marker")], "{pattern}");
+        }
     }
 
     #[test]
@@ -882,6 +882,27 @@ mod tests {
         let mut cost = ScanCost::default();
         assert!(outputs_present(root, &["dist/*.txt".into()], "test", &mut cost).unwrap());
         assert_eq!(cost.visited, 2, "one directory and its first matching file");
+    }
+
+    #[test]
+    fn a_hash_match_excludes_outputs_using_a_dot_slash_pattern() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        write(root, "dist/ignored/result.txt", "excluded");
+        let result = write(root, "dist/result.txt", "built");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/**".into(), "!./dist/ignored/**".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+
+        std::fs::remove_file(result).unwrap();
+        assert_eq!(
+            decide(&spec, &state).unwrap(),
+            Decision::Run("outputs missing".into())
+        );
     }
 
     #[cfg(unix)]
