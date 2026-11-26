@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
@@ -74,7 +74,9 @@ impl Decision {
 /// matches, so narrowing the start cannot change the answer.
 pub fn literal_prefix(pattern: &str) -> PathBuf {
     let mut prefix = PathBuf::new();
-    let mut components = pattern.split('/').peekable();
+    // Use the same platform separators as Glob::new. On Unix, stop at any
+    // component containing an escape instead of guessing its literal name.
+    let mut components = pattern.split(std::path::is_separator).peekable();
     while let Some(component) = components.next() {
         if component.contains(['*', '?', '[', '{', '\\']) {
             break;
@@ -176,47 +178,7 @@ pub struct ScanCost {
     pub visited: usize,
 }
 
-fn normalize_pattern(pattern: &str) -> Cow<'_, str> {
-    // A forward slash (including a leading `./`) selects glob escapes.
-    if !pattern.contains('\\') || pattern.contains('/') || pattern.starts_with('\\') {
-        return Cow::Borrowed(pattern);
-    }
-
-    let mut chars = pattern.chars();
-    let mut escaped_opening = false;
-    let mut escaped_closing = false;
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => match chars.next() {
-                Some('[') => escaped_opening = true,
-                // A paired bracket escape establishes glob syntax. Any later
-                // escapes are part of the same filename, including `\.`.
-                Some(']') if escaped_opening => return Cow::Borrowed(pattern),
-                Some(']') => escaped_closing = true,
-                Some('*' | '?' | '{' | '}' | ',' | '!' | '\\') | None => {}
-                // Keep reading the bracket expression before deciding whether
-                // backslashes in it are escapes or Windows separators.
-                Some(_) if escaped_opening => {}
-                // A separator before an ordinary character selects Windows
-                // syntax for the whole path, including later `\*` or `\]`.
-                Some(_) => return Cow::Owned(pattern.replace('\\', "/")),
-            },
-            // An unescaped closing bracket can end a Windows character class.
-            ']' => escaped_opening = false,
-            _ => {}
-        }
-    }
-
-    // Preserve literal brackets in a bare filename. A Windows character class
-    // such as `src\[ab].rs` has an unescaped closing bracket.
-    if escaped_closing || escaped_opening {
-        Cow::Borrowed(pattern)
-    } else {
-        Cow::Owned(pattern.replace('\\', "/"))
-    }
-}
-
-fn normalize_glob_segments(pattern: Cow<'_, str>) -> Cow<'_, str> {
+fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
     // Slashes in a character class or behind an escape belong to glob syntax.
     // After an optional class negation, the first `]` can be a literal.
     enum State {
@@ -227,10 +189,10 @@ fn normalize_glob_segments(pattern: Cow<'_, str>) -> Cow<'_, str> {
         Class,
     }
     let mut state = State::Text;
-    normalize_slash_segments(pattern, |ch| {
+    normalize_slash_segments(Cow::Borrowed(pattern), |ch| {
         state = match (&state, ch) {
             (State::Text, '/') => return true,
-            (State::Text, '\\') => State::Escape,
+            (State::Text, '\\') if !std::path::is_separator('\\') => State::Escape,
             (State::Text, '[') => State::ClassStart,
             (State::ClassStart, '!' | '^') => State::ClassFirst,
             (State::ClassStart | State::ClassFirst, _) => State::Class,
@@ -246,16 +208,13 @@ fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, Glob
     let mut include = Vec::new();
     let mut exclude = GlobSetBuilder::new();
     for pattern in split_patterns(patterns) {
-        let normalized = normalize_glob_segments(normalize_pattern(pattern.glob));
-        let glob = GlobBuilder::new(&normalized)
-            .backslash_escape(true)
-            .build()
-            .map_err(|error| {
-                Error::config(format!(
-                    "{label}: invalid pattern `{}`: {error}",
-                    pattern.glob
-                ))
-            })?;
+        let normalized = normalize_glob_segments(pattern.glob);
+        let glob = Glob::new(&normalized).map_err(|error| {
+            Error::config(format!(
+                "{label}: invalid pattern `{}`: {error}",
+                pattern.glob
+            ))
+        })?;
         if pattern.negated {
             exclude.add(glob);
         } else {
@@ -842,7 +801,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         write(root, "a.marker", "");
-        for pattern in ["**/*.marker", "./**/*.marker", r".\a.marker"] {
+        for pattern in ["**/*.marker", "./**/*.marker"] {
             let found = resolve(root, &[pattern.into()], "test").unwrap();
             assert_eq!(found, [root.join("a.marker")], "{pattern}");
         }
@@ -938,25 +897,22 @@ mod tests {
         let result = write(root, "dist/actual/result.txt", "fixture");
         let sources = ["input.txt".into()];
 
-        for pattern in ["dist/*/result.txt", r"dist\*\result.txt"] {
-            let outputs = [
-                "dist/sidecar.txt".into(),
-                pattern.into(),
-                "!dist/ignored/**".into(),
-            ];
-            let spec = inputs(root, &sources, &outputs, Freshness::Hash);
-            let mut state = FreshnessState::default();
-            record(&spec, &mut state).unwrap();
-            assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+        let outputs = [
+            "dist/sidecar.txt".into(),
+            "dist/*/result.txt".into(),
+            "!dist/ignored/**".into(),
+        ];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
 
-            std::fs::remove_file(&result).unwrap();
-            assert_eq!(
-                decide(&spec, &state).unwrap(),
-                Decision::Run("outputs missing".into()),
-                "a sidecar and an excluded file cannot satisfy {pattern}"
-            );
-            write(root, "dist/actual/result.txt", "fixture");
-        }
+        std::fs::remove_file(result).unwrap();
+        assert_eq!(
+            decide(&spec, &state).unwrap(),
+            Decision::Run("outputs missing".into()),
+            "a sidecar and an excluded file cannot satisfy dist/*/result.txt"
+        );
     }
 
     #[test]
@@ -998,7 +954,6 @@ mod tests {
             "dist/libs/./*.txt",
             "dist/*/./result.txt",
             "dist//libs//result.txt",
-            r"dist\.\libs\result.txt",
         ] {
             let result = write(root, "dist/libs/result.txt", "built");
             let outputs = [pattern.into()];
@@ -1082,7 +1037,6 @@ mod tests {
             ("dist/linked/./**/result.txt", 1),
             ("dist/linked/./nested/result.txt", 1),
             ("dist/linked//*.txt", 1),
-            (r"dist\linked\\*.txt", 1),
         ] {
             let mut cost = ScanCost::default();
             assert!(

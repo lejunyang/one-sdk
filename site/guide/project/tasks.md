@@ -606,11 +606,10 @@ matches nothing would make this task's freshness check silently meaningless
 要 2,827.91 ms，而正确起点只需 61.26 ms，相差 46 倍。写 pattern 时尽量带上目录
 前缀，`**/*.rs` 这种没有前缀的写法会走遍整棵树。
 
-`src\*.rs` 和 `src\pages\]index.tsx` 这样的 Windows 风格 glob 也可以使用。
-需要对方括号等特殊字符用反斜杠转义时，请用 `/` 分隔路径段。
-例如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
-会把 `[slug].tsx` 算作输入。跟踪根目录的 `page-[slug].tsx` 时，`page-\[slug\].tsx`
-和 `page-\[slug\]\.tsx` 都可以。根目录的模式也可以加 `./` 明确表示使用转义语法。
+在跨平台的配置里，用 `/` 分隔路径段。反斜杠沿用 glob 的平台默认语义：
+Unix 用它转义字符，Windows 用它分隔路径段。在 Unix 上，
+`sources = ['manifest.json', 'src/**/\[slug\].tsx']` 会跟踪 `src/` 下名为 `[slug].tsx`
+的源文件。跟踪项目根目录下的同名文件时，写 `\[slug\].tsx` 或 `./\[slug\].tsx`。
 
 `!` 前缀表示排除。正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
 例如 `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。

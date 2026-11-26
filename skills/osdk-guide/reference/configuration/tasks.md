@@ -53,10 +53,9 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 | `freshness` | `mtime`（默认）/ `hash` / `always` |
 | `args` / `options` / `flags` | 声明位置参数、命名选项和布尔 flag |
 
-支持 Windows 风格的 glob，例如 `src\*.rs` 和 `src\pages\]index.tsx`。
-用反斜杠转义文件名里的特殊字符时，用 `/` 分隔路径段，如 `src/**/\[slug\].tsx`。
-根目录的 `page-[slug].tsx` 可写成 `page-\[slug\].tsx` 或 `page-\[slug\]\.tsx`。
-根目录的模式也可以加 `./` 明确表示使用转义语法。
+跨平台的 glob 用 `/` 分隔路径段。Unix 上的反斜杠用于转义字符，Windows 上用于分隔路径段。
+在 Unix 上，`src/**/\[slug\].tsx` 跟踪 `src/` 下名为 `[slug].tsx` 的源文件，
+根目录中的同名文件可写作 `\[slug\].tsx` 或 `./\[slug\].tsx`。
 正向模式和排除模式都可以省略 `./` 路径段，连续的 `/` 等同于单个 `/`。
 `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
 

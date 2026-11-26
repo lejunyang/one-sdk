@@ -679,12 +679,11 @@ measured scan rooted at the current directory next to a `target/` tree took
 2,827.91 ms against 61.26 ms from the correct starting point — 46x. Prefer
 patterns with a directory prefix; a bare `**/*.rs` walks everything.
 
-Windows-style globs such as `src\*.rs` and `src\pages\]index.tsx` are supported.
-To escape special characters with `\`, use `/` as the path separator. For example,
-`sources = ['manifest.json', 'src/**/\[slug\].tsx']` tracks the file named
-`[slug].tsx` as an input. Both `page-\[slug\].tsx` and `page-\[slug\]\.tsx`
-track `page-[slug].tsx` at the project root. Prefix a root-level pattern with
-`./` to explicitly select escape syntax.
+Use `/` as the path separator in shared configurations. Backslashes follow the
+platform's glob rules. They escape characters on Unix and separate path
+segments on Windows. On Unix, `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
+tracks files named `[slug].tsx` under `src/`. At the project root, use
+`\[slug\].tsx` or `./\[slug\].tsx`.
 
 Prefix a pattern with `!` to exclude. Both positive and exclusion patterns
 allow optional `./` path segments and treat consecutive `/` as a single `/`.

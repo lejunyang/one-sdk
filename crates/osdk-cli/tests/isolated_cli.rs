@@ -207,25 +207,17 @@ freshness = 'hash'
     assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
 }
 
-#[cfg(feature = "scripts")]
+#[cfg(all(unix, feature = "scripts"))]
 #[test]
 fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
     assert_hash_task_tracks_glob("src/routes/[slug].tsx", r"src/**/\[slug\].tsx");
-    assert_hash_task_tracks_glob("page-[slug].tsx", r"./page-\[slug\].tsx");
-    assert_hash_task_tracks_glob("page-[slug].tsx", r"page-\[slug\].tsx");
+    assert_hash_task_tracks_glob("[slug].tsx", r"\[slug\].tsx");
+    assert_hash_task_tracks_glob("[slug].tsx", r"./\[slug\].tsx");
+    assert_hash_task_tracks_glob("page.[slug].tsx", r"page\.\[slug\].tsx");
     assert_hash_task_tracks_glob("page-[slug].tsx", r"page-\[slug\]\.tsx");
-    assert_hash_task_tracks_glob("page-[slug]x.tsx", r"page-\[slug\]\x.tsx");
 }
 
-#[cfg(feature = "scripts")]
-#[test]
-fn hash_task_rebuilds_when_a_windows_style_source_glob_changes() {
-    assert_hash_task_tracks_glob("src/main.rs", r"src\*.rs");
-    assert_hash_task_tracks_glob("src/a.rs", r"src\[ab].rs");
-    assert_hash_task_tracks_glob("src/pages/]index.tsx", r"src\pages\]index.tsx");
-}
-
-#[cfg(feature = "scripts")]
+#[cfg(all(unix, feature = "scripts"))]
 fn assert_hash_task_tracks_glob(source_path: &str, pattern: &str) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
