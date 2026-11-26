@@ -760,7 +760,7 @@ Civitai 的 `civitai.com` 与 `civitai.red` 都是内置官方来源。auto 模�
 
 skill 是带 `SKILL.md` 的指令包，供 Claude Code、Codex、Cursor 等 AI 编码 Agent 读取。osdk
 从 GitHub 或本地路径把 skill 安装到选定 Agent 的技能目录。团队和 CI 可以用
-`osdk skills sync` 复现已锁定的技能，并安装尚未写入锁的声明。技能脚本由 Agent 按需调用。
+`osdk skills sync` 复现已锁定的技能，并安装尚未写入锁的声明。osdk 只负责拷贝或链接，绝不执行 skill 里的脚本。
 
 ```bash
 osdk skills agents                       # 看 osdk 认识哪些 Agent、各自的 skills 目录

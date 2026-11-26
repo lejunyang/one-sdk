@@ -859,7 +859,7 @@ A skill is a `SKILL.md` instruction package that AI coding agents such as Claude
 Code, Codex, and Cursor read. osdk installs skills from GitHub or a local path
 into the selected agents' skills directories. Teams and CI can use
 `osdk skills sync` to reproduce locked skills and install declarations that
-still need lock entries. osdk copies or links the files for the agent to use.
+still need lock entries. osdk copies or links the files and never runs a skill's scripts.
 
 ```bash
 osdk skills agents                       # which agents osdk knows, and their skills dirs
