@@ -1324,7 +1324,10 @@ pub enum RustItemCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum RustOverrideCommand {
-    /// Import the rustup override for a directory into osdk.toml.
+    /// Import a rustup directory override into the target directory's osdk project config.
+    ///
+    /// PATH defaults to the current directory. The command searches from that directory up
+    /// through its parents and fails if no project config exists.
     Import { path: Option<std::path::PathBuf> },
     /// Export the active osdk Rust pin as an explicit rustup override.
     Export { path: Option<std::path::PathBuf> },

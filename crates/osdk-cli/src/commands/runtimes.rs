@@ -1548,6 +1548,14 @@ pub(crate) fn rust_override(app: &App, command: RustOverrideCommand) -> Result<(
     match command {
         RustOverrideCommand::Import { path } => {
             let directory = path.unwrap_or(cwd);
+            let canonical = dunce_path(&directory)?;
+            let project = osdk_core::project::discover(&canonical, &app.ctx.dirs.config)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no osdk project configuration found for {}",
+                        canonical.display()
+                    )
+                })?;
             let output = osdk_core::backend::rust::RustBackend::run_rustup(
                 &app.ctx,
                 &["override", "list"],
@@ -1555,20 +1563,19 @@ pub(crate) fn rust_override(app: &App, command: RustOverrideCommand) -> Result<(
                 None,
             )?;
             let text = String::from_utf8_lossy(&output.stdout);
-            let canonical = dunce_path(&directory)?;
             let toolchain = parse_rustup_override(&text, &canonical).ok_or_else(|| {
                 anyhow!(
                     "no isolated rustup override found for {}",
                     canonical.display()
                 )
             })?;
-            let path = crate::config_edit::set_project_tool("rust", &toolchain)?;
+            crate::config_edit::edit_tool_version(&project.config_path, "rust", &toolchain)?;
             println!(
                 "{}",
                 t!(
                     "msg.rust_override_imported",
                     toolchain = toolchain,
-                    path = path.display()
+                    path = project.config_path.display()
                 )
             );
         }

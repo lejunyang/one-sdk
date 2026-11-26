@@ -85,8 +85,9 @@ osdk rust toolchain link NAME PATH
 
 - `check` 先执行隔离 `rustup check`；`--repair` 再按真实 toolchain 目录补建缺失 marker，
   并移除没有对应 toolchain 的 marker。
-- `override import` 从可选目录（默认当前目录）的隔离 rustup override 读取 toolchain，
-  写入最近项目 `osdk.toml`。
+- `override import` 读取隔离 rustup 为 `PATH` 登记的目录覆盖，省略 `PATH` 时使用当前目录。
+  命令从目标目录向上查找最近的 osdk 项目配置，将工具链写入本地配置或外部绑定的配置。
+  找不到项目配置时会报错。
 - `override export` 把该目录的活动 osdk Rust pin 写成隔离 rustup 的目录 override。
 - `toolchain link` 要求 `PATH` 可规范化且包含 `bin/`；`NAME` 不能有空白、斜杠，
   也不能是 `.` 或 `..`。

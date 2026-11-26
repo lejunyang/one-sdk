@@ -5828,6 +5828,7 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "").unwrap();
     // Unix-only test: the fixture is a shell script and cannot fail to build.
     let toolchain = "local-dev";
     write_fake_rustup(temp.path(), &project, toolchain)
@@ -5878,6 +5879,102 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     assert!(calls.contains("override list"));
     assert!(calls.contains("override set local-dev --path"));
     assert!(calls.contains("toolchain link local-dev"));
+}
+
+#[test]
+fn rust_override_import_writes_the_sibling_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let a = temp.path().join("A");
+    let b = temp.path().join("B");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let a_config = a.join("osdk.toml");
+    let b_config = b.join("osdk.toml");
+    let original = b"# Keep project A's pin.\n[tools]\nrust = '1.91.1'\n";
+    std::fs::write(&a_config, original).unwrap();
+    std::fs::write(&b_config, "[tools]\nrust = \"1.93.0\"\n").unwrap();
+    let toolchain = "linked-rust-for-sibling-import";
+    if write_fake_rustup(temp.path(), &b, toolchain).is_none() {
+        return;
+    }
+
+    let output = run_isolated_in(temp.path(), &a, &["rust", "override", "import", "../B"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&b_config).unwrap(),
+        format!("[tools]\nrust = \"{toolchain}\"\n")
+    );
+    assert_eq!(std::fs::read(a_config).unwrap(), original);
+    let written = dunce::canonicalize(b_config).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim_end().ends_with(&*written.to_string_lossy()),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn rust_override_import_requires_a_project_for_the_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let a = temp.path().join("A");
+    let b = temp.path().join("B");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let a_config = a.join("osdk.toml");
+    let original = b"[tools]\nrust = \"1.91.1\"\n";
+    std::fs::write(&a_config, original).unwrap();
+    if write_fake_rustup(temp.path(), &b, "linked-rust-for-sibling-import").is_none() {
+        return;
+    }
+
+    for (cwd, args) in [
+        (&a, &["rust", "override", "import", "../B"][..]),
+        (&b, &["rust", "override", "import"][..]),
+    ] {
+        let output = run_isolated_in(temp.path(), cwd, args);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("no osdk project configuration"), "{stderr}");
+        let target = dunce::canonicalize(&b).unwrap();
+        assert!(stderr.contains(&*target.to_string_lossy()), "{stderr}");
+        assert_eq!(std::fs::read(&a_config).unwrap(), original);
+        assert!(!b.join("osdk.toml").exists());
+    }
+}
+
+#[test]
+fn rust_override_import_writes_the_external_project_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bound = root.join("bound");
+    let child = bound.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let toolchain = "local-dev";
+    if write_fake_rustup(root, &child, toolchain).is_none() {
+        return;
+    }
+    let add = run_isolated(root, &["project", "add", "bound"]);
+    assert!(add.status.success(), "{add:?}");
+    let [binding]: [_; 1] = osdk_core::project::list_bindings(&root.join("config"))
+        .unwrap()
+        .try_into()
+        .expect("one external project");
+
+    let output = run_isolated(root, &["rust", "override", "import", "bound/child"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(std::fs::read_to_string(&binding.config_path)
+        .unwrap()
+        .contains("rust = \"local-dev\""));
+    assert!(!bound.join("osdk.toml").exists());
+    assert!(!child.join("osdk.toml").exists());
+    assert!(!root.join("osdk.toml").exists());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .trim_end()
+            .ends_with(&*binding.config_path.to_string_lossy()),
+        "{stdout}"
+    );
 }
 
 #[cfg(unix)]

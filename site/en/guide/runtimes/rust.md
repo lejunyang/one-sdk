@@ -100,7 +100,9 @@ osdk rust toolchain link NAME PATH
 ```
 
 - `check` runs isolated `rustup check`; `--repair` creates missing markers for real toolchain directories and removes markers with no toolchain.
-- `override import` reads isolated rustup's override for `PATH` (default current directory) and writes it to the nearest project `osdk.toml`.
+- `override import` reads isolated rustup's override for `PATH`, which defaults to the current directory.
+  It searches up from that directory and writes the toolchain to the nearest osdk project config,
+  including an externally bound config. It reports an error if no project config exists.
 - `override export` writes the active osdk Rust pin for that directory as an isolated rustup directory override.
 - `toolchain link` requires a canonicalizable `PATH` containing `bin/`; `NAME` cannot contain whitespace or slashes or equal `.` or `..`.
 

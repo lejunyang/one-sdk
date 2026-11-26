@@ -866,7 +866,7 @@ fn with_global_config_lock<T>(ctx: &Ctx, operation: impl FnOnce() -> Result<T>) 
     crate::global_npm_use::with_global_npm_state_lock(&ctx.dirs, operation)
 }
 
-fn edit_tool_version(path: &Path, tool: &str, spec: &str) -> Result<()> {
+pub(crate) fn edit_tool_version(path: &Path, tool: &str, spec: &str) -> Result<()> {
     let mut doc = load_doc(path)?;
     set_tool_version_in_doc(&mut doc, tool, spec)?;
     save_doc(path, &doc)?;

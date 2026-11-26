@@ -12,7 +12,8 @@ osdk rust toolchain link <NAME> <PATH>
 
 - `component/target add|remove` 需要名称；`list` 不需要。`--toolchain` 默认 `stable`。
 - `check` 比较隔离 rustup 状态与 osdk marker；`--repair` 修复陈旧/缺失 marker。
-- `override import` 把 rustup 目录 override 写入项目 `osdk.toml`。
+- `override import [PATH]` 读取隔离 rustup 为目标目录登记的覆盖，从该目录向上查找并写入最近的
+  osdk 项目配置（含外部绑定的配置）。省略 `PATH` 时从当前目录开始。找不到项目配置时会报错。
 - `override export` 把当前 osdk Rust pin 显式写成 rustup override。
 - `toolchain link` 将本地路径登记为 osdk/rustup toolchain。
 
