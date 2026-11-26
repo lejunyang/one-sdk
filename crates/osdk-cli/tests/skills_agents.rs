@@ -191,6 +191,45 @@ fn skills_sync_resolves_an_inherited_source_from_its_declaring_config() {
 }
 
 #[test]
+fn skills_sync_confirms_before_replacing_unlocked_contents() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(root, DEMO_DECLARATION);
+    let installed = project.join(".agents/skills/demo");
+    let manifest = installed.join("SKILL.md");
+    let notes = installed.join("notes.txt");
+    let old_manifest = format!("{DEMO_SKILL}\nLocal edits\n");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(&manifest, &old_manifest).unwrap();
+    std::fs::write(&notes, "Keep my notes").unwrap();
+
+    let sync = osdk(root, &project, &["--lang", "en", "skills", "sync"]);
+    assert!(!sync.status.success(), "{sync:?}");
+    assert!(String::from_utf8_lossy(&sync.stderr).contains("confirmation required"));
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), old_manifest);
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "Keep my notes");
+    let lock = project.join("osdk.lock");
+    assert!(!lock.exists());
+
+    let confirmed = osdk(root, &project, &["--yes", "skills", "sync"]);
+    assert!(confirmed.status.success(), "{confirmed:?}");
+    assert_demo_installed(&project, &read_lock(&lock));
+    assert!(!notes.exists());
+
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::write(&notes, "Still useful").unwrap();
+    let extra_file = osdk(root, &project, &["skills", "sync"]);
+    assert!(!extra_file.status.success(), "{extra_file:?}");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "Still useful");
+    assert!(!lock.exists());
+
+    std::fs::remove_file(&notes).unwrap();
+    let identical = osdk(root, &project, &["skills", "sync"]);
+    assert!(identical.status.success(), "{identical:?}");
+    assert_demo_installed(&project, &read_lock(&lock));
+}
+
+#[test]
 fn skills_sync_replays_cached_bytes_and_ignores_changed_declaration() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

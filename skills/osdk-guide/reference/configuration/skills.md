@@ -29,7 +29,8 @@ when = { os = ["linux", "macos"] }
 - `agents` 为空时回退到 `[skills].default_agents`，再为空时检测已安装的 Agent。仅检测到
   一个时自动选中，多个或零个时使用交互选择或传 `--yes`。在 CI 中也可以明确配置 Agent。
 - `link_mode` 可覆盖安装方式。`sync` 默认单目录复制、多目录自动链接。`add` 的 `--copy`
-  优先于配置。`add` 在写盘前确认，`--yes` 可跳过确认。
+  优先于配置。`add` 在写盘前确认，`sync` 在替换内容不同的未锁定技能前确认。
+  非交互环境可传 `--yes` 确认。
 - `scope` 是未传 `-g` 时的默认范围。`project` 使用项目目录和项目锁。`global` 使用用户级
   Agent 目录和用户配置目录下的 `osdk.lock`。`skills path` 读取配置指定的范围。未配置时，
   它先查项目锁，再查用户锁。
