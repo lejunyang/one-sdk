@@ -120,6 +120,52 @@ fn run_isolated_in(root: &Path, cwd: &Path, args: &[&str]) -> Output {
     run_isolated_in_with_env(root, cwd, args, &[])
 }
 
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_recreates_a_deleted_output() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
+    std::fs::create_dir(root.join("dist")).unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        r#"
+[tasks.build]
+lua = """
+assert(osdk.fs.write('dist/result.txt', assert(osdk.fs.read('input.txt'))))
+print('TASK_EXECUTED')
+"""
+sources = ["input.txt"]
+outputs = ["dist/result.txt"]
+freshness = "hash"
+"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        let output = run_isolated_in_with_env(root, root, args, &[("OSDK_LANG", "en")]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        format!("{stdout}\n{stderr}")
+    };
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/result.txt");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
+    let unchanged = run(&["run", "build"]);
+    assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+    assert!(!unchanged.contains("TASK_EXECUTED"), "{unchanged}");
+
+    std::fs::remove_file(&result).unwrap();
+    let preview = run(&["run", "build", "--dry-run"]);
+    assert!(preview.contains("outputs missing"), "{preview}");
+    assert!(!result.exists(), "dry-run must not recreate the output");
+    let rebuilt = run(&["run", "build"]);
+    assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
+    assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
+}
+
 fn run_isolated_in_with_env(
     root: &Path,
     cwd: &Path,

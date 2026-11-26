@@ -53,6 +53,9 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 | `freshness` | `mtime`（默认）/ `hash` / `always` |
 | `args` / `options` / `flags` | 声明位置参数、命名选项和布尔 flag |
 
+哈希命中时，每个正向 `outputs` 模式都必须匹配至少一个未被 `!` 模式排除的文件，
+缺任何一个就会重跑。
+
 `argv` 步骤里的 `{{name}}` 与 `{{args}}` 按 argv 边界展开；不要把不可信参数插进 shell
 字符串。Lua 完整 API、短名、exec capture、fs/path/JSON/TOML 见
 `reference/run/lua.md`。

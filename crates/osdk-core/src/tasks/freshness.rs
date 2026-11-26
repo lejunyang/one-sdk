@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -108,10 +108,10 @@ fn split_patterns(patterns: &[String]) -> Vec<Pattern<'_>> {
                     glob: rest,
                     negated: true,
                 }
-            } else if let Some(rest) = raw.strip_prefix(r"\!") {
+            } else if raw.starts_with(r"\!") {
                 // `\!` escapes a literal leading `!`.
                 Pattern {
-                    glob: rest,
+                    glob: &raw[1..],
                     negated: false,
                 }
             } else {
@@ -152,6 +152,80 @@ pub struct ScanCost {
     pub visited: usize,
 }
 
+fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, GlobSet)> {
+    let mut include = Vec::new();
+    let mut exclude = GlobSetBuilder::new();
+    for pattern in split_patterns(patterns) {
+        let normalized = pattern.glob.replace('\\', "/");
+        let glob = Glob::new(&normalized).map_err(|error| {
+            Error::config(format!(
+                "{label}: invalid pattern `{}`: {error}",
+                pattern.glob
+            ))
+        })?;
+        if pattern.negated {
+            exclude.add(glob);
+        } else {
+            include.push(glob);
+        }
+    }
+    let exclude = exclude
+        .build()
+        .map_err(|error| Error::config(format!("{label}: {error}")))?;
+    Ok((include, exclude))
+}
+
+/// Visit normalized file entries until the visitor asks to stop.
+fn scan_files(
+    root: &Path,
+    start: &Path,
+    label: &str,
+    cost: &mut ScanCost,
+    mut stop: impl FnMut(&Path, &str) -> bool,
+) -> Result<bool> {
+    if !start
+        .try_exists()
+        .map_err(|error| Error::io(start, error))?
+    {
+        return Ok(false);
+    }
+    for entry in WalkDir::new(start).follow_links(false) {
+        cost.visited += 1;
+        let entry =
+            entry.map_err(|error| Error::other(format!("{label}: cannot scan: {error}")))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(relative) = normalize(entry.path(), root) else {
+            continue;
+        };
+        if stop(entry.path(), &relative) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Every positive output pattern must match a file after exclusions.
+fn outputs_present(
+    root: &Path,
+    patterns: &[String],
+    label: &str,
+    cost: &mut ScanCost,
+) -> Result<bool> {
+    let (include, exclude) = compile_patterns(patterns, label)?;
+    for glob in include {
+        let start = root.join(literal_prefix(glob.glob()));
+        let matcher = glob.compile_matcher();
+        if !scan_files(root, &start, label, cost, |_, relative| {
+            matcher.is_match(relative) && !exclude.is_match(relative)
+        })? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Every file under `root` matching `patterns`.
 ///
 /// Returns an error when a non-negated pattern matches nothing: a typo there is
@@ -170,36 +244,20 @@ pub fn resolve_measured(
     if patterns.is_empty() {
         return Ok((Vec::new(), ScanCost::default()));
     }
-    let split = split_patterns(patterns);
+    let (includes, exclude) = compile_patterns(patterns, label)?;
 
+    // Walk only the literal prefixes, deduplicated, instead of the whole tree.
+    let mut roots: Vec<PathBuf> = includes
+        .iter()
+        .map(|glob| root.join(literal_prefix(glob.glob())))
+        .collect();
     let mut include = GlobSetBuilder::new();
-    let mut exclude = GlobSetBuilder::new();
-    for pattern in &split {
-        let glob = Glob::new(pattern.glob).map_err(|error| {
-            Error::config(format!(
-                "{label}: invalid pattern `{}`: {error}",
-                pattern.glob
-            ))
-        })?;
-        if pattern.negated {
-            exclude.add(glob);
-        } else {
-            include.add(glob);
-        }
+    for glob in includes {
+        include.add(glob);
     }
     let include = include
         .build()
         .map_err(|error| Error::config(format!("{label}: {error}")))?;
-    let exclude = exclude
-        .build()
-        .map_err(|error| Error::config(format!("{label}: {error}")))?;
-
-    // Walk only the literal prefixes, deduplicated, instead of the whole tree.
-    let mut roots: Vec<PathBuf> = split
-        .iter()
-        .filter(|pattern| !pattern.negated)
-        .map(|pattern| root.join(literal_prefix(pattern.glob)))
-        .collect();
     roots.sort();
     roots.dedup();
     // A nested prefix is already covered by its ancestor.
@@ -214,29 +272,12 @@ pub fn resolve_measured(
     let mut found = Vec::new();
     let mut cost = ScanCost::default();
     for start in pruned {
-        if !start.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(&start).follow_links(false) {
-            cost.visited += 1;
-            let entry = match entry {
-                Ok(entry) => entry,
-                // An unreadable subtree is not a reason to claim "no inputs";
-                // report it rather than silently narrowing the input set.
-                Err(error) => {
-                    return Err(Error::other(format!("{label}: cannot scan: {error}")));
-                }
-            };
-            if !entry.file_type().is_file() {
-                continue;
+        scan_files(root, &start, label, &mut cost, |path, relative| {
+            if include.is_match(relative) && !exclude.is_match(relative) {
+                found.push(path.to_path_buf());
             }
-            let Some(relative) = normalize(entry.path(), root) else {
-                continue;
-            };
-            if include.is_match(&relative) && !exclude.is_match(&relative) {
-                found.push(entry.path().to_path_buf());
-            }
-        }
+            false
+        })?;
     }
     found.sort();
     found.dedup();
@@ -395,7 +436,18 @@ pub fn decide(inputs: &Inputs<'_>, state: &FreshnessState) -> Result<Decision> {
     if inputs.freshness == Freshness::Hash {
         let hash = input_hash(&sources, inputs.definition)?;
         return Ok(match previous.and_then(|state| state.hash.as_deref()) {
-            Some(recorded) if recorded == hash => Decision::UpToDate,
+            Some(recorded) if recorded == hash => {
+                if outputs_present(
+                    inputs.root,
+                    inputs.outputs,
+                    &format!("task `{}`: outputs", inputs.name),
+                    &mut ScanCost::default(),
+                )? {
+                    Decision::UpToDate
+                } else {
+                    Decision::Run("outputs missing".into())
+                }
+            }
             Some(_) => Decision::Run("inputs changed".into()),
             None => Decision::Run("no recorded run".into()),
         });
@@ -623,6 +675,12 @@ mod tests {
         .unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].ends_with("keep.rs"));
+
+        let literal = write(root, "!keep.rs", "");
+        assert_eq!(
+            resolve(root, &[r"\!keep.rs".into()], "test").unwrap(),
+            [literal]
+        );
     }
 
     #[test]
@@ -667,6 +725,66 @@ mod tests {
         assert!(
             decision.reason().unwrap().contains("missing"),
             "{decision:?}"
+        );
+    }
+
+    #[test]
+    fn a_hash_match_requires_every_output_pattern_to_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        write(root, "dist/sidecar.txt", "metadata");
+        write(root, "dist/ignored/result.txt", "excluded");
+        let result = write(root, "dist/actual/result.txt", "fixture");
+        let sources = ["input.txt".into()];
+
+        for pattern in ["dist/*/result.txt", r"dist\*\result.txt"] {
+            let outputs = [
+                "dist/sidecar.txt".into(),
+                pattern.into(),
+                "!dist/ignored/**".into(),
+            ];
+            let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+            let mut state = FreshnessState::default();
+            record(&spec, &mut state).unwrap();
+            assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+
+            std::fs::remove_file(&result).unwrap();
+            assert_eq!(
+                decide(&spec, &state).unwrap(),
+                Decision::Run("outputs missing".into()),
+                "a sidecar and an excluded file cannot satisfy {pattern}"
+            );
+            write(root, "dist/actual/result.txt", "fixture");
+        }
+    }
+
+    #[test]
+    fn checking_output_presence_stops_at_the_first_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for index in 0..200 {
+            write(root, &format!("dist/result-{index}.txt"), "");
+        }
+        let mut cost = ScanCost::default();
+        assert!(outputs_present(root, &["dist/*.txt".into()], "test", &mut cost).unwrap());
+        assert_eq!(cost.visited, 2, "one directory and its first matching file");
+    }
+
+    #[test]
+    fn a_hash_match_does_not_hide_an_invalid_output_pattern() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/[".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        let error = decide(&spec, &state).unwrap_err().to_string();
+        assert!(
+            error.contains("outputs: invalid pattern `dist/[`"),
+            "{error}"
         );
     }
 

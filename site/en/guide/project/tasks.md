@@ -636,11 +636,14 @@ The default comparison is modification time. Three choices:
 | `freshness` | Behaviour | When |
 | --- | --- | --- |
 | `"mtime"` (default) | Compare modification times | Cheap, but `git checkout` and CI cache restores rewrite timestamps |
-| `"hash"` | Compare content hashes | Immune to touched-but-unchanged files, at the cost of reading every input |
+| `"hash"` | Compare input content hashes and check that every output pattern matches a file | Ignores timestamp-only changes, at the cost of reading every input |
 | `"always"` | Never skip | Opt out of incrementality |
 
 **The task definition counts as an input too**: editing `run` reruns the task
 even when no source file moved.
+
+Even when the hash matches, the task reruns if any positive `outputs` pattern
+has no matching file. Files excluded by a `!` pattern do not count.
 
 With `outputs` omitted, osdk compares against the last successful run, stored in
 the cache directory rather than in your project, so nobody needs a `.gitignore`

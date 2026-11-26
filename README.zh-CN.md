@@ -286,6 +286,9 @@ osdk task list
 osdk run ci --dry-run
 ```
 
+构建任务可声明 `sources` 和 `outputs` 启用增量执行。使用 `freshness = "hash"` 时，
+只要有一个输出模式匹配不到文件，osdk 就会重跑任务。
+
 数组里的命令依次执行、失败即停；`ignore_error` 表示容忍失败并继续（但会
 打印警告）；`{ tasks = [...] }` 并行执行并等待全部完成。不要用 shell 的
 `&`——它在 cmd、PowerShell 7 与 5.1 下含义各不相同。详见
