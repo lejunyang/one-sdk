@@ -1202,7 +1202,9 @@ pub enum SkillsCommand {
         #[arg(short = 'a', long = "agent", value_name = "ID")]
         agents: Vec<String>,
     },
-    /// Materialize every skill declared in osdk.lock (the reproduce path).
+    /// Reproduce locked skills and install missing declarations from osdk.toml.
+    ///
+    /// New installs are recorded in the lock so later syncs can reproduce them.
     Sync {
         /// Install into user-level agent directories instead of the project.
         #[arg(short, long)]
@@ -1232,7 +1234,7 @@ pub enum SkillsCommand {
     },
     /// Update installed skills to the latest resolution of their source.
     ///
-    /// The counterpart to `sync`: `sync` reproduces the commit the lock records,
+    /// For an already locked skill, `sync` reproduces the commit the lock records,
     /// while `update` re-resolves the configured branch/tag (or the default
     /// branch) and rewrites the lock. Use an explicit `rev:<commit>` declaration
     /// to keep a skill immutable across `update`; a bare commit stored as the

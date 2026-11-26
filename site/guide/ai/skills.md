@@ -36,8 +36,8 @@ osdk skills agents
 `GH_TOKEN`；**不接触 skills.sh**，因此不需要任何注册表密钥。`--owner` 限定某 org/user，
 `--limit` 限结果数（1–50）。
 
-`sync` 与 `update` 是一对：`sync` 复现 lock 记录的 commit、内容哈希和安装方式；`update`
-重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
+`sync` 复现 lock 记录的 commit、内容哈希和安装方式，也会安装尚未锁定的适用声明并写锁。
+`update` 重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
 前进但目标 skill 内容哈希未变时只推进 lock，不重装；内容变化才重新落地。已有项目保存的裸
 40 位 commit 只视为安装快照，迁移为默认分支意图；需要永久固定时明确写
 `ref = "rev:<commit>"`。`update` 还会让安装位置跟随项目声明：`[skills.<名>].agents`（为空时用
@@ -83,12 +83,12 @@ Agent。只检测到一个时自动选中它和共享目录（记为 `universal`
 各有自己的目录、各占一项——且只安装勾选的那几项。`--yes` 接受检测结果（无结果时选择全部），
 其他非交互调用立即报错。
 仅多个实际目标目录时询问链接（推荐）或复制；单一目录直接复制。显式 `--copy` 与
-`[skills].link_mode` 均优先于提示。安装摘要会逐项列出目标目录，已有路径标记为覆盖；未传
-`--yes` 时确认后才写盘。共享物理目录只写一次。
+`[skills].link_mode` 均优先于提示。`add` 的安装摘要会逐项列出目标目录，已有路径标记为覆盖。
+运行 `add` 时，使用 `--yes` 可跳过确认。共享物理目录只写一次。
 
 ## 不可变身份与复现
 
-`add` 把身份写进 `osdk.lock`：
+`add` 与 `sync` 首次安装声明时都把身份写进 `osdk.lock`：
 
 ```toml
 [skills.web-design-guidelines]
@@ -100,14 +100,14 @@ install_mode = "copy"                    # 选定的落地策略
 agents = ["claude-code"]
 ```
 
-`osdk skills sync` 据此复现：优先用已落地的内容寻址副本，副本不在时对 GitHub 源**按记录的
+对锁里已有的技能，`osdk skills sync` 据此复现：优先用已落地的内容寻址副本，副本不在时对 GitHub 源**按记录的
 `resolved_commit` 重新下载**并重算 `content_hash`，与 lock 不符就 fail-closed 拒绝——移动过的
 tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`。本地源丢了副本无法复现，会如实报告。
 
 ## 落地方式
 
-默认目录链接：Windows 用 junction、Unix 用 symlink（都无需特权）。无链接环境或显式 `--copy`
-时整树拷贝。link mode 可用 `[skills].link_mode` 覆盖，仅对 skill 生效。确认安装摘要后可以覆盖
+目录链接在 Windows 上用 junction，在 Unix 上用 symlink，两者都无需特权。无链接环境或显式
+传 `--copy` 时整树拷贝。link mode 可用 `[skills].link_mode` 覆盖，仅对 skill 生效。确认安装摘要后可以覆盖
 已有真实目录；新内容先在目标同级准备完成，旧目录改名为临时备份，再激活新目录。激活失败会
 恢复旧目录，成功后清理备份，因此复制模式安装的 skill 也能继续 `add`、`update` 或 `sync`。
 旧 lock 没有 `install_mode` 时，从已有目标是链接还是真实目录推断原方式；本地源与目标目录重叠
@@ -128,7 +128,8 @@ tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`�
 
 ## 声明式配置
 
-也可以在 `osdk.toml` 里声明，让团队 `osdk skills sync` 一步到位：
+在 `osdk.toml` 里声明技能后，运行 `osdk skills sync`。它会安装符合 `when` 且缺少锁条目的技能，
+并将结果写入 `osdk.lock`，因此首次检出可以直接同步。
 
 ```toml
 [skills]
@@ -141,7 +142,14 @@ ref = "branch:main"
 agents = ["claude-code", "codex"]
 ```
 
-顶层 `[skills]` 支持 `default_agents`、`scope`（`project`/`global`）、`link_mode`；每条
-`[skills.<名>]` 支持 `source`、`skill`、`ref`、`agents`、`when`、`endpoint`，其中拼错的字段会
-硬报错。仓库内给 AI Agent 阅读的 `osdk-guide` 指引里，
-`reference/configuration/skills.md` 有逐字段说明。
+声明名用作锁键和安装目录名。来源包含多个技能时，`skill` 选择其中一个目录，省略时按声明名查找。
+本地相对路径以 `osdk.toml` 所在目录为基准。`ref` 仅用于 GitHub 来源。声明的 `agents` 为空时用
+`[skills].default_agents`，再为空则检测已安装的 Agent。CI 可以声明 Agent 或传 `--yes` 接受检测结果。
+`sync` 首次安装会打印摘要并继续安装。默认单目录复制，多目录自动链接，可用
+`[skills].link_mode` 覆盖。自定义 `endpoint` 尚未实现。缺锁的声明设置该字段时会报错。
+
+已有锁条目继续按锁复现。要应用声明中的 `ref` 或 Agent 改动，运行 `osdk skills update <名>`。
+要换来源或技能，运行 `osdk skills remove <名>` 后重新同步，也可以显式用 `skills add` 安装。
+从配置去掉一项后，运行 `osdk skills remove <名>` 删除对应锁条目。顶层 `[skills]` 还接受
+`scope`（`project` 或 `global`）。完整字段说明见 `osdk-guide` 的
+`reference/configuration/skills.md`。

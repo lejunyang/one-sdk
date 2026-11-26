@@ -856,11 +856,10 @@ Guide: [Model snapshots](site/en/guide/ai/models.md)
 ## Scenario: install a skill for an AI coding agent
 
 A skill is a `SKILL.md` instruction package that AI coding agents such as Claude
-Code, Codex, and Cursor read. osdk installs skills from GitHub or a local path,
-stages them in its content-addressed store, links them into each agent's skills
-directory, and records an immutable identity in `osdk.lock` so a team can
-reproduce them with `osdk skills sync`. osdk only stages and links; it never runs
-a skill's scripts.
+Code, Codex, and Cursor read. osdk installs skills from GitHub or a local path
+into the selected agents' skills directories. Teams and CI can use
+`osdk skills sync` to reproduce locked skills and install declarations that
+still need lock entries. osdk copies or links the files for the agent to use.
 
 ```bash
 osdk skills agents                       # which agents osdk knows, and their skills dirs
@@ -869,7 +868,7 @@ osdk skills add github:vercel-labs/agent-skills --list        # list a repo's sk
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # choose agents and link/copy interactively
 osdk skills add ./my-skills -s my-skill -a codex              # a local source, one skill
 osdk skills list                         # installed skills and the agents they link into
-osdk skills sync                         # reproduce from osdk.lock (team / CI)
+osdk skills sync                         # replay locked skills and install missing declarations
 osdk skills remove web-design-guidelines
 ```
 
@@ -882,20 +881,11 @@ destinations; one destination is copied directly. Before writing, `add` prints e
 destination, marks existing paths as overwrites, and asks for confirmation unless
 `--yes` was supplied.
 
-`add` records the requested ref, resolved commit, content hash, and chosen install
-mode in `osdk.lock`; `sync` re-downloads a missing local copy at that exact commit,
-re-checks the hash, and preserves copy/link placement. `skills update` re-resolves
-the requested branch/tag or default branch and reinstalls only when that skill's
-content hash changes; a repository-only change just advances the lock commit. Use
-`ref = "rev:<commit>"` when an update must keep an immutable pin. Installs use a
-directory link by default (a junction on Windows, a symlink on Unix) and fall back
-to a copy where links are unavailable or with `--copy`. After the installation
-summary is confirmed, an existing real directory can be replaced: osdk prepares
-the new tree first, renames the old directory to a temporary backup, and restores
-it if activation fails. Legacy locks without `install_mode` infer copy from an
-existing real directory and link from an existing link. Local sources that overlap
-their destination are rejected before staging. You can also declare skills in
-`osdk.toml` under `[skills]` and let `osdk skills sync` reproduce them.
+Declare team skills under `[skills.<name>]` in `osdk.toml`. Run `osdk skills sync`
+to install applicable declarations and record their resolutions alongside existing
+entries in `osdk.lock`. Use `skills update` to refresh a locked GitHub ref or apply
+changes to the Agent list. Pin a GitHub skill with `ref = "rev:<commit>"` to keep it
+at that commit across updates.
 
 Guide: [Agent skills](site/en/guide/ai/skills.md)
 

@@ -41,8 +41,9 @@ when it hits the anonymous rate limit; it **never contacts skills.sh**, so no
 registry key is needed. `--owner` restricts to one org/user and `--limit` caps
 the result count (1–50).
 
-`sync` and `update` are counterparts: `sync` reproduces the commit, content hash,
-and install mode recorded in the lock. `update` re-resolves the lock's
+`sync` reproduces the commit, content hash, and install mode recorded in the lock.
+It also installs applicable declarations that have no lock entry and records them.
+`update` re-resolves the lock's
 `requested_ref`, except that an explicit `[skills.<name>].ref` change wins. If the
 repository commit advances but the selected skill's content hash does not, only the
 lock commit advances; changed skill content is reinstalled. A bare 40-hex commit
@@ -98,12 +99,12 @@ choice, while with `-g` each agent has its own -- and installs exactly what is c
 none are detected), while other non-interactive calls fail immediately. Link/copy is
 asked only for multiple physical destinations; one destination is copied directly.
 Explicit `--copy` and `[skills].link_mode` take precedence. Before writing, the
-installation summary lists every destination, marks overwrites, and asks for
+installation summary lists every destination and marks overwrites. `add` asks for
 confirmation unless `--yes` was supplied. Shared physical directories are written once.
 
 ## Immutable identity and reproduction
 
-`add` records the identity in `osdk.lock`:
+`add` and first installs via `sync` record the identity in `osdk.lock`:
 
 ```toml
 [skills.web-design-guidelines]
@@ -115,7 +116,7 @@ install_mode = "copy"                    # selected placement policy
 agents = ["claude-code"]
 ```
 
-`osdk skills sync` reproduces from it: it prefers the staged content-addressed
+For an existing lock entry, `osdk skills sync` reproduces from it: it prefers the staged content-addressed
 copy, and when that copy is gone it **re-downloads a GitHub source at the recorded
 `resolved_commit`** and recomputes `content_hash`. A mismatch fails closed — a
 moved tag or a substituted mirror cannot install — and placement reuses
@@ -123,8 +124,9 @@ moved tag or a substituted mirror cannot install — and placement reuses
 
 ## How skills land
 
-The default is a directory link: a junction on Windows, a symlink on Unix (neither
-needs privilege). Where links are unavailable, or with `--copy`, the tree is copied.
+Directory links use a junction on Windows and a symlink on Unix. Both work
+without elevated privileges. Where links are unavailable, or with `--copy`,
+the tree is copied.
 Override the link mode for skills alone with `[skills].link_mode`. After the
 installation summary is confirmed, an existing real directory may be replaced: osdk
 prepares the new path beside the destination, renames the old directory to a temporary
@@ -154,8 +156,9 @@ that overlaps its destination is rejected before staging so it cannot delete its
 
 ## Declarative configuration
 
-You can also declare skills in `osdk.toml` and let a team reproduce them with
-`osdk skills sync`:
+Declare skills in `osdk.toml` and run `osdk skills sync` on a fresh checkout.
+It installs declarations that match `when` and have no lock entry, then writes
+their resolutions to `osdk.lock`.
 
 ```toml
 [skills]
@@ -168,7 +171,20 @@ ref = "branch:main"
 agents = ["claude-code", "codex"]
 ```
 
-The top-level `[skills]` table accepts `default_agents`, `scope`
-(`project`/`global`), and `link_mode`; each `[skills.<name>]` accepts `source`,
-`skill`, `ref`, `agents`, `when`, and `endpoint`, and a misspelled field errors
-loudly. The `osdk-guide` skill's `reference/configuration/skills.md` documents each field.
+The declaration name is the lock key and the installation directory name. For a
+collection, `skill` selects a directory and defaults to the declaration name.
+Relative local paths are resolved from the directory containing `osdk.toml`.
+`ref` applies to GitHub sources. An empty `agents` list falls back to
+`[skills].default_agents` and then to agent detection. In CI, set agents in the
+config or pass `--yes` to accept detection. `sync` prints a summary and proceeds
+with new installs. It copies to a single destination and uses automatic linking
+for multiple destinations unless `[skills].link_mode` is set. Custom `endpoint`
+support is pending. Setting it on a declaration with no lock entry produces an error.
+
+Existing entries are replayed from the lock. Use `osdk skills update <name>` to
+apply changes to a ref or Agent list. To change the source or skill selection,
+run `osdk skills remove <name>` and sync again, or install explicitly with
+`skills add`. When removing a declaration, use `osdk skills remove <name>` to
+drop the lock entry too. The top-level `[skills]` table also accepts `scope`
+(`project` or `global`). See `reference/configuration/skills.md` in the
+`osdk-guide` skill for the full field reference.

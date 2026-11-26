@@ -759,8 +759,8 @@ Civitai 的 `civitai.com` 与 `civitai.red` 都是内置官方来源。auto 模�
 ## 场景：给 AI 编码 Agent 装 skill
 
 skill 是带 `SKILL.md` 的指令包，供 Claude Code、Codex、Cursor 等 AI 编码 Agent 读取。osdk
-从 GitHub 或本地路径安装 skill，内容寻址落地后链接进各 Agent 的 skills 目录，并把不可变身份
-写进 `osdk.lock`，团队 `osdk skills sync` 一步复现。osdk 只搬运与链接，绝不执行 skill 里的脚本。
+从 GitHub 或本地路径把 skill 安装到选定 Agent 的技能目录。团队和 CI 可以用
+`osdk skills sync` 复现已锁定的技能，并安装尚未写入锁的声明。技能脚本由 Agent 按需调用。
 
 ```bash
 osdk skills agents                       # 看 osdk 认识哪些 Agent、各自的 skills 目录
@@ -769,7 +769,7 @@ osdk skills add github:vercel-labs/agent-skills --list        # 只列仓库里�
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # 交互选择 Agent 与链接/复制
 osdk skills add ./my-skills -s my-skill -a codex              # 本地源，选装指定 skill
 osdk skills list                         # 已装 skill 与其链接到的 Agent
-osdk skills sync                         # 按 osdk.lock 复现（团队 / CI）
+osdk skills sync                         # 复现已锁定的技能，补齐缺锁的声明
 osdk skills remove web-design-guidelines
 ```
 
@@ -779,14 +779,9 @@ osdk skills remove web-design-guidelines
 只有多个实际目标目录时才询问链接或复制，单一目录直接复制。写盘前会列出所有目标目录并标明
 将被覆盖的已有路径，未传 `--yes` 时统一确认。
 
-`add` 把请求 ref、解析 commit、内容哈希和选定的安装方式写进 `osdk.lock`；`sync` 缺本地副本时
-按记录的 commit 重新下载并核对哈希，同时维持复制/链接方式。`skills update` 重新解析请求的
-分支/标签或默认分支，仅当目标 skill 内容哈希变化时重装；只有仓库其他内容变化时仅推进 lock
-commit。需要在更新时仍固定不动，使用 `ref = "rev:<commit>"`。默认目录链接（Windows junction /
-Unix symlink），无链接环境或 `--copy` 时整树拷贝。用户确认安装摘要后，已有真实目录可以更新：
-osdk 先准备新树，再把旧目录改名为临时备份，激活失败时恢复。旧 lock 缺少 `install_mode`
-时会根据已有真实目录/链接保持原落地方式；本地源与目标重叠会在 staging 前拒绝。也可以在
-`osdk.toml` 里用 `[skills]` 声明，让 `osdk skills sync` 直接复现。
+在 `osdk.toml` 的 `[skills.<名>]` 中声明团队技能。执行 `osdk skills sync` 会安装当前平台
+适用的缺锁声明，并将结果追加到 `osdk.lock`。用 `skills update` 更新已锁定的 GitHub ref 或
+应用 Agent 列表变更。要在更新时仍固定到同一 GitHub commit，配置 `ref = "rev:<commit>"`。
 
 指南：[Agent skills](site/guide/ai/skills.md)
 

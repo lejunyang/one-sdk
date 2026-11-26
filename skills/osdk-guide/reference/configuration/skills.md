@@ -15,16 +15,18 @@ skill = "web-design-guidelines"
 ref = "branch:main"
 agents = ["claude-code"]
 when = { os = ["linux", "macos"] }
-# endpoint = "https://..."           # 自定义来源，需要 trust
 ```
 
-`source` 必填，可为 GitHub 来源或本地路径。GitHub 安装把请求 ref、解析 commit、内容哈希和
-安装方式写进 lock；`sync` 始终按这些字段精确复现。`update` 重解析 lock 的请求 ref，项目配置
-明确修改 `ref` 时以配置为准；仅目标 skill 内容哈希变化时重装，仓库其他变更只推进 lock。
-只有显式 `ref = "rev:<commit>"` 才永久固定；已有项目保存的裸 40 位 commit 视为安装快照并迁移
-为默认分支意图。`agents` 为空时回退 `default_agents`；两者都未指定时
-先检测已安装 Agent：一个结果自动选中，多个或零个结果在交互终端多选，`--yes` 接受检测结果
-（零个时选择全部），其他非交互调用报错。`link_mode` 未配置且未传 `--copy` 时，仅多个实际目标
-目录会选择链接或复制；单一目录直接复制。安装摘要确认后才写盘；覆盖已有真实目录时先把旧
-目录改名备份，激活失败则恢复。旧 lock 缺少 `install_mode` 时按已有目标类型推断；本地源与目标
-重叠时在 staging 前拒绝。未知字段硬报错。
+`osdk skills sync` 精确复现已有锁条目的 commit、内容哈希、Agent 列表与安装方式。
+对没有锁条目的声明，它按 `when` 筛选本平台适用的技能，打印安装摘要、安装并写入锁。
+
+- 声明名是锁键和安装目录名。`source` 必填，支持 GitHub 来源或本地路径。相对本地路径从
+  `osdk.toml` 所在目录解析。一个来源有多个技能时，`skill` 按目录选取，缺省取声明名。
+- `ref` 只用于 GitHub。用 `osdk skills update <名>` 应用 ref 或 Agent 列表变更。更新时只有
+  `ref = "rev:<commit>"` 会保持永久固定，旧配置的裸 40 位 commit 仍按安装快照处理。
+  换来源或技能时，用 `osdk skills remove <名>` 后重新同步，或显式调用 `skills add`。
+- `agents` 为空时回退到 `[skills].default_agents`，再为空时检测已安装的 Agent。仅检测到
+  一个时自动选中，多个或零个时使用交互选择或传 `--yes`。在 CI 中也可以明确配置 Agent。
+- `link_mode` 可覆盖安装方式。`sync` 默认单目录复制、多目录自动链接。`add` 的 `--copy`
+  优先于配置。`add` 在写盘前确认，`--yes` 可跳过确认。
+- 自定义 `endpoint` 尚未实现。缺锁的声明设置该字段会报错。未知字段也会报错。
