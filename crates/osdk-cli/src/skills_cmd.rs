@@ -193,7 +193,7 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
 
     let lock_entries = installation.install(app)?;
     if !args.no_lock {
-        write_lock_entries(app, args.global, lock_entries)?;
+        write_lock_entries(&lock_path_for(app, args.global), lock_entries)?;
     }
     Ok(())
 }
@@ -678,7 +678,7 @@ async fn sync(app: &App, global: bool) -> Result<()> {
         entries.extend(installation.install(app)?);
     }
     if !entries.is_empty() {
-        write_lock_entries(app, global, entries)?;
+        write_lock_entries(&lock_path, entries)?;
     }
 
     // Reproduce each skill from its staged copy. When the copy is gone, a GitHub
@@ -1509,35 +1509,29 @@ fn agent_dir(target: &AgentTarget, scope_root: &Path, global: bool) -> Result<Pa
     }
 }
 
-/// The lockfile path for the chosen scope: the user lock for global, else the
-/// nearest project lock (creating its path at the project root when absent).
+/// The lockfile path for the chosen scope. With a selected project, use the
+/// lock that belongs to its config, even if only an ancestor has a lock.
 fn lock_path_for(app: &App, global: bool) -> PathBuf {
     if global {
         app.ctx.dirs.user_lock_file()
+    } else if let Some(project) = &app.ctx.config.project {
+        project.lock_path.clone()
     } else {
-        let start = app
-            .ctx
-            .config
-            .project_config_path
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         lockfile::default_path(&start)
     }
 }
 
-fn write_lock_entries(app: &App, global: bool, entries: Vec<(String, LockedSkill)>) -> Result<()> {
-    let lock_path = lock_path_for(app, global);
+fn write_lock_entries(lock_path: &Path, entries: Vec<(String, LockedSkill)>) -> Result<()> {
     let mut lock = if lock_path.is_file() {
-        lockfile::load(&lock_path)?
+        lockfile::load(lock_path)?
     } else {
         lockfile::Lockfile::default()
     };
     for (name, entry) in entries {
         lock.skills.insert(name, entry);
     }
-    lockfile::save(&lock_path, &lock)?;
+    lockfile::save(lock_path, &lock)?;
     Ok(())
 }
 

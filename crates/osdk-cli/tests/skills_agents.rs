@@ -124,6 +124,38 @@ fn skills_sync_adds_to_a_tools_only_lock() {
 }
 
 #[test]
+fn skills_sync_uses_the_selected_project_lock() {
+    for parent_has_demo in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let parent = local_project(root, "[skills]\n");
+        let parent_lock = parent.join("osdk.lock");
+        if parent_has_demo {
+            std::fs::write(
+                parent.join("fixture/demo/SKILL.md"),
+                format!("{DEMO_SKILL}\nParent content\n"),
+            )
+            .unwrap();
+            let add = osdk(
+                root,
+                &parent,
+                &["--yes", "skills", "add", "./fixture/demo", "-a", "codex"],
+            );
+            assert!(add.status.success(), "{add:?}");
+        } else {
+            std::fs::write(&parent_lock, "schema = 4\n").unwrap();
+        }
+        let before = std::fs::read(&parent_lock).unwrap();
+        let child = local_project(&parent, DEMO_DECLARATION);
+
+        let sync = osdk(root, &child, &["--yes", "skills", "sync"]);
+        assert!(sync.status.success(), "{sync:?}");
+        assert_eq!(std::fs::read(&parent_lock).unwrap(), before);
+        assert_demo_installed(&child, &read_lock(&child.join("osdk.lock")));
+    }
+}
+
+#[test]
 fn skills_sync_replays_cached_bytes_and_ignores_changed_declaration() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
