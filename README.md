@@ -318,7 +318,9 @@ osdk task list
 osdk run ci --dry-run
 ```
 
-Declare `sources` and `outputs` for incremental builds. With `freshness = "hash"`,
+Declare `sources` and `outputs` for incremental builds. Editing a task's `run`
+command triggers a rebuild even when the source files are unchanged. With
+`freshness = "hash"`,
 osdk reruns the task if any output pattern has no matching file.
 
 Array entries run in order and stop at the first failure; `ignore_error`

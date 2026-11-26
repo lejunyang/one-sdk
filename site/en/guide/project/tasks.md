@@ -624,7 +624,8 @@ sources = ["Cargo.toml", "crates/**/*.rs"]
 outputs = ["target/release/osdk.exe"]
 ```
 
-When every `source` is older than every `output`, the task is skipped:
+In the default mode, a previously successful task is skipped when its definition
+is unchanged and every source is older than every matching output:
 
 ```
 $ osdk run build
@@ -639,15 +640,16 @@ The default comparison is modification time. Three choices:
 | `"hash"` | Compare input content hashes and check that every output pattern matches a file | Ignores timestamp-only changes, at the cost of reading every input |
 | `"always"` | Never skip | Opt out of incrementality |
 
-**The task definition counts as an input too**: editing `run` reruns the task
-even when no source file moved.
+Both `mtime` and `hash` compare the task definition with its last successful run.
+Editing `run` triggers a rerun even when the source files are unchanged. If the
+cache lacks the record required by the current mode, such as after clearing the
+cache or upgrading from an older version, the task runs once.
 
 Even when the hash matches, the task reruns if any positive `outputs` pattern
 has no matching file. Files excluded by a `!` pattern do not count.
 
-With `outputs` omitted, osdk compares against the last successful run, stored in
-the cache directory rather than in your project, so nobody needs a `.gitignore`
-entry for it.
+In `mtime` mode, omitting `outputs` makes osdk compare source modification times
+against the last successful run. The record lives in the cache directory.
 
 ### Two things worth knowing
 

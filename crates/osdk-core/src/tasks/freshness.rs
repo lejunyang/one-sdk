@@ -338,6 +338,10 @@ pub fn input_hash(paths: &[PathBuf], definition: &str) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn definition_hash(definition: &str) -> String {
+    blake3::hash(definition.as_bytes()).to_hex().to_string()
+}
+
 /// Where a project's freshness state belongs inside the cache directory.
 ///
 /// Derived data, so it lives under the managed cache rather than beside
@@ -369,6 +373,9 @@ pub struct TaskState {
     /// Content hash of inputs plus definition, for `freshness = "hash"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    /// Task definition fingerprint for `freshness = "mtime"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_hash: Option<String>,
     /// Unix **nanoseconds** of the last successful run, as a decimal string.
     ///
     /// Seconds are not enough: file mtimes carry sub-second precision, so a task
@@ -453,6 +460,14 @@ pub fn decide(inputs: &Inputs<'_>, state: &FreshnessState) -> Result<Decision> {
         });
     }
 
+    let Some(recorded_definition) = previous.and_then(|state| state.definition_hash.as_deref())
+    else {
+        return Ok(Decision::Run("no recorded task definition".into()));
+    };
+    if recorded_definition != definition_hash(inputs.definition) {
+        return Ok(Decision::Run("task definition changed".into()));
+    }
+
     let newest_source = newest(&sources)?;
 
     // Declared outputs: compare against the oldest, so a half-written set of
@@ -500,16 +515,25 @@ pub fn record(inputs: &Inputs<'_>, state: &mut FreshnessState) -> Result<()> {
         inputs.sources,
         &format!("task `{}`: sources", inputs.name),
     )?;
-    let entry = state.tasks.entry(inputs.name.to_string()).or_default();
-    if inputs.freshness == Freshness::Hash {
-        entry.hash = Some(input_hash(&sources, inputs.definition)?);
-    }
-    entry.ran_at = Some(
+    let (hash, definition_hash) = if inputs.freshness == Freshness::Hash {
+        (Some(input_hash(&sources, inputs.definition)?), None)
+    } else {
+        (None, Some(definition_hash(inputs.definition)))
+    };
+    let ran_at = Some(
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0)
             .to_string(),
+    );
+    state.tasks.insert(
+        inputs.name.to_string(),
+        TaskState {
+            hash,
+            definition_hash,
+            ran_at,
+        },
     );
     Ok(())
 }
@@ -693,14 +717,16 @@ mod tests {
 
         let sources = vec!["src/**/*.rs".to_string()];
         let outputs = vec!["out/**".to_string()];
-        let state = FreshnessState::default();
+        let mut state = FreshnessState::default();
+        let spec = inputs(root, &sources, &outputs, Freshness::Mtime);
+        record(&spec, &mut state).unwrap();
 
-        let decision = decide(&inputs(root, &sources, &outputs, Freshness::Mtime), &state).unwrap();
+        let decision = decide(&spec, &state).unwrap();
         assert_eq!(decision, Decision::UpToDate, "{decision:?}");
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         write(root, "src/a.rs", "fn a() { changed }");
-        let decision = decide(&inputs(root, &sources, &outputs, Freshness::Mtime), &state).unwrap();
+        let decision = decide(&spec, &state).unwrap();
         assert!(decision.should_run(), "{decision:?}");
         assert!(decision.reason().unwrap().contains("newer"), "{decision:?}");
     }
@@ -711,16 +737,15 @@ mod tests {
         let root = temp.path();
         write(root, "src/a.rs", "");
 
-        let decision = decide(
-            &inputs(
-                root,
-                &["src/**/*.rs".to_string()],
-                &["out/**".to_string()],
-                Freshness::Mtime,
-            ),
-            &FreshnessState::default(),
-        )
-        .unwrap();
+        let sources = ["src/**/*.rs".to_string()];
+        let outputs = ["out/**".to_string()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Mtime);
+        let mut state = FreshnessState::default();
+        let output = write(root, "out/bin", "built");
+        record(&spec, &mut state).unwrap();
+
+        std::fs::remove_file(output).unwrap();
+        let decision = decide(&spec, &state).unwrap();
         assert!(decision.should_run());
         assert!(
             decision.reason().unwrap().contains("missing"),
@@ -841,6 +866,72 @@ mod tests {
     }
 
     #[test]
+    fn changing_the_definition_invalidates_a_mtime_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = write(root, "input.txt", "fixture");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(source)
+            .unwrap()
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        write(root, "dist/result.txt", "previous output");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/result.txt".into()];
+
+        for outputs in [&outputs[..], &[]] {
+            let mut state = FreshnessState::default();
+            let first = inputs(root, &sources, outputs, Freshness::Mtime);
+            record(&first, &mut state).unwrap();
+            assert_eq!(decide(&first, &state).unwrap(), Decision::UpToDate);
+
+            let second = Inputs {
+                definition: "run = \"cargo build --release\"",
+                ..first
+            };
+            assert_eq!(
+                decide(&second, &state).unwrap(),
+                Decision::Run("task definition changed".into()),
+                "edited command with outputs {outputs:?}"
+            );
+            record(&second, &mut state).unwrap();
+            assert_eq!(decide(&second, &state).unwrap(), Decision::UpToDate);
+        }
+    }
+
+    #[test]
+    fn a_legacy_mtime_record_without_a_definition_fingerprint_reruns() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = write(root, "input.txt", "fixture");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(source)
+            .unwrap()
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        write(root, "dist/result.txt", "previous output");
+        let state_path = write(
+            root,
+            "state.toml",
+            "[tasks.build]\nran_at = \"42000000000\"\n",
+        );
+        let state = FreshnessState::load(&state_path).unwrap();
+        assert_eq!(state.tasks["build"].ran_at.as_deref(), Some("42000000000"));
+
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/result.txt".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Mtime);
+        for state in [state, FreshnessState::default()] {
+            assert_eq!(
+                decide(&spec, &state).unwrap(),
+                Decision::Run("no recorded task definition".into())
+            );
+        }
+    }
+
+    #[test]
     fn always_never_skips_and_no_sources_never_skips() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -899,6 +990,7 @@ mod tests {
             "build".into(),
             TaskState {
                 hash: Some("abc".into()),
+                definition_hash: Some("def".into()),
                 ran_at: Some("42000000000".into()),
             },
         );
@@ -906,6 +998,10 @@ mod tests {
 
         let loaded = FreshnessState::load(&path).unwrap();
         assert_eq!(loaded.tasks["build"].hash.as_deref(), Some("abc"));
+        assert_eq!(
+            loaded.tasks["build"].definition_hash.as_deref(),
+            Some("def")
+        );
         assert_eq!(loaded.tasks["build"].ran_at.as_deref(), Some("42000000000"));
     }
 

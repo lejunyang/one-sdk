@@ -286,7 +286,8 @@ osdk task list
 osdk run ci --dry-run
 ```
 
-构建任务可声明 `sources` 和 `outputs` 启用增量执行。使用 `freshness = "hash"` 时，
+构建任务可声明 `sources` 和 `outputs` 启用增量执行。即使源文件没变，修改 `run`
+命令也会触发重跑。使用 `freshness = "hash"` 时，
 只要有一个输出模式匹配不到文件，osdk 就会重跑任务。
 
 数组里的命令依次执行、失败即停；`ignore_error` 表示容忍失败并继续（但会
