@@ -877,6 +877,20 @@ mod tests {
     }
 
     #[test]
+    fn a_hash_match_accepts_an_output_with_a_dot_slash_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        write(root, "dist/result.txt", "built");
+        let sources = ["input.txt".into()];
+        let outputs = ["./dist/result.txt".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+    }
+
+    #[test]
     fn a_hash_match_excludes_outputs_using_a_dot_slash_pattern() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
