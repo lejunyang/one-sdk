@@ -1994,9 +1994,11 @@ mod tests {
     #[test]
     fn parse_rustup_override_accepts_rustup_column_padding() {
         let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("sub")).unwrap();
         let directory = temp
             .path()
-            .join(".")
+            .join("sub")
+            .join("..")
             .join("project with spaces and a path wider than the rustup column");
         std::fs::create_dir(&directory).unwrap();
         let canonical = dunce::canonicalize(&directory).unwrap();
