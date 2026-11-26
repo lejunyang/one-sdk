@@ -55,7 +55,8 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 
 支持 Windows 风格的 glob，例如 `src\*.rs` 和 `src\pages\]index.tsx`。
 用反斜杠转义文件名里的特殊字符时，用 `/` 分隔路径段，如 `src/**/\[slug\].tsx`。
-跟踪根目录的 `page-[slug].tsx` 时可直接写 `page-\[slug\].tsx`。
+根目录的 `page-[slug].tsx` 可写成 `page-\[slug\].tsx` 或 `page-\[slug\]\.tsx`。
+根目录的模式也可以加 `./` 明确表示使用转义语法。
 模式开头的 `./` 可以省略，`!./dist/ignored/**` 与 `!dist/ignored/**` 等效。
 产物用完整相对路径声明时，`dist/./libs/result.txt` 与 `dist/libs/result.txt` 匹配同一文件。
 

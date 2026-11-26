@@ -609,7 +609,8 @@ matches nothing would make this task's freshness check silently meaningless
 `src\*.rs` 和 `src\pages\]index.tsx` 这样的 Windows 风格 glob 也可以使用。
 需要对方括号等特殊字符用反斜杠转义时，请用 `/` 分隔路径段。
 例如 `sources = ['manifest.json', 'src/**/\[slug\].tsx']`
-会把 `[slug].tsx` 算作输入。跟踪根目录的 `page-[slug].tsx` 时可直接写 `page-\[slug\].tsx`。
+会把 `[slug].tsx` 算作输入。跟踪根目录的 `page-[slug].tsx` 时，`page-\[slug\].tsx`
+和 `page-\[slug\]\.tsx` 都可以。根目录的模式也可以加 `./` 明确表示使用转义语法。
 
 `!` 前缀表示排除。模式开头的 `./` 可以省略，`!./src/generated/**` 与 `!src/generated/**` 等效。
 产物用完整相对路径声明时，`dist/./libs/result.txt` 与 `dist/libs/result.txt` 匹配同一文件。

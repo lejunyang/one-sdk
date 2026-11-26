@@ -175,6 +175,8 @@ fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
     assert_hash_task_tracks_glob("src/routes/[slug].tsx", r"src/**/\[slug\].tsx");
     assert_hash_task_tracks_glob("page-[slug].tsx", r"./page-\[slug\].tsx");
     assert_hash_task_tracks_glob("page-[slug].tsx", r"page-\[slug\].tsx");
+    assert_hash_task_tracks_glob("page-[slug].tsx", r"page-\[slug\]\.tsx");
+    assert_hash_task_tracks_glob("page-[slug]x.tsx", r"page-\[slug\]\x.tsx");
 }
 
 #[cfg(feature = "scripts")]
@@ -220,7 +222,10 @@ freshness = "hash"
 
     std::fs::write(&source, "updated").unwrap();
     let rebuilt = run(&["run", "build"]);
-    assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
+    assert!(
+        rebuilt.contains("TASK_EXECUTED"),
+        "{pattern} did not track {source_path}: {rebuilt}"
+    );
     assert_eq!(std::fs::read(&result).unwrap(), b"updated");
 }
 

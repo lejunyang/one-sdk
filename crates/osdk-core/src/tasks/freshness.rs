@@ -158,25 +158,31 @@ fn normalize_pattern(pattern: &str) -> Cow<'_, str> {
     let mut chars = pattern.chars();
     let mut escaped_opening = false;
     let mut escaped_closing = false;
-    let mut unescaped_closing = false;
     while let Some(ch) = chars.next() {
         match ch {
             '\\' => match chars.next() {
                 Some('[') => escaped_opening = true,
+                // A paired bracket escape establishes glob syntax. Any later
+                // escapes are part of the same filename, including `\.`.
+                Some(']') if escaped_opening => return Cow::Borrowed(pattern),
                 Some(']') => escaped_closing = true,
                 Some('*' | '?' | '{' | '}' | ',' | '!' | '\\') | None => {}
+                // Keep reading the bracket expression before deciding whether
+                // backslashes in it are escapes or Windows separators.
+                Some(_) if escaped_opening => {}
                 // A separator before an ordinary character selects Windows
                 // syntax for the whole path, including later `\*` or `\]`.
                 Some(_) => return Cow::Owned(pattern.replace('\\', "/")),
             },
-            ']' => unescaped_closing = true,
+            // An unescaped closing bracket can end a Windows character class.
+            ']' => escaped_opening = false,
             _ => {}
         }
     }
 
     // Preserve literal brackets in a bare filename. A Windows character class
     // such as `src\[ab].rs` has an unescaped closing bracket.
-    if escaped_closing || (escaped_opening && !unescaped_closing) {
+    if escaped_closing || escaped_opening {
         Cow::Borrowed(pattern)
     } else {
         Cow::Owned(pattern.replace('\\', "/"))
