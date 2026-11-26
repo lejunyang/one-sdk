@@ -152,8 +152,16 @@ pub struct ScanCost {
 fn normalize_pattern(pattern: &str) -> Cow<'_, str> {
     // Slash-separated globs use backslash escapes. In a Windows-style glob a
     // backslash after a path component separates it even before a wildcard.
-    // A bare filename can start with an escape, as in `\[slug\].tsx`.
-    if pattern.contains('\\') && !pattern.contains('/') && !pattern.starts_with('\\') {
+    // An escaped closing bracket or an opening bracket without a closing one
+    // marks a literal bracket in a bare filename. Keep Windows classes such
+    // as `src\[ab].rs` working with a separator before the class.
+    let escaped_bracket =
+        pattern.contains(r"\]") || (pattern.contains(r"\[") && !pattern.contains(']'));
+    if pattern.contains('\\')
+        && !pattern.contains('/')
+        && !pattern.starts_with('\\')
+        && !escaped_bracket
+    {
         Cow::Owned(pattern.replace('\\', "/"))
     } else {
         Cow::Borrowed(pattern)

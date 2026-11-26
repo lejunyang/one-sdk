@@ -54,7 +54,7 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 | `args` / `options` / `flags` | 声明位置参数、命名选项和布尔 flag |
 
 支持 Windows 风格的 glob，例如 `src\*.rs`。用反斜杠转义文件名里的特殊字符时，用 `/`
-分隔路径段，如 `src/**/\[slug\].tsx`。项目根目录的文件可加 `./`，如 `./page-\[slug\].tsx`。
+分隔路径段，如 `src/**/\[slug\].tsx`。跟踪根目录的 `page-[slug].tsx` 时可直接写 `page-\[slug\].tsx`。
 模式开头的 `./` 可以省略，`!./dist/ignored/**` 与 `!dist/ignored/**` 等效。
 
 `mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。

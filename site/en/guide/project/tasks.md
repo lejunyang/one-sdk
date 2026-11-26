@@ -682,8 +682,8 @@ patterns with a directory prefix; a bare `**/*.rs` walks everything.
 Windows-style globs such as `src\*.rs` are supported. To escape special
 characters with `\`, use `/` as the path separator. For example,
 `sources = ['manifest.json', 'src/**/\[slug\].tsx']` tracks the file named
-`[slug].tsx` as an input. For a file at the project root, you can use a `./`
-prefix, as in `./page-\[slug\].tsx`.
+`[slug].tsx` as an input. Use `page-\[slug\].tsx` to track `page-[slug].tsx`
+at the project root.
 
 Prefix a pattern with `!` to exclude. The leading `./` is optional, so
 `!./src/generated/**` and `!src/generated/**` are equivalent.

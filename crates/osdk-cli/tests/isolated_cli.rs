@@ -174,12 +174,14 @@ freshness = "hash"
 fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
     assert_hash_task_tracks_glob("src/routes/[slug].tsx", r"src/**/\[slug\].tsx");
     assert_hash_task_tracks_glob("page-[slug].tsx", r"./page-\[slug\].tsx");
+    assert_hash_task_tracks_glob("page-[slug].tsx", r"page-\[slug\].tsx");
 }
 
 #[cfg(feature = "scripts")]
 #[test]
 fn hash_task_rebuilds_when_a_windows_style_source_glob_changes() {
     assert_hash_task_tracks_glob("src/main.rs", r"src\*.rs");
+    assert_hash_task_tracks_glob("src/a.rs", r"src\[ab].rs");
 }
 
 #[cfg(feature = "scripts")]
