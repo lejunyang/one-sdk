@@ -1649,17 +1649,22 @@ pub(crate) fn dunce_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
 
 pub(crate) fn parse_rustup_override(text: &str, path: &std::path::Path) -> Option<String> {
     text.lines().find_map(|line| {
-        // rustup left-aligns both columns and separates them with a tab.
-        let line = line.trim_end();
-        if line == "no overrides" {
-            return None;
-        }
-        let (directory, toolchain) = line
-            .rsplit_once('\t')
-            .or_else(|| line.rsplit_once(char::is_whitespace))?;
-        (dunce::canonicalize(directory.trim_end()).ok().as_deref() == Some(path))
+        let (directory, toolchain) = rustup_override_columns(line)?;
+        (dunce::canonicalize(directory).ok().as_deref() == Some(path))
             .then(|| toolchain.to_string())
     })
+}
+
+fn rustup_override_columns(line: &str) -> Option<(&str, &str)> {
+    // rustup left-aligns both columns and separates them with a tab.
+    let line = line.trim_end();
+    if line == "no overrides" {
+        return None;
+    }
+    let (directory, toolchain) = line
+        .rsplit_once('\t')
+        .or_else(|| line.rsplit_once(char::is_whitespace))?;
+    Some((directory.trim_end(), toolchain))
 }
 
 pub(crate) fn validate_rust_link_name(name: &str) -> Result<()> {
@@ -1977,24 +1982,28 @@ pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_rustup_override, restore_endpoint};
+    use super::{parse_rustup_override, restore_endpoint, rustup_override_columns};
     use crate::lockfile::LockedModel;
     use osdk_core::model::ProviderId;
 
     #[test]
+    fn parse_rustup_override_splits_padded_columns() {
+        let directory = "project with spaces";
+        let toolchain = "local-dev";
+        let row = format!("{directory:<40}\t{toolchain:<20}");
+        assert_eq!(rustup_override_columns(&row), Some((directory, toolchain)));
+    }
+
+    #[test]
     fn parse_rustup_override_accepts_rustup_column_padding() {
-        // Use a short printed path regardless of the host's temp directory.
-        let temp = tempfile::tempdir_in(".").unwrap();
-        let relative = std::path::Path::new(temp.path().file_name().unwrap());
-        let short = relative.join("project with spaces");
-        let long = relative.join("project with spaces and a path wider than the rustup column");
-        for (directory, toolchain) in [
-            (&short, "local-dev"),
-            (&long, "local-dev"),
-            (&long, "linked-rust-for-sibling-import"),
-        ] {
-            std::fs::create_dir_all(directory).unwrap();
-            let canonical = dunce::canonicalize(directory).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp
+            .path()
+            .join(".")
+            .join("project with spaces and a path wider than the rustup column");
+        std::fs::create_dir(&directory).unwrap();
+        let canonical = dunce::canonicalize(&directory).unwrap();
+        for toolchain in ["local-dev", "linked-rust-for-sibling-import"] {
             let text = format!("{:<40}\t{toolchain:<20}\n", directory.display());
             assert_eq!(
                 parse_rustup_override(&text, &canonical).as_deref(),
