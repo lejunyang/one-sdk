@@ -185,6 +185,11 @@ osdk model sync --prune         # 清理本项目已弃用的快照
 首次同步会为当前锁登记已校验的快照。只从配置移除声明时，锁仍可继续引用快照。
 如果同步需要拉取或还原某个模型，该名称的清理留到下一次 `--prune`，这样预演无需下载即可列出本次可删的快照。
 
+用 `osdk model sync --prune --dry-run --jsonl` 查看项目根、模型名、快照键和路径。
+`planned` 是预演将删除的快照，`completed` 是执行已删除的快照，
+`skipped` 表示保留并说明原因。有其他项目引用时，`project` 指向持有引用的项目。
+汇总的 `removed` 和 `skipped` 分别计数，预演的 `removed` 是预计删除数。预演只读。
+
 ### `remove` 与 `unuse`
 
 `osdk model remove <name>` 只删除本地快照和消费者视图，保留项目声明与 lock；之后

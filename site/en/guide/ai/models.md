@@ -212,6 +212,13 @@ leave the snapshot referenced by the lock. If sync needs to pull or restore a
 model, pruning for that name is deferred until the next `--prune`, so a preview
 can list this run's removals without downloading anything.
 
+Run `osdk model sync --prune --dry-run --jsonl` to see the project root, model
+name, snapshot key, and path. `planned` marks intended removals, `completed`
+marks successful removals, and `skipped` explains why a snapshot was kept.
+For another project's reference, `project` points to the project that holds
+it. The summary counts `removed` and `skipped`; in a preview, `removed` is
+the planned count. Preview is read-only.
+
 ### `remove` and `unuse`
 
 `osdk model remove <name>` removes only the local snapshot and consumer views while retaining the

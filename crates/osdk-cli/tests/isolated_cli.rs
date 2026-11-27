@@ -1711,6 +1711,20 @@ fn model_sync_prune_preserves_other_projects_and_prunes_exact_retired_snapshots(
     assert_ne!(old_selection.path, new_selection.path);
     write_model_fixture_lock(&a, &[&new_selection]);
     model_fixture_command(root, &subdir, &["--offline", "model", "sync", "select"]);
+    let a_lock = a.join("osdk.lock");
+    let mut lock_text = std::fs::read_to_string(&a_lock).unwrap();
+    lock_text.push_str("\n[models.select.views.comfyui]\nprofile = \"new-view\"\n");
+    std::fs::write(&a_lock, lock_text).unwrap();
+    let a_root = dunce::canonicalize(&a).unwrap();
+    let a_id = osdk_core::project::root_id(&a_root);
+    let a_refs = root.join("data/model-refs").join(format!("{a_id}.json"));
+    let view_state = root.join("data/views/.osdk-views.json");
+    let current = root.join("data/models/select/current.json");
+    let stable = root.join("data/models/select/current");
+    let stable_target = dunce::canonicalize(&stable).unwrap();
+    let tracked = [a_lock, a_refs, view_state, current, view_file.clone()]
+        .map(|path| (std::fs::read(&path).unwrap(), path));
+    let new_view = root.join("data/views/comfyui/new-view/loras/new.safetensors");
     let parse = |output: Output| -> Vec<serde_json::Value> {
         String::from_utf8(output.stdout)
             .unwrap()
@@ -1726,6 +1740,18 @@ fn model_sync_prune_preserves_other_projects_and_prunes_exact_retired_snapshots(
             .collect()
     };
     let planned = parse(model_fixture_command(root, &subdir, &preview));
+    assert!(planned.iter().all(|event| event["dry_run"] == true));
+    for (bytes, path) in tracked {
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{}", path.display());
+    }
+    assert_eq!(dunce::canonicalize(&stable).unwrap(), stable_target);
+    assert!(!new_view.exists());
+    let removal = planned
+        .iter()
+        .find(|event| event["status"] == "planned")
+        .unwrap();
+    assert_eq!(removal["project"], a_root.display().to_string());
+    assert_eq!(removal["snapshot"], a_retired.snapshot_key());
     assert_eq!(
         removed(&planned, "planned"),
         [a_retired.path.clone(), old_selection.path.clone()]
@@ -1751,7 +1777,19 @@ fn model_sync_prune_preserves_other_projects_and_prunes_exact_retired_snapshots(
         .find(|event| event["model"] == "shared")
         .unwrap();
     assert_eq!(skipped["status"], "skipped");
+    assert_eq!(
+        skipped["project"],
+        dunce::canonicalize(&b).unwrap().display().to_string()
+    );
+    assert_eq!(skipped["snapshot"], shared.snapshot_key());
     assert!(skipped["reason"].as_str().unwrap().contains("项目 B"));
+    for events in [&planned, &executed] {
+        let summary = events.last().unwrap();
+        assert_eq!(summary["event"], "summary");
+        assert_eq!(summary["removed"], 2);
+        assert_eq!(summary["skipped"], 2);
+    }
+    assert_eq!(std::fs::read(new_view).unwrap(), b"select/new.safetensors");
     let cas = osdk_core::store::Cas::new(root.join("store"));
     for model in [&a_retired, &old_selection] {
         assert!(!model.path.exists());

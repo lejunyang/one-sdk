@@ -12,6 +12,9 @@
 | `remove <NAME>` | 仅删除本地快照和视图，保留声明与 lock |
 
 `sync --prune` 保留其他项目已登记的快照、本地导入、旧版未登记的快照和视图仍在使用的快照。需拉取或还原的名称留到下次清理。
+用 `sync --prune --dry-run --jsonl` 只读预演，删除事件带 `project`、`snapshot`、`path`。
+预演读取 `planned`，执行读取 `completed`。其他项目仍引用时，`skipped` 事件的 `project` 指向该项目。
+汇总的 `removed` 在预演中表示预计删除数。
 
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \

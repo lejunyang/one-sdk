@@ -921,6 +921,13 @@ pub(crate) async fn model_sync(
     let mut restored = 0usize;
     let mut bootstrapped = std::collections::BTreeSet::new();
     let mut pending_downloads = BTreeSet::new();
+    let mut pending_views = Vec::new();
+    let render_views = |pending: Vec<(String, _)>| -> Result<()> {
+        for (name, views) in pending {
+            crate::model_view::reconcile_declared_views(app, &name, &views, emitter.jsonl())?;
+        }
+        Ok(())
+    };
 
     // A declared model is (re-)pulled when the lock does not describe it, or
     // describes a different identity than the declaration now asks for. This is
@@ -1034,12 +1041,7 @@ pub(crate) async fn model_sync(
                             registry.put_project(refs)?;
                         }
                     }
-                    crate::model_view::reconcile_declared_views(
-                        app,
-                        &name,
-                        &views,
-                        emitter.jsonl(),
-                    )?;
+                    pending_views.push((name.clone(), views));
                     let verb = if matches!(change, ModelLockState::Changed) {
                         "re-locked declared model"
                     } else {
@@ -1076,6 +1078,7 @@ pub(crate) async fn model_sync(
             }
         }
         if let Some(error) = first_error {
+            render_views(pending_views)?;
             return Err(error);
         }
     }
@@ -1107,7 +1110,7 @@ pub(crate) async fn model_sync(
                 }
             }
             emitter.emit(
-                &crate::model_output::ModelSyncEvent::new("model", "unchanged", false)
+                &crate::model_output::ModelSyncEvent::new("model", "unchanged", dry_run)
                     .model(name)
                     .action("verify")
                     .revision(&entry.revision),
@@ -1116,7 +1119,9 @@ pub(crate) async fn model_sync(
             // Views are part of what the lock declares; reconciling here makes
             // `model sync` also (re)build them on a machine that never ran
             // `model view add`.
-            crate::model_view::reconcile_declared_views(app, name, &entry.views, emitter.jsonl())?;
+            if !dry_run {
+                pending_views.push((name.clone(), entry.views.clone()));
+            }
             continue;
         }
         pending_downloads.insert(name.clone());
@@ -1221,7 +1226,7 @@ pub(crate) async fn model_sync(
                     registry.put_project(refs)?;
                 }
             }
-            crate::model_view::reconcile_declared_views(app, &name, &entry.views, emitter.jsonl())?;
+            pending_views.push((name.clone(), entry.views.clone()));
             emitter.emit(
                 &crate::model_output::ModelSyncEvent::new("model", "completed", false)
                     .model(&name)
@@ -1239,6 +1244,7 @@ pub(crate) async fn model_sync(
             restored += 1;
         }
         if let Some(error) = first_error {
+            render_views(pending_views)?;
             return Err(error);
         }
     }
@@ -1268,12 +1274,14 @@ pub(crate) async fn model_sync(
     }
 
     let mut pruned = 0;
+    let mut retained = 0;
     if prune && target.is_none() {
         let refs = refs.as_mut().expect("prune loads project model references");
         let registered = registry.load_all()?;
         if first_registration {
             emitter.emit(
                 &crate::model_output::ModelSyncEvent::new("prune", "unchanged", dry_run)
+                    .project(&refs.root)
                     .reason("no prior snapshot registrations for this project"),
                 || {
                     println!(
@@ -1283,17 +1291,33 @@ pub(crate) async fn model_sync(
                 },
             )?;
         }
-        for entry in plan_prune(store, refs, &registered, &pending_downloads)? {
+        // View reconciliation may move an existing symlink. Plan against the
+        // same pre-reconciliation view state that dry-run reads.
+        let plan = plan_prune(store, refs, &registered, &pending_downloads)?;
+        if !dry_run {
+            render_views(std::mem::take(&mut pending_views))?;
+        }
+        for entry in plan {
             let status = match &entry.action {
-                PruneAction::Skip { reason, .. } => {
+                PruneAction::Skip { reason, owner } => {
+                    let project = owner.as_deref().unwrap_or(&refs.root);
                     emitter.emit(
                         &crate::model_output::ModelSyncEvent::new("model", "skipped", dry_run)
                             .model(&entry.name)
                             .action("remove")
                             .path(&entry.path)
+                            .project(project)
+                            .snapshot(&entry.snapshot)
                             .reason(reason),
-                        || println!("kept {}: {reason}", entry.path.display()),
+                        || {
+                            println!(
+                                "kept {} for {}: {reason}",
+                                entry.path.display(),
+                                project.display()
+                            )
+                        },
                     )?;
+                    retained += 1;
                     continue;
                 }
                 _ if dry_run => "planned",
@@ -1316,17 +1340,21 @@ pub(crate) async fn model_sync(
                     .model(&entry.name)
                     .action("remove")
                     .path(&entry.path)
+                    .project(&refs.root)
+                    .snapshot(&entry.snapshot)
                     .reason("no longer referenced by this project"),
                 || {
                     println!(
-                        "{verb} {} (no longer referenced by this project)",
-                        entry.path.display()
+                        "{verb} {} from {} (no longer referenced by this project)",
+                        entry.path.display(),
+                        refs.root.display()
                     )
                 },
             )?;
             pruned += 1;
         }
     }
+    render_views(pending_views)?;
     drop(guard);
     if pruned > 0 && !dry_run {
         let models = app.ctx.dirs.models();
@@ -1340,16 +1368,21 @@ pub(crate) async fn model_sync(
         )?;
     }
 
-    emitter.emit(
-        &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
-            .action("sync")
-            .changed(restored),
-        || {
-            if restored == 0 && !dry_run {
-                println!("all declared models are present");
-            }
-        },
-    )?;
+    let mut summary = crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
+        .action("sync")
+        .changed(restored);
+    if prune {
+        summary = summary.prune_counts(pruned, retained);
+    }
+    emitter.emit(&summary, || {
+        if prune {
+            let verb = if dry_run { "would remove" } else { "removed" };
+            println!("{verb} {pruned} snapshot(s); kept {retained} candidate(s)");
+        }
+        if restored == 0 && !dry_run {
+            println!("all declared models are present");
+        }
+    })?;
     Ok(())
 }
 
