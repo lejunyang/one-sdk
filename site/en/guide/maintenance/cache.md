@@ -86,8 +86,8 @@ osdk model remove NAME
 `uninstall`, `cache clean`, and non-dry-run `prune` require confirmation. An
 interactive terminal displays a prompt; non-interactive use must pass `--yes`,
 set `OSDK_YES=true`, or configure `settings.yes=true`, otherwise it fails.
-`--quiet` hides progress but never grants consent. `model remove` currently asks
-for no confirmation.
+`--quiet` hides progress but never grants consent. `model remove` reports projects that still reference the name,
+then deletes snapshots by name without prompting.
 For an osdk-owned dynamic tool, uninstall derives the complete configured
 identity and removes only its fingerprinted root; another identity with the same
 backend and version remains installed.

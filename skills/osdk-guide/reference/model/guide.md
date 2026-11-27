@@ -6,10 +6,10 @@
 | --- | --- |
 | `use <NAME> <REFERENCE>` | 受管写入项目声明；支持 `--endpoint`、`--include/--exclude`、`--variant`、`--kind/--family/--derived-from`、`--view/--profile/--map`；`--sync` 立即物化 |
 | `import <NAME> <PATH>` | 导入本地文件/目录为 CAS 不可变快照；支持语义元数据、`--target-path`、`--view comfyui` 与 `--json`，不写声明或 lock |
-| `unuse <NAME>` | 移除声明、lock 和视图，默认删除快照；`--keep-snapshot` 保留字节 |
+| `unuse <NAME>` | 撤销本项目的声明、lock 和引用；清理本项目无人继续引用的快照；保留并报告其他项目仍在用的快照；`--keep-snapshot` 保留字节 |
 | `sync [NAME]` | 同步单个或全部模型；`--dry-run` 预览；全项目模式下用 `--prune` 清理本项目此前同步、当前锁不再引用的快照；`--jsonl` 输出逐行 schema 1 事件 |
 | `list/show/path/verify` | 检查本地快照；查询命令支持 `--json`；`path --stable` 输出稳定 current 路径 |
-| `remove <NAME>` | 仅删除本地快照和视图，保留声明与 lock |
+| `remove <NAME>` | 报告仍引用该名称的项目，再删除同名全部快照和视图；保留项目声明、lock 和引用登记 |
 
 `sync --prune` 保留其他项目已登记的快照、本地导入、旧版未登记的快照和视图仍在使用的快照。需拉取或还原的名称留到下次清理。
 用 `sync --prune --dry-run --jsonl` 只读预演，删除事件带 `project`、`snapshot`、`path`。

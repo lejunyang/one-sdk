@@ -47,7 +47,7 @@ impl ProjectModelRefs {
         if self.models.get(name) == Some(&keys) {
             return false;
         }
-        self.retire(name);
+        self.retire_model(name);
         if let Some(retired) = self.retired.get_mut(name) {
             retired.remove(snapshot);
             if retired.is_empty() {
@@ -58,13 +58,56 @@ impl ProjectModelRefs {
         true
     }
 
-    fn retire(&mut self, name: &str) {
+    pub fn retire_model(&mut self, name: &str) {
         if let Some(keys) = self.models.remove(name) {
             self.retired
                 .entry(name.to_owned())
                 .or_default()
                 .extend(keys);
         }
+    }
+
+    /// Adopt a snapshot matching the lock during an explicit unuse of legacy data.
+    pub fn retire_locked_snapshot(&mut self, name: &str, snapshot: &str) {
+        if valid_snapshot_key(snapshot) {
+            self.retired
+                .entry(name.to_owned())
+                .or_default()
+                .insert(snapshot.to_owned());
+        }
+    }
+
+    pub fn forget_model(&mut self, name: &str) -> bool {
+        let active = self.models.remove(name).is_some();
+        self.retired.remove(name).is_some() || active
+    }
+
+    pub fn owns_retired_snapshot(&self, name: &str, snapshot: &str) -> bool {
+        self.retired
+            .get(name)
+            .is_some_and(|keys| keys.contains(snapshot))
+    }
+
+    /// An explicit keep releases eligible keys from cleanup history, including
+    /// history left by other projects that previously shared those snapshots.
+    pub fn forget_kept_snapshots(&mut self, name: &str, kept: &Self) -> bool {
+        let Some(keys) = kept.retired.get(name) else {
+            return false;
+        };
+        let mut changed = false;
+        self.retired.retain(|other_name, retired| {
+            if same_model_name(name, other_name) {
+                let before = retired.len();
+                retired.retain(|key| !keys.contains(key));
+                changed |= retired.len() != before;
+            }
+            !retired.is_empty()
+        });
+        changed
+    }
+
+    pub fn references_model(&self, name: &str) -> bool {
+        self.models.keys().any(|other| same_model_name(name, other))
     }
 
     pub fn retire_unlocked(&mut self, locked: &BTreeSet<&str>, target: Option<&str>) -> bool {
@@ -76,7 +119,7 @@ impl ProjectModelRefs {
             .cloned()
             .collect();
         for name in &names {
-            self.retire(name);
+            self.retire_model(name);
         }
         !names.is_empty()
     }
@@ -220,6 +263,21 @@ pub struct PruneEntry {
     pub action: PruneAction,
 }
 
+impl PruneEntry {
+    pub fn remove(&self, store: &ModelStore) -> Result<bool> {
+        match self.action {
+            PruneAction::RemoveSnapshot => store.remove_snapshot(&self.name, &self.snapshot),
+            PruneAction::RemoveModel => store.remove(&self.name),
+            PruneAction::Skip { .. } => Ok(false),
+        }
+    }
+}
+
+pub enum PruneScope<'a> {
+    Sync(&'a BTreeSet<String>),
+    Unuse { name: &'a str, detach_views: bool },
+}
+
 // Shared caches can live on case-insensitive filesystems. Err on the side of
 // retaining data for aliases of the same on-disk name.
 pub(crate) fn same_model_name(left: &str, right: &str) -> bool {
@@ -236,7 +294,7 @@ pub fn plan_prune(
     store: &ModelStore,
     project: &ProjectModelRefs,
     registered: &[ProjectModelRefs],
-    pending_downloads: &BTreeSet<String>,
+    scope: PruneScope<'_>,
 ) -> Result<Vec<PruneEntry>> {
     if project.retired.is_empty() {
         return Ok(Vec::new());
@@ -247,6 +305,11 @@ pub fn plan_prune(
         .chain(registered.iter().filter(|other| other.root != project.root));
     let mut plan = Vec::new();
     for (name, keys) in &project.retired {
+        if matches!(scope, PruneScope::Unuse { name: target, .. } if target != name) {
+            continue;
+        }
+        let pending_sync = matches!(scope, PruneScope::Sync(downloads)
+            if downloads.iter().any(|pending| same_model_name(pending, name)));
         let snapshots = store.snapshots(name)?;
         let current = store.current_snapshot(name)?;
         let stable = store.model_root(name).join(super::CURRENT_LINK);
@@ -275,11 +338,17 @@ pub fn plan_prune(
                 })
             });
             let action = match (entry.manifest, owner) {
-                (Err(error), _) => PruneAction::skip(format!("unreadable snapshot manifest: {error}")),
-                (Ok(manifest), _) if manifest.schema != 1 || !same_model_name(&manifest.name, name) =>
-                    PruneAction::skip("invalid snapshot manifest identity"),
-                (Ok(manifest), _) if manifest.provider == ProviderId::Local =>
-                    PruneAction::skip("local import"),
+                (Err(error), _) => {
+                    PruneAction::skip(format!("unreadable snapshot manifest: {error}"))
+                }
+                (Ok(manifest), _)
+                    if manifest.schema != 1 || !same_model_name(&manifest.name, name) =>
+                {
+                    PruneAction::skip("invalid snapshot manifest identity")
+                }
+                (Ok(manifest), _) if manifest.provider == ProviderId::Local => {
+                    PruneAction::skip("local import")
+                }
                 (Ok(_), Some(owner)) => {
                     let root = &owner.root;
                     PruneAction::Skip {
@@ -287,16 +356,14 @@ pub fn plan_prune(
                         owner: Some(root.clone()),
                     }
                 }
-                (Ok(_), _) if pending_downloads.contains(name) =>
-                    PruneAction::skip("sync changes this model; run prune again after sync"),
-                (Ok(_), _) if is_current && has_view =>
-                    PruneAction::skip(format!("still in a model view; use `osdk model view remove` or `osdk model unuse {name}`")),
+                (Ok(_), _) if pending_sync => {
+                    PruneAction::skip("sync changes this model; run prune again after sync")
+                }
                 (Ok(_), _) => {
-                    let path = dunce::canonicalize(&entry.path).map_err(|error| Error::io(&entry.path, error))?;
+                    let path = dunce::canonicalize(&entry.path)
+                        .map_err(|error| Error::io(&entry.path, error))?;
                     if !is_current && stable_target.as_ref() == Some(&path) {
                         PruneAction::skip("still used by the stable current link")
-                    } else if !is_current && has_view && views.links_into_snapshot(&state, name, &path)? {
-                        PruneAction::skip("still linked from a model view; rebuild or remove that view")
                     } else {
                         PruneAction::RemoveSnapshot
                     }
@@ -309,10 +376,35 @@ pub fn plan_prune(
                 action,
             });
         }
-        let remove_tree = candidates.len() == snapshot_count
-            && candidates
-                .iter()
-                .all(|entry| matches!(entry.action, PruneAction::RemoveSnapshot));
+        let can_detach_views = matches!(
+            scope,
+            PruneScope::Unuse {
+                detach_views: true,
+                ..
+            }
+        ) && current.as_ref().is_some_and(|key| keys.contains(key))
+            && can_remove_tree(&candidates, snapshot_count);
+        if has_view && !can_detach_views {
+            for entry in &mut candidates {
+                if !matches!(entry.action, PruneAction::RemoveSnapshot) {
+                    continue;
+                }
+                if current.as_ref() == Some(&entry.snapshot) {
+                    entry.action = PruneAction::skip(format!(
+                        "still in a model view; use `osdk model view remove` or `osdk model unuse {name}`"
+                    ));
+                } else {
+                    let path = dunce::canonicalize(&entry.path)
+                        .map_err(|error| Error::io(&entry.path, error))?;
+                    if views.links_into_snapshot(&state, name, &path)? {
+                        entry.action = PruneAction::skip(
+                            "still linked from a model view; rebuild or remove that view",
+                        );
+                    }
+                }
+            }
+        }
+        let remove_tree = can_remove_tree(&candidates, snapshot_count);
         if let Some(index) = candidates
             .iter()
             .position(|entry| current.as_ref() == Some(&entry.snapshot))
@@ -330,6 +422,13 @@ pub fn plan_prune(
         plan.extend(candidates);
     }
     Ok(plan)
+}
+
+fn can_remove_tree(candidates: &[PruneEntry], snapshot_count: usize) -> bool {
+    candidates.len() == snapshot_count
+        && candidates
+            .iter()
+            .all(|entry| matches!(entry.action, PruneAction::RemoveSnapshot))
 }
 
 #[cfg(test)]

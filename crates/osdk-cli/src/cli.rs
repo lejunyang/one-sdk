@@ -973,7 +973,7 @@ pub enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Remove project intent, lock state, views, and normally the local snapshot.
+    /// Remove this project's model declaration and references, and clean up unused snapshots.
     Unuse {
         /// Local logical name to stop declaring.
         name: String,
@@ -1048,7 +1048,7 @@ pub enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Remove local snapshots while keeping project declaration and lock state.
+    /// Delete all local snapshots by name and report projects still referencing them.
     Remove { name: String },
     /// Manage provider environment exported by shell activation.
     Env {

@@ -82,6 +82,6 @@ osdk model remove NAME
 
 `uninstall`、`cache clean` 和非演练 `prune` 需要确认。交互终端显示提示；非交互
 环境必须使用 `--yes`、`OSDK_YES=true` 或 `settings.yes=true`，否则失败。
-`--quiet` 只关闭进度，不代表同意。`model remove` 当前不要求确认。
+`--quiet` 只关闭进度，不代表同意。`model remove` 会先报告仍引用该名称的项目，然后直接删除同名快照。
 对 osdk 自有动态工具，uninstall 会派生完整配置身份，只删除对应指纹化根；相同 backend 和
 version 的其他身份仍然保留。

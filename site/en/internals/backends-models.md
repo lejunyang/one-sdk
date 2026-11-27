@@ -177,6 +177,13 @@ reuse. A single-name sync updates only that name. If a locked model fails to
 restore, its prior registration remains. Superseded keys are tracked separately
 from active references so a later prune can still find them.
 
+`model unuse` releases the selected project's registration for the name.
+For legacy data, an explicit unuse can also match materialized snapshots
+against the lock's identity and file list. Default cleanup checks other
+projects' references. `--keep-snapshot` forgets the name and keeps the bytes.
+Explicit `model remove` reports registrations before deletion and retains them
+for subsequent synchronization.
+
 The machine protocol is centralized in [`model_output.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/model_output.rs) and is independent of snapshot, lock, and view-state disk schemas. `import --json`, `list/show/path/verify`, and read-only view commands emit one schema-1 JSON document, while `sync --jsonl` uses one emitter for line-delimited events; human mode keeps its existing messages. Every machine stdout write passes through the same serializer. View reconciliation still runs in JSONL mode but suppresses its human report; the top level continues to write errors to stderr and exit non-zero. Absolute paths in the protocol are machine locations and retain native separators, while manifest-relative paths remain `/`-normalized cross-platform data.
 
 ## Declarative `[models]`, views, and trust classification

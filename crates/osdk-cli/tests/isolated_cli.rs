@@ -1644,6 +1644,80 @@ fn model_fixture_command(root: &Path, project: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn model_unuse_preserves_shared_references_and_remove_reports_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let a = root.join("项目 A");
+    let b = root.join("项目 B");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    std::fs::write(a.join("osdk.toml"), "[tools]\n").unwrap();
+    model_fixture_command(root, &b, &["project", "add"]);
+    let b_root = dunce::canonicalize(&b).unwrap();
+    let b_binding = osdk_core::project::binding_dir_for_root(&root.join("config"), &b_root);
+    let b_lock = b_binding.join("osdk.lock");
+    let old = publish_model_fixture(root, "shared", "old.safetensors");
+    write_model_fixture_lock(&a, &[&old]);
+    model_fixture_command(root, &a, &["--offline", "model", "sync"]);
+    let shared = publish_model_fixture(root, "shared", "shared.safetensors");
+    write_model_fixture_lock(&a, &[&shared]);
+    write_model_fixture_lock(&b_binding, &[&shared]);
+    let lock_bytes = std::fs::read(&b_lock).unwrap();
+    for project in [&a, &b] {
+        model_fixture_command(root, project, &["--offline", "model", "sync"]);
+    }
+    model_fixture_command(root, &b, &["model", "view", "add", "comfyui", "shared"]);
+    let view = root.join("data/views/comfyui/default/loras/shared.safetensors");
+    let unuse = model_fixture_command(root, &a, &["model", "unuse", "shared"]);
+    assert!(String::from_utf8_lossy(&unuse.stdout).contains(&b_root.display().to_string()));
+    assert!(!old.path.exists());
+    assert!(shared.path.is_dir());
+    assert_eq!(std::fs::read(&view).unwrap(), b"shared/shared.safetensors");
+    assert_eq!(std::fs::read(&b_lock).unwrap(), lock_bytes);
+    assert!(!std::fs::read_to_string(a.join("osdk.lock"))
+        .unwrap()
+        .contains("[models.shared]"));
+    model_fixture_command(root, &b, &["model", "verify", "shared"]);
+
+    let remove = model_fixture_command(root, &a, &["model", "remove", "shared"]);
+    assert!(String::from_utf8_lossy(&remove.stderr).contains(&b_root.display().to_string()));
+    assert!(!shared.path.exists());
+    assert!(!view.exists());
+    assert_eq!(std::fs::read(&b_lock).unwrap(), lock_bytes);
+    let b_id = osdk_core::project::root_id(&b_root);
+    let b_refs = root.join("data/model-refs").join(format!("{b_id}.json"));
+    let refs: serde_json::Value = serde_json::from_slice(&std::fs::read(&b_refs).unwrap()).unwrap();
+    assert_eq!(refs["models"]["shared"][0], shared.snapshot_key());
+
+    let kept = publish_model_fixture(root, "kept", "kept.safetensors");
+    model_fixture_command(root, &b, &["model", "use", "kept", "hf:fixtures/kept@main"]);
+    let b_config = b_binding.join("osdk.toml");
+    assert!(std::fs::read_to_string(&b_config)
+        .unwrap()
+        .contains("[models.kept]"));
+    assert!(!b.join("osdk.toml").exists());
+    write_model_fixture_lock(&b_binding, &[&kept]);
+    write_model_fixture_lock(&a, &[&kept]);
+    model_fixture_command(root, &a, &["--offline", "model", "sync"]);
+    write_model_fixture_lock(&a, &[]);
+    model_fixture_command(root, &a, &["--offline", "model", "sync"]);
+    model_fixture_command(root, &b, &["--offline", "model", "sync"]);
+    model_fixture_command(root, &b, &["model", "unuse", "kept", "--keep-snapshot"]);
+    assert!(!std::fs::read_to_string(&b_lock)
+        .unwrap()
+        .contains("[models.kept]"));
+    assert!(!std::fs::read_to_string(&b_config)
+        .unwrap()
+        .contains("[models.kept]"));
+    model_fixture_command(root, &b, &["--offline", "model", "sync", "--prune"]);
+    model_fixture_command(root, &a, &["--offline", "model", "sync", "--prune"]);
+    assert!(kept.path.is_dir());
+    let refs: serde_json::Value = serde_json::from_slice(&std::fs::read(&b_refs).unwrap()).unwrap();
+    assert!(refs["models"].get("kept").is_none());
+    assert!(refs["retired"].get("kept").is_none());
+}
+
+#[test]
 fn model_sync_prune_preserves_other_projects_and_prunes_exact_retired_snapshots() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

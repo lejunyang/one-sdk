@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::cli::ModelViewCommand;
-use osdk_core::model::refs::{plan_prune, ModelRefs, ProjectModelRefs, PruneAction};
+use osdk_core::model::refs::{plan_prune, ModelRefs, ProjectModelRefs, PruneAction, PruneScope};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -422,7 +422,10 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
                 views,
                 endpoint,
             };
-            let path = crate::config_edit::set_project_model(&name, &declaration)?;
+            let cwd = std::env::current_dir()?;
+            let path = model_config_path(app, &cwd);
+            crate::config_edit::set_project_model(&path, &name, &declaration)?;
+            app.ctx.config.project_config_path = Some(path.clone());
             // The file this command just wrote is itself a reason to require
             // trust (the source/endpoint keys redirect where bytes come from),
             // so re-pin it the way `osdk use` does: otherwise the next command
@@ -520,41 +523,7 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             name,
             keep_snapshot,
         } => {
-            osdk_core::model::validate_model_name(&name)?;
-            let (config_path, declaration_removed) =
-                crate::config_edit::remove_project_model(&name)?;
-            let cwd = std::env::current_dir()?;
-            let lock_path = project_lock_path(app, &cwd);
-            let lock_removed = crate::lockfile::remove_model(&lock_path, &name)?;
-            let views_removed = crate::model_view::remove_model_from_all_views(app, &name)?;
-            let snapshot_removed = if keep_snapshot {
-                false
-            } else {
-                store.remove(&name)?
-            };
-            if snapshot_removed {
-                let models = app.ctx.dirs.models();
-                let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
-                println!(
-                    "removed local snapshot {name}; pruned {objects} object(s), {} freed",
-                    human_bytes(bytes)
-                );
-            }
-            if declaration_removed {
-                println!(
-                    "removed model declaration {name} from {}",
-                    config_path.display()
-                );
-            }
-            if lock_removed {
-                println!("removed model lock {name} from {}", lock_path.display());
-            }
-            if views_removed {
-                println!("removed {name} from model views");
-            }
-            if !declaration_removed && !lock_removed && !views_removed && !snapshot_removed {
-                println!("model {name} was not declared, locked, viewed, or materialized");
-            }
+            model_unuse(app, &store, &name, keep_snapshot)?;
         }
         ModelCommand::List { json } => {
             let installed = store.list()?;
@@ -657,8 +626,22 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             jsonl,
         } => model_sync(app, &store, name.as_deref(), prune, dry_run, jsonl).await?,
         ModelCommand::Remove { name } => {
+            osdk_core::model::validate_model_name(&name)?;
+            let registry = ModelRefs::new(&app.ctx.dirs);
+            let guard = registry.lock()?;
+            for project in registry
+                .load_all()?
+                .iter()
+                .filter(|project| project.references_model(&name))
+            {
+                eprintln!(
+                    "warning: model {name} is registered by project {}",
+                    project.root.display()
+                );
+            }
             let views_removed = crate::model_view::remove_model_from_all_views(app, &name)?;
             let removed = store.remove(&name)?;
+            drop(guard);
             if removed {
                 let models = app.ctx.dirs.models();
                 let (pruned, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
@@ -805,6 +788,138 @@ fn model_project_root(app: &App, lock: &Path) -> Result<PathBuf> {
     dunce::canonicalize(directory).with_context(|| format!("resolving {}", directory.display()))
 }
 
+fn model_config_path(app: &App, cwd: &Path) -> PathBuf {
+    app.ctx
+        .config
+        .project_config_path
+        .clone()
+        .unwrap_or_else(|| cwd.join("osdk.toml"))
+}
+
+fn model_unuse(
+    app: &App,
+    store: &osdk_core::model::ModelStore,
+    name: &str,
+    keep_snapshot: bool,
+) -> Result<()> {
+    osdk_core::model::validate_model_name(name)?;
+    let registry = ModelRefs::new(&app.ctx.dirs);
+    let guard = registry.lock()?;
+    let cwd = std::env::current_dir()?;
+    let config_path = model_config_path(app, &cwd);
+    let lock_path = project_lock_path(app, &cwd);
+    let root = model_project_root(app, &lock_path)?;
+    let mut refs = registry
+        .load(&root)?
+        .unwrap_or_else(|| ProjectModelRefs::new(root, lock_path.clone()));
+    refs.lock = lock_path.clone();
+    let mut registered = registry.load_all()?;
+    let other_projects: Vec<_> = registered
+        .iter()
+        .filter(|project| project.root != refs.root && project.references_model(name))
+        .collect();
+    refs.retire_model(name);
+    // A pre-registry lock can still identify its materialized bytes for this
+    // explicit command. An unrelated snapshot with the same name is not owned.
+    if let Some((_, entry)) = crate::lockfile::locked_models(&lock_path)?
+        .into_iter()
+        .find(|(locked_name, _)| locked_name == name)
+    {
+        for snapshot in store.snapshots(name)? {
+            if snapshot
+                .manifest
+                .as_ref()
+                .is_ok_and(|manifest| verify_restored_against_lock(name, &entry, manifest).is_ok())
+            {
+                refs.retire_locked_snapshot(name, &snapshot.snapshot);
+            }
+        }
+    }
+    let plan = if keep_snapshot {
+        Vec::new()
+    } else {
+        plan_prune(
+            store,
+            &refs,
+            &registered,
+            PruneScope::Unuse {
+                name,
+                detach_views: other_projects.is_empty(),
+            },
+        )?
+    };
+    let detach_views = other_projects.is_empty()
+        && if keep_snapshot {
+            store
+                .current_snapshot(name)?
+                .is_some_and(|key| refs.owns_retired_snapshot(name, &key))
+        } else {
+            plan.iter()
+                .any(|entry| matches!(entry.action, PruneAction::RemoveModel))
+        };
+    let declaration_removed = crate::config_edit::remove_project_model(&config_path, name)?;
+    let lock_removed = crate::lockfile::remove_model(&lock_path, name)?;
+    if !plan.is_empty() {
+        registry.put_project(&mut refs)?;
+    }
+    for project in &other_projects {
+        println!(
+            "keeping snapshots of {name} referenced by project {}",
+            project.root.display()
+        );
+    }
+    let has_other_projects = !other_projects.is_empty();
+    let views_removed = detach_views && crate::model_view::remove_model_from_all_views(app, name)?;
+    let mut snapshots_removed = 0;
+    for entry in plan {
+        match entry.action {
+            PruneAction::Skip {
+                ref reason,
+                owner: None,
+            } => {
+                println!("kept {}: {reason}", entry.path.display());
+            }
+            _ => snapshots_removed += usize::from(entry.remove(store)?),
+        }
+    }
+    if keep_snapshot {
+        for project in &mut registered {
+            if project.root != refs.root && project.forget_kept_snapshots(name, &refs) {
+                registry.put_project(project)?;
+            }
+        }
+    }
+    let references_removed = refs.forget_model(name);
+    if references_removed {
+        registry.put_project(&mut refs)?;
+    }
+    drop(guard);
+    if snapshots_removed > 0 {
+        let models = app.ctx.dirs.models();
+        let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+        println!(
+            "removed {snapshots_removed} snapshot(s) of {name}; pruned {objects} object(s), {} freed",
+            human_bytes(bytes)
+        );
+    }
+    if declaration_removed {
+        println!(
+            "removed model declaration {name} from {}",
+            config_path.display()
+        );
+    }
+    if lock_removed {
+        println!("removed model lock {name} from {}", lock_path.display());
+    }
+    if views_removed {
+        println!("removed {name} from model views");
+    }
+    if !declaration_removed && !lock_removed && !references_removed && !has_other_projects {
+        println!("model {name} has no references in this project");
+    }
+    Ok(())
+}
+
 /// Whether a `[models.<name>]` declaration is already faithfully described by the
 /// lock, absent from it, or described with a different identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -895,7 +1010,12 @@ pub(crate) async fn model_sync(
         let existing = registry.load(&root)?;
         first_registration = existing.is_none();
         let mut refs = existing.unwrap_or_else(|| ProjectModelRefs::new(root, path.clone()));
-        refs.lock = path.clone();
+        if refs.lock != path {
+            refs.lock = path.clone();
+            if !dry_run {
+                registry.put_project(&mut refs)?;
+            }
+        }
         Some(refs)
     };
     let mut locked = crate::lockfile::locked_models(&path)?;
@@ -1293,7 +1413,12 @@ pub(crate) async fn model_sync(
         }
         // View reconciliation may move an existing symlink. Plan against the
         // same pre-reconciliation view state that dry-run reads.
-        let plan = plan_prune(store, refs, &registered, &pending_downloads)?;
+        let plan = plan_prune(
+            store,
+            refs,
+            &registered,
+            PruneScope::Sync(&pending_downloads),
+        )?;
         if !dry_run {
             render_views(std::mem::take(&mut pending_views))?;
         }
@@ -1321,12 +1446,10 @@ pub(crate) async fn model_sync(
                     continue;
                 }
                 _ if dry_run => "planned",
-                PruneAction::RemoveSnapshot => {
-                    store.remove_snapshot(&entry.name, &entry.snapshot)?;
-                    "completed"
-                }
-                PruneAction::RemoveModel => {
-                    store.remove(&entry.name)?;
+                _ => {
+                    if !entry.remove(store)? {
+                        continue;
+                    }
                     "completed"
                 }
             };

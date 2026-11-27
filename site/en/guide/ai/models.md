@@ -29,8 +29,9 @@ osdk model view doctor <comfyui|hf-cache> [--profile P] [--json]
 
 `use` edits the project declaration and does not download by default; `--sync` materializes that
 model immediately. `sync NAME` limits work to one model; no argument handles the project.
-`unuse` removes declaration, lock, and views and normally deletes the snapshot; `--keep-snapshot`
-retains bytes. `remove` deletes only local bytes and views while retaining project intent and lock.
+`unuse` removes this project's model requirement and preserves snapshots still used by
+other projects. `--keep-snapshot` retains local bytes. `remove` deletes snapshots and
+views by name while retaining project declarations and locks.
 
 ## Machine-readable output
 
@@ -43,7 +44,8 @@ separators; manifest-relative paths remain `/`-normalized.
 
 `model sync --jsonl` writes one independent `schema_version: 1` event per line. Every event has
 `event`, `status`, and `dry_run`; events add `model`, `action`, `revision`, `path`, `reason`, and
-`changed` when applicable. `--dry-run --jsonl` remains machine-only as well.
+`changed` when applicable. Prune events can include `project` and `snapshot`; the summary can
+include `removed` and `skipped`. `--dry-run --jsonl` remains machine-only as well.
 
 In machine mode stdout contains only JSON/JSONL. Warnings and errors go to stderr and failures keep
 a non-zero exit code. The CLI protocol schema is independent of the on-disk schemas for
@@ -221,10 +223,17 @@ the planned count. Preview is read-only.
 
 ### `remove` and `unuse`
 
-`osdk model remove <name>` removes only the local snapshot and consumer views while retaining the
-project declaration and lock; `model sync <name>` restores it. Use `model unuse <name>` to remove
-project intent, the lock entry, and views as well. It normally deletes the snapshot;
-`--keep-snapshot` retains the local bytes.
+`osdk model unuse <name>` removes the declaration, lock entry, and registration
+from the current project. It cleans up this project's snapshots when they have
+no remaining references. Other projects' snapshots and shared views are kept,
+and their project paths are reported. `--keep-snapshot` releases the registration
+and keeps the bytes for later manual removal.
+
+`osdk model remove <name>` reports projects still registered against the name,
+then deletes all local snapshots and views for that name. Use it to explicitly
+delete a local import or rematerialize a remote model. Project declarations,
+locks, and registrations are retained. Remote models can be restored with
+`model sync <name>`.
 ## Endpoints and credentials
 
 Resolution priority is:

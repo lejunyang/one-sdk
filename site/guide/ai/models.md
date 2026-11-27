@@ -27,8 +27,8 @@ osdk model view doctor <comfyui|hf-cache> [--profile P] [--json]
 ```
 
 `use` 受管写入项目声明，默认不下载；`--sync` 立即物化该模型。`sync NAME` 只处理一个
-模型，无参数时处理整个项目。`unuse` 撤销声明、lock 和视图并默认删除本地快照；
-`--keep-snapshot` 保留本地字节。`remove` 只删除本地快照和视图，保留项目声明与 lock。
+模型，无参数时处理整个项目。`unuse` 撤销本项目依赖，保留其他项目仍在用的快照。
+`--keep-snapshot` 保留本地字节。`remove` 按名称删除本机快照和视图，保留项目声明与 lock。
 
 ## 机器可读输出
 
@@ -40,7 +40,7 @@ revision、endpoint、variant、文件路径/大小/摘要、创建时间以及�
 
 `model sync --jsonl` 每行输出一个独立的 `schema_version: 1` 事件。固定字段为
 `event`、`status` 与 `dry_run`；事件按需增加 `model`、`action`、`revision`、`path`、
-`reason`、`changed`。`--dry-run --jsonl` 同样只输出事件，不混入人类文本。
+`reason`、`changed`。清理事件还可包含 `project`、`snapshot`，汇总可包含 `removed`、`skipped`。`--dry-run --jsonl` 同样只输出事件，不混入人类文本。
 
 机器模式中 stdout 只承载 JSON/JSONL；警告和错误写 stderr，失败保持非零退出码。CLI
 协议 schema 与 `.osdk-model.json`、`osdk.lock`、`.osdk-views.json` 的磁盘 schema 相互独立。
@@ -192,9 +192,13 @@ osdk model sync --prune         # 清理本项目已弃用的快照
 
 ### `remove` 与 `unuse`
 
-`osdk model remove <name>` 只删除本地快照和消费者视图，保留项目声明与 lock；之后
-`model sync <name>` 可恢复它。要彻底撤销项目依赖，使用 `model unuse <name>`：它会移除
-项目声明、lock、视图并默认删除快照，`--keep-snapshot` 可保留本机字节。
+`osdk model unuse <name>` 撤销当前项目的声明、lock 条目和引用登记。它清理本项目
+拥有且无人继续引用的快照。在其他项目仍引用同名模型时，保留共享快照和视图并报告项目路径。
+`--keep-snapshot` 解除引用并保留快照；要手动删除保留的快照，使用 `model remove`。
+
+`osdk model remove <name>` 先报告仍登记该模型的项目，再删除本机同名的全部快照和视图。
+适用于显式删除本地导入，或需要重新物化远程模型。项目声明、lock、引用登记均保留，
+远程模型可用 `model sync <name>` 恢复。
 ## Endpoint 与凭据
 
 解析优先级：

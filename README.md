@@ -851,8 +851,9 @@ Civitai's `civitai.com` and `civitai.red` front doors are both built-in official
 lock entries. `model sync --prune` preserves snapshots still used by other projects and local imports.
 `model import NAME PATH` snapshots a local file or directory into CAS without creating a
 project declaration or lock entry; local imports are machine-specific and must be re-imported from their
-original bytes. `model unuse NAME` removes project intent, lock state, views, and normally local bytes;
-`--keep-snapshot` retains bytes. `model remove NAME` removes only local bytes and views.
+original bytes. `model unuse NAME` removes this project's model requirement and cleans up its unused
+snapshots. `--keep-snapshot` retains the bytes. `model remove NAME` reports projects still using the
+model and deletes all local snapshots and views for the name.
 
 Guide: [Model snapshots](site/en/guide/ai/models.md)
 ## Scenario: install a skill for an AI coding agent
