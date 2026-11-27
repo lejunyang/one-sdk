@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
+use osdk_core::deps::workspace::{NativeLockOwner, NativeLockQuery, CARGO_LOCKFILE_ENV};
 use osdk_core::deps::{
     self, state, DepsProviderSchema, DetectedProject, InstallerChoice, ProviderConfig, RunPlan,
     ToolRole,
@@ -70,7 +71,7 @@ struct Resolved {
     declared_env: BTreeMap<String, String>,
     decision: state::Decision,
     unit: Option<deps::workspace::WorkspaceUnit>,
-    native_inputs: Vec<PathBuf>,
+    native_lock: Option<NativeLockOwner>,
     lock_path: PathBuf,
     /// Lockfiles of other installers inside the shared workspace's members,
     /// which the shared installation ignores. Shown under `--explain`.
@@ -261,11 +262,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         if let Some(version) = config.project_tools.get(&*project.provider) {
             choice.version = Some(version.clone());
         }
-        let mut native_inputs = Vec::new();
-        let mut lock_reason = None;
-        if let Some(schema) = schema.filter(|_| config.run.is_none()) {
+        let native_lock = if let Some(schema) = schema.filter(|_| config.run.is_none()) {
             let owner = deps::workspace::native_lock_owner(
                 &project,
+                &deps::effective_cwd(&project.root, config.dir.as_deref()),
                 &CargoLockProbe {
                     app,
                     schema,
@@ -285,17 +285,21 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     println!("    native lock: {reason}");
                 }
             }
-            project.native_lock = owner.lock;
-            native_inputs = owner.inputs;
-            lock_reason = owner.reason;
-        }
+            project.native_lock.clone_from(&owner.lock);
+            Some(owner)
+        } else {
+            None
+        };
         let mut plan = deps::plan(
             &project,
             &choice,
             &config,
             &resolved_tool_versions(app, &config),
         )?;
-        if let Some(reason) = lock_reason {
+        if let Some(reason) = native_lock
+            .as_ref()
+            .and_then(|owner| owner.reason.as_deref())
+        {
             plan.downgraded_reason =
                 Some(format!("{reason}; running `cargo fetch` without --locked"));
         }
@@ -391,7 +395,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 &config,
                 &plan,
                 unit.as_ref(),
-                &native_inputs,
+                native_lock.as_ref(),
             )?
         };
         let lock_path = external_lock
@@ -407,7 +411,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             declared_env,
             decision,
             unit,
-            native_inputs,
+            native_lock,
             lock_path,
             notes,
         });
@@ -519,7 +523,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 &item.config,
                 &item.plan,
                 item.unit.as_ref(),
-                &item.native_inputs,
+                item.native_lock.as_ref(),
             )?
             .is_fresh()
             && !system_policy
@@ -1024,7 +1028,7 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
         program_candidates: &[String],
         args: &[&str],
         cwd: &Path,
-    ) -> std::io::Result<Option<std::process::Output>> {
+    ) -> std::io::Result<Option<NativeLockQuery>> {
         (|| -> anyhow::Result<_> {
             let project_app;
             let app = if let Some(path) = self.config.project_config.as_deref() {
@@ -1051,19 +1055,49 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             let Some(program) = find_tool_program(required.id, program_candidates, &tools) else {
                 return Ok(None);
             };
-            if self.explain {
+            if self.explain && args[0] == "metadata" {
                 println!("    Cargo workspace query: {}", program.display());
             }
-            Ok(Some(
-                std::process::Command::new(program)
-                    .args(args)
-                    .current_dir(cwd)
-                    .env("PATH", tool_path(app, &tools)?)
-                    // Dependency config can contain executable environment
-                    // hooks. Only the actual fetch uses this project's env.
-                    .envs(child_env(&BTreeMap::new(), &tools))
-                    .output()?,
-            ))
+            let mut command = std::process::Command::new(program);
+            command
+                .args(args)
+                .current_dir(cwd)
+                .env("PATH", tool_path(app, &tools)?)
+                .envs(child_env(&BTreeMap::new(), &tools));
+            let matches_key = |key: &std::ffi::OsStr, name: &str| {
+                if cfg!(windows) {
+                    key.eq_ignore_ascii_case(std::ffi::OsStr::new(name))
+                } else {
+                    key == name
+                }
+            };
+            // Forward only the provider's Cargo configuration paths. Other
+            // overrides can select executable hooks and belong to the fetch.
+            for (key, value) in &self.config.env {
+                if ["CARGO_HOME", CARGO_LOCKFILE_ENV]
+                    .iter()
+                    .any(|name| matches_key(key.as_ref(), name))
+                {
+                    command.env(key, value);
+                }
+            }
+            let env_path = |name| {
+                command
+                    .get_envs()
+                    .find(|(key, _)| matches_key(key, name))
+                    .and_then(|(_, value)| value.map(PathBuf::from))
+                    .or_else(|| std::env::var_os(name).map(PathBuf::from))
+            };
+            let cargo_home = env_path("CARGO_HOME")
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| cwd.join(path))
+                .or_else(|| std::env::home_dir().map(|home| home.join(".cargo")));
+            let cargo_lockfile_override = env_path(CARGO_LOCKFILE_ENV);
+            Ok(Some(NativeLockQuery {
+                output: command.output()?,
+                cargo_home,
+                cargo_lockfile_override,
+            }))
         })()
         .map_err(std::io::Error::other)
     }
@@ -1291,7 +1325,7 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
         item.schema,
         &item.config,
         item.unit.as_ref(),
-        &item.native_inputs,
+        item.native_lock.as_ref(),
     );
     let existing: Vec<PathBuf> = sources
         .iter()
@@ -1498,9 +1532,14 @@ fn decide(
     config: &ProviderConfig,
     plan: &RunPlan,
     unit: Option<&deps::workspace::WorkspaceUnit>,
-    native_inputs: &[PathBuf],
+    native_lock: Option<&NativeLockOwner>,
 ) -> anyhow::Result<state::Decision> {
-    let sources = tracked_sources(schema, config, unit, native_inputs);
+    if plan.frozen && native_lock.is_some_and(|owner| !owner.inputs_complete) {
+        return Ok(state::Decision::Stale(
+            "Cargo cannot establish freshness from the tracked workspace inputs".into(),
+        ));
+    }
+    let sources = tracked_sources(schema, config, unit, native_lock);
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| project.root.join(source))
@@ -1529,12 +1568,16 @@ fn tracked_sources(
     schema: Option<&'static DepsProviderSchema>,
     config: &ProviderConfig,
     unit: Option<&deps::workspace::WorkspaceUnit>,
-    native_inputs: &[PathBuf],
+    native_lock: Option<&NativeLockOwner>,
 ) -> Vec<String> {
     let mut sources = effective_sources(schema, config);
-    if !sources.is_empty() {
+    if let Some(owner) = native_lock.filter(|_| !sources.is_empty()) {
+        if !owner.inputs.is_empty() && !config.sources_explicit && config.sources.is_empty() {
+            sources.retain(|source| source != "Cargo.lock");
+        }
         sources.extend(
-            native_inputs
+            owner
+                .inputs
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned()),
         );
@@ -1762,7 +1805,7 @@ mod tests {
                 plan,
                 decision: osdk_core::deps::state::Decision::Fresh,
                 unit: None,
-                native_inputs: Vec::new(),
+                native_lock: None,
                 lock_path: std::env::temp_dir().join("test-osdk.lock"),
                 notes: Vec::new(),
             }

@@ -502,9 +502,10 @@ provider 都匹配它的清单时，选 workspace 的安装器。这不会改变
 
 ## Cargo 工作区锁归属
 
-内置 Cargo 项目在规划阶段从选中的清单目录运行
+内置 Cargo 项目在规划阶段从拉取命令的工作目录运行
 `cargo metadata --no-deps --format-version 1 --offline`。查询直接使用已安装或已链接
-工具链里的 Cargo 和工具环境。provider 环境变量只在实际拉取时应用。
+工具链里的 Cargo。查询与拉取使用相同的 `CARGO_HOME` 和
+`CARGO_RESOLVER_LOCKFILE_PATH`，其余 provider 环境变量在实际拉取时应用。
 
 Cargo 返回工作区根和成员清单。osdk 按规范化路径确认成员资格，给确认的成员使用根锁。
 Cargo 确认项目自成工作区时，才使用项目目录的锁。
@@ -512,9 +513,12 @@ Cargo 确认项目自成工作区时，才使用项目目录的锁。
 查询失败时，冻结错误会说明探测失败。Cargo 不可用时，先安装或链接工具链再规划冻结拉取。
 非冻结调用仍可在准备好工具后退回不带 `--locked` 的拉取。
 
-根清单、根锁和各成员清单同时参与规划、安装锁内的复查和成功记录的新鲜度判定。
-Cargo 的 `sources = []` 关闭新鲜度判定。缓存命中时仍会查询工作区归属并跳过拉取。
-根锁过期由 Cargo 在 `fetch --locked` 时拒绝。
+osdk 按 Cargo 配置的优先级解析锁路径，包含工作目录的祖先配置、`CARGO_HOME`
+和引入的配置。Cargo 1.97 起允许用 `resolver.lockfile-path` 覆盖根锁。实际生效的锁、
+Cargo 配置、根清单和成员清单同时参与规划、安装锁内复查和成功记录的新鲜度判定。
+如果 metadata 给出的路径依赖超出成员清单覆盖范围，或 Cargo 配置使用了可能引入本地
+依赖的覆盖项，osdk 会执行 `fetch --locked`，由 Cargo 校验。
+Cargo 的 `sources = []` 关闭新鲜度判定。
 
 ## auto 前置：只判新鲜度，绝不深扫
 

@@ -340,6 +340,128 @@ fn cargo_requires_native_membership_even_with_a_local_lock() {
 }
 
 #[test]
+fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
+    let cargo = PathBuf::from(env!("CARGO"));
+    if cfg!(windows) && cargo.extension().is_none() {
+        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
+        return;
+    }
+    for source in ["provider environment", "included Cargo config"] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        fixture.link_rust();
+        let root = fixture.temp.path();
+        let lock = fixture.generate_lock();
+        let configured = root.join("alternate/Cargo.lock");
+        std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
+        std::fs::write(&configured, &lock).unwrap();
+        if source == "provider environment" {
+            let config = root.join("osdk.toml");
+            let mut text = std::fs::read_to_string(&config).unwrap();
+            text.push_str(
+                "[deps.cargo.env]\nCARGO_RESOLVER_LOCKFILE_PATH = '../../alternate/Cargo.lock'\n",
+            );
+            std::fs::write(config, text).unwrap();
+        } else {
+            write(root, ".cargo/config.toml", "include = ['resolver.toml']\n");
+            write(
+                root,
+                ".cargo/resolver.toml",
+                "[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+            );
+        }
+
+        let first = fixture.member(&[]);
+        assert!(first.status.success(), "{source}: {first:?}");
+        let unchanged = fixture.member(&[]);
+        assert!(unchanged.status.success(), "{source}: {unchanged:?}");
+        assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+        let stale = String::from_utf8(lock.clone())
+            .unwrap()
+            .replace("version = \"0.1.0\"", "version = \"0.9.0\"");
+        std::fs::write(&configured, &stale).unwrap();
+        let rejected = fixture.member(&[]);
+        assert!(!rejected.status.success(), "{source}: {rejected:?}");
+        assert!(String::from_utf8_lossy(&rejected.stdout).contains("cargo fetch --locked"));
+        assert_eq!(std::fs::read(&configured).unwrap(), stale.as_bytes());
+        std::fs::remove_file(&configured).unwrap();
+        for extra in [&[][..], &["--dry-run"][..]] {
+            let missing = fixture.member(extra);
+            assert!(!missing.status.success(), "{source}: {missing:?}");
+            let stderr = String::from_utf8_lossy(&missing.stderr);
+            assert!(
+                stderr.contains("alternate") && stderr.contains("Cargo.lock"),
+                "{stderr}"
+            );
+            assert!(!configured.exists());
+        }
+        fixture.assert_locks(Some(&lock));
+
+        std::fs::write(&configured, &lock).unwrap();
+        std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+        let preview = fixture.member(&["--dry-run", "--force"]);
+        assert!(preview.status.success(), "{source}: {preview:?}");
+        assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+        let actual = fixture.member(&["--force"]);
+        assert!(actual.status.success(), "{source}: {actual:?}");
+        assert_eq!(std::fs::read(configured).unwrap(), lock);
+        fixture.assert_locks(None);
+    }
+}
+
+#[test]
+fn cargo_workspace_frozen_rechecks_nonmember_path_dependencies() {
+    let cargo = PathBuf::from(env!("CARGO"));
+    if cfg!(windows) && cargo.extension().is_none() {
+        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
+        return;
+    }
+    let fixture = CargoWorkspace::new(cargo);
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = ['crates/demo', 'crates/other']\nexclude = ['vendor/helper']\nresolver = '3'\n",
+    );
+    write(
+        root,
+        "crates/demo/Cargo.toml",
+        "[package]\nname = 'demo'\nversion = '0.1.0'\nedition = '2024'\n[dependencies]\nhelper = { path = '../../vendor/helper' }\n",
+    );
+    write(root, "vendor/helper/src/lib.rs", "");
+    let helper = |version: &str| {
+        write(
+            root,
+            "vendor/helper/Cargo.toml",
+            &format!("[package]\nname = 'helper'\nversion = '{version}'\nedition = '2024'\n"),
+        );
+    };
+    helper("0.1.0");
+    let lock = fixture.generate_lock();
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    helper("0.2.0");
+
+    let native = fixture.native(&[
+        "fetch",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "crates/demo/Cargo.toml",
+    ]);
+    assert!(!native.status.success(), "{native:?}");
+    let actual = fixture.member(&[]);
+    assert!(!actual.status.success(), "{actual:?}");
+    assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    let stderr = String::from_utf8_lossy(&actual.stderr);
+    assert!(
+        stderr.contains("lock file") && stderr.contains("--locked"),
+        "{stderr}"
+    );
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
 fn removed_installer_is_rejected_in_root_project_and_inherited_configuration() {
     for config in [
         "[deps.npm]\ninstaller='npm'\n",

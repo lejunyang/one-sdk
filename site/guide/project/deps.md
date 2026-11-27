@@ -37,7 +37,8 @@ osdk deps --explain         # 附带说明每个新鲜度判定的理由
 之前，osdk 会先看声明的依赖是否还新鲜，过期才兑现。所以 clone 一个项目之后
 直接 `osdk run dev`，依赖已经就位。
 
-自动检查比对清单哈希，命中时跳过安装。osdk 会查询 Cargo 确定工作区归属，包括仍留有本地锁的成员。需要扫描已装文件时，显式运行 `osdk deps --verify`。
+自动检查比对清单哈希，命中时跳过安装。osdk 会查询 Cargo 确定工作区归属，
+包括仍留有本地锁的成员。需要扫描已装文件时，显式运行 `osdk deps --verify`。
 
 三种情况不会自动触发：
 
@@ -95,10 +96,12 @@ osdk deps //crates/demo:cargo --frozen --no-install-tools
 ```
 
 osdk 用已安装或已链接的 Cargo 确认成员归属，在成员目录运行
-`cargo fetch --locked`，沿用工作区根的 `Cargo.lock`。`--dry-run` 会展示同一计划。
-成员目录残留的本地锁不会参与锁归属。被排除的 crate 可以使用自己的锁，未列入工作区的
-crate 由 Cargo 拒绝。根锁缺失时，osdk 会拒绝冻结计划。
-根锁过期时，Cargo 会拒绝拉取并保留原锁。用 `--list --all --explain` 可查看探测到的根和锁。
+`cargo fetch --locked`。`--dry-run` 会展示同一计划。Cargo 默认使用工作区根的
+`Cargo.lock`，1.97 起可用 `resolver.lockfile-path` 或 `CARGO_RESOLVER_LOCKFILE_PATH`
+指定另一份锁。成员目录残留的本地锁不会参与归属。被排除的 crate 可以使用自己的锁，
+未列入工作区的 crate 由 Cargo 拒绝。实际生效的锁缺失时，osdk 会拒绝冻结计划。
+锁过期时，Cargo 会拒绝拉取并保留原锁。存在工作区外的路径依赖时，osdk 会运行
+`cargo fetch --locked` 交给 Cargo 校验。用 `--list --all --explain` 可查看根和锁。
 
 ::: tip go 的工具链被钉住
 `GOTOOLCHAIN` 默认是 `auto`——`go.mod` 要求更新的 Go 时，go 会**自己下载**另一个

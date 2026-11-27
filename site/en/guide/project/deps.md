@@ -102,13 +102,16 @@ and `[deps.cargo]`, you can run:
 osdk deps //crates/demo:cargo --frozen --no-install-tools
 ```
 
-osdk uses the installed or linked Cargo to check workspace membership and uses
-the workspace root's `Cargo.lock` for `cargo fetch --locked` in the member
-directory. The same plan appears with `--dry-run`. Cargo ignores a leftover lock in
-a member directory. An excluded crate can use its own lock, while Cargo rejects
-an unlisted crate. If the root lock is missing,
-osdk rejects the frozen plan. If it is stale, Cargo rejects the fetch and leaves
-the lock unchanged. Use `--list --all --explain` to see the detected root and lock.
+osdk uses the installed or linked Cargo to check workspace membership, then runs
+`cargo fetch --locked` in the member directory. The same plan appears with
+`--dry-run`. Cargo uses the root `Cargo.lock` by default. Cargo 1.97 and later can
+select another lock with `resolver.lockfile-path` or
+`CARGO_RESOLVER_LOCKFILE_PATH`. Cargo ignores a leftover lock in a member directory.
+An excluded crate can use its own lock, while Cargo rejects an unlisted crate.
+A missing effective lock rejects the frozen plan. Cargo rejects a stale lock and
+leaves it unchanged. For path dependencies outside the workspace, osdk runs
+`cargo fetch --locked` so Cargo can validate them. Use `--list --all --explain` to
+see the workspace root and effective lock.
 
 ::: tip go's toolchain is pinned
 `GOTOOLCHAIN` defaults to `auto`: when `go.mod` asks for a newer Go, go **downloads

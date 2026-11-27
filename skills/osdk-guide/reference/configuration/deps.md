@@ -60,8 +60,9 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 迁移：显式 `sources`/`outputs` 路径统一属于声明它的配置文件，根配置声明子项目时需要项目路径前缀（如 `sources = ["apps/api/package.json"]`）；内置默认路径仍属于识别的项目。`sources = []` 去掉默认输入，无法证明 freshness；pnpm 和 uv 的共享安装仍保留必需的成员与锁输入。自动准备工具会应用子项目工具选项和来源设置；共享 workspace 要求有效工具上下文一致。
 
 Cargo 成员可从根配置用 `[deps].roots` 单独声明，启用 `[deps.cargo]` 即可。
-已安装或已链接的 Cargo 决定成员归属。确认的成员使用工作区根的 `Cargo.lock`，
-在成员目录拉取，即使目录中还留有旧锁。根清单、根锁及各成员清单参与新鲜度判定。
-Cargo 的 `sources = []` 会关闭新鲜度判定。
+已安装或已链接的 Cargo 决定成员归属。确认的成员在成员目录拉取，默认使用工作区根锁，
+也支持 Cargo 1.97 起通过 `resolver.lockfile-path` 或 `CARGO_RESOLVER_LOCKFILE_PATH`
+指定的锁。新鲜度依据实际生效的锁、Cargo 配置、根清单及成员清单。
+工作区外的路径依赖会触发实际的冻结拉取。Cargo 的 `sources = []` 会关闭新鲜度判定。
 
 裸 `depends` 名称限定同项目或共享 workspace 内的 provider；跨安装单元使用 `//path:provider`。依赖顺序不会隐式启用未选择的 provider。共享成员的包管理器版本声明冲突会报错。

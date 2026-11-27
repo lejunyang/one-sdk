@@ -34,9 +34,12 @@ osdk deps //apps/api:uv
 `reference/configuration/deps.md`。
 
 Cargo 成员可单独选择，例如 `osdk deps //crates/demo:cargo --frozen --no-install-tools`。
-osdk 用已安装或已链接的 Cargo 离线确认工作区归属，在成员目录使用根 `Cargo.lock`
-执行 `cargo fetch --locked`。`--dry-run` 展示同一计划，`--list --all --explain` 展示根和锁。
-成员目录的旧锁不影响归属。被排除的 crate 可以使用自己的锁，未列入的 crate 由 Cargo 拒绝。根锁缺失时冻结计划失败，过期时由 Cargo 拒绝拉取。
+osdk 用已安装或已链接的 Cargo 离线确认工作区归属，在成员目录执行
+`cargo fetch --locked`。默认使用根 `Cargo.lock`，也支持 Cargo 1.97 起的
+`resolver.lockfile-path` 和 `CARGO_RESOLVER_LOCKFILE_PATH`。`--dry-run` 展示计划，
+`--list --all --explain` 展示根和实际生效的锁。成员目录的旧锁不影响归属。
+被排除的 crate 可以使用自己的锁，未列入的 crate 由 Cargo 拒绝。锁缺失时冻结计划失败，
+过期时由 Cargo 拒绝拉取。工作区外的路径依赖由实际的冻结拉取校验。
 
 成功安装后写入 `osdk.lock` 的 `run` 使用跨平台规范命令名（如 `bun`、`cargo`），
 不会记录仅供 Windows 查找可执行文件使用的 `.exe` / `.cmd` 后缀。

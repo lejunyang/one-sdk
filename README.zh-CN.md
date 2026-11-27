@@ -480,7 +480,7 @@ osdk deps --frozen
 ```
 
 在 Cargo 工作区中，`osdk deps //crates/demo:cargo --frozen --no-install-tools`
-为声明的成员沿用工作区根目录的 `Cargo.lock`，即使成员目录还留着自己的锁。
+沿用 Cargo 选定的工作区锁，默认是根目录的 `Cargo.lock`。成员目录残留的锁不影响归属。
 选择成员前先安装或链接项目指定的 Rust 工具链。
 
 默认不运行任何依赖的构建或生命周期脚本。需要时按 provider 显式打开，这一项需要你

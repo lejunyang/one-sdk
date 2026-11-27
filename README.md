@@ -549,9 +549,9 @@ osdk deps --frozen
 ```
 
 In a Cargo workspace, `osdk deps //crates/demo:cargo --frozen --no-install-tools`
-uses the workspace's root `Cargo.lock` even if the member directory still has
-its own lockfile. Have the
-project's Rust toolchain installed or linked before selecting a member.
+uses the workspace lock selected by Cargo, usually the root `Cargo.lock`, even
+if the member directory still has its own lockfile. Install or link the project's
+Rust toolchain before selecting a member.
 
 Build and lifecycle scripts are off by default. Turn them on per provider, which
 requires approving the config:
