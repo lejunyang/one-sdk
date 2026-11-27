@@ -325,7 +325,8 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 相对链接在发布回原位置后仍指向原目标。
 
 Node 版本间迁移（`--to`）也显式指定 prefix，不受激活变量或 builtin 默认值影响。
-执行前在目标同盘备份全局 `node_modules`、命令入口和 Unix 的 `share/man` 目录。
+执行前解析目标 prefix，在实际目录内备份全局 `node_modules`、命令入口和 Unix 的 `share/man` 目录。
+回滚前检查受管 prefix 是否仍指向原目录。
 备份保留原链接文本，Windows 上也保留 junction 和符号链接各自的类型。
 安装失败后按目录条目识别已落盘的新增包，先尝试离线卸载这些计划内的包，再按快照清除
 残留内容和入口。这个过程无需 npm 重新枚举包或读取残缺的 manifest。原有文件和链接只在

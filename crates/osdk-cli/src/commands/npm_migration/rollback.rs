@@ -12,34 +12,42 @@ use osdk_core::store::dirlink;
 use super::{modules, npm_command, ManagedNodeTools};
 
 pub(in crate::commands) struct Snapshot {
+    prefix: PathBuf,
+    bin: PathBuf,
     backup: tempfile::TempDir,
     directory_permissions: BTreeMap<PathBuf, Permissions>,
 }
 
 impl Snapshot {
     pub(in crate::commands) fn capture(tools: &ManagedNodeTools) -> Result<Self> {
+        let prefix = resolve_prefix(&tools.prefix)?;
+        let bin = prefix.join(tools.bin.strip_prefix(&tools.prefix)?);
+        // The resolved prefix can itself be a mount point. Create the
+        // backup inside it so the backup is on the same volume.
         let backup = tempfile::Builder::new()
             .prefix(".node-migration-")
-            .tempdir_in(tools.prefix.parent().context("Node prefix has no parent")?)
+            .tempdir_in(&prefix)
             .context("creating backup for Node package migration")?;
         let mut snapshot = Self {
+            prefix,
+            bin,
             backup,
             directory_permissions: BTreeMap::new(),
         };
 
-        let modules = modules(&tools.prefix);
-        check_modules_parent(tools, &modules)?;
+        let modules = modules(&snapshot.prefix);
+        check_directory_if_present(modules.parent().unwrap())?;
         snapshot.capture_tree(&modules, "node_modules")?;
         #[cfg(unix)]
         {
-            let man = tools.prefix.join("share/man");
+            let man = snapshot.prefix.join("share/man");
             check_directory_if_present(man.parent().unwrap())?;
             snapshot.capture_tree(&man, "man")?;
         }
-        check_bin(tools)?;
+        check_bin(&snapshot.bin)?;
         let backup_bin = snapshot.backup.path().join("bin");
         fs::create_dir(&backup_bin)?;
-        for entry in fs::read_dir(&tools.bin)? {
+        for entry in fs::read_dir(&snapshot.bin)? {
             let entry = entry?;
             if is_launcher(&entry.file_name(), &entry.path().symlink_metadata()?) {
                 snapshot.copy_entry(&entry.path(), &backup_bin.join(entry.file_name()))?;
@@ -94,9 +102,13 @@ impl Snapshot {
         tools: &ManagedNodeTools,
         planned: impl IntoIterator<Item = &'a str>,
     ) -> Result<()> {
-        let modules = modules(&tools.prefix);
+        self.verify_prefix(&tools.prefix)?;
+        if !real_directory(&self.backup.path().symlink_metadata()?) {
+            return Err(anyhow!("Node package backup is not a real directory"));
+        }
+        let modules = modules(&self.prefix);
         let old_modules = self.backup.path().join("node_modules");
-        check_modules_parent(tools, &modules)?;
+        check_directory_if_present(modules.parent().unwrap())?;
         if inspect(&modules)?.is_some_and(|meta| real_directory(&meta)) {
             let mut args = vec!["uninstall", "-g", "--offline", "--ignore-scripts"];
             for name in planned {
@@ -110,18 +122,19 @@ impl Snapshot {
                 let _ = npm_command(tools, &args);
             }
         }
-        check_modules_parent(tools, &modules)?;
+        self.verify_prefix(&tools.prefix)?;
+        check_directory_if_present(modules.parent().unwrap())?;
         self.restore_tree(&old_modules, &modules)?;
         #[cfg(unix)]
         {
-            let man = tools.prefix.join("share/man");
+            let man = self.prefix.join("share/man");
             check_directory_if_present(man.parent().unwrap())?;
             self.restore_tree(&self.backup.path().join("man"), &man)?;
         }
 
-        check_bin(tools)?;
+        check_bin(&self.bin)?;
         let old_bin = self.backup.path().join("bin");
-        for entry in fs::read_dir(&tools.bin)? {
+        for entry in fs::read_dir(&self.bin)? {
             let entry = entry?;
             let metadata = entry.path().symlink_metadata()?;
             if is_launcher(&entry.file_name(), &metadata)
@@ -132,7 +145,20 @@ impl Snapshot {
         }
         for entry in fs::read_dir(old_bin)? {
             let entry = entry?;
-            self.restore_entry(&entry.path(), &tools.bin.join(entry.file_name()))?;
+            self.restore_entry(&entry.path(), &self.bin.join(entry.file_name()))?;
+        }
+        Ok(())
+    }
+
+    fn verify_prefix(&self, managed_prefix: &Path) -> Result<()> {
+        let resolved = resolve_prefix(managed_prefix)?;
+        if resolved != self.prefix {
+            return Err(anyhow!(
+                "target Node prefix {} now resolves to {} instead of {}",
+                managed_prefix.display(),
+                resolved.display(),
+                self.prefix.display()
+            ));
         }
         Ok(())
     }
@@ -208,9 +234,9 @@ fn real_directory(metadata: &Metadata) -> bool {
     metadata.is_dir() && !dirlink::is_link(metadata)
 }
 
-fn check_modules_parent(tools: &ManagedNodeTools, modules: &Path) -> Result<()> {
-    check_directory_if_present(&tools.prefix)?;
-    check_directory_if_present(modules.parent().unwrap())
+fn resolve_prefix(path: &Path) -> Result<PathBuf> {
+    dunce::canonicalize(path)
+        .with_context(|| format!("resolving target Node prefix {}", path.display()))
 }
 
 fn check_directory_if_present(path: &Path) -> Result<()> {
@@ -223,11 +249,11 @@ fn check_directory_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_bin(tools: &ManagedNodeTools) -> Result<()> {
-    if !real_directory(&tools.bin.symlink_metadata()?) {
+fn check_bin(bin: &Path) -> Result<()> {
+    if !real_directory(&bin.symlink_metadata()?) {
         return Err(anyhow!(
             "npm bin path is not a real directory: {}",
-            tools.bin.display()
+            bin.display()
         ));
     }
     Ok(())
@@ -345,6 +371,41 @@ fn same_contents(left: &Path, right: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_package_migration_refuses_rollback_after_prefix_retarget() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original");
+        let replacement = temp.path().join("replacement");
+        let prefix = temp.path().join("target");
+        let bin_path = if cfg!(windows) { "" } else { "bin" };
+        for destination in [&original, &replacement] {
+            fs::create_dir_all(destination.join(bin_path)).unwrap();
+            fs::create_dir_all(modules(destination)).unwrap();
+        }
+        dirlink::create(&original, &prefix).unwrap();
+        let bin = prefix.join(bin_path);
+        let tools = ManagedNodeTools {
+            npm: bin.join("unused"),
+            bin,
+            prefix,
+        };
+        let snapshot = Snapshot::capture(&tools).unwrap();
+        let backup = snapshot.backup.path().to_owned();
+        assert_eq!(
+            backup.parent().unwrap(),
+            dunce::canonicalize(original).unwrap()
+        );
+        let unrelated = modules(&replacement).join("unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        dirlink::retarget(&replacement, &tools.prefix).unwrap();
+
+        let error = format!("{:#}", snapshot.restore(&tools, []).unwrap_err());
+        assert!(error.contains("now resolves to"), "{error}");
+        assert!(error.contains(&backup.display().to_string()), "{error}");
+        assert!(backup.is_dir());
+        assert!(unrelated.is_dir());
+    }
 
     #[test]
     fn node_package_migration_restores_overwritten_links_and_launchers() {

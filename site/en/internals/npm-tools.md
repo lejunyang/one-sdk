@@ -432,8 +432,10 @@ publication. External projects are never copied or written; relative links resol
 to their original targets once published at the original location.
 
 Node-to-Node migration (`--to`) also pins prefixes explicitly, independent of
-activation variables and builtin defaults. Before installing, it backs up global
-`node_modules`, launchers, and the Unix `share/man` tree on the target volume.
+activation variables and builtin defaults. Before installing, it resolves the
+target prefix and backs up global `node_modules`, launchers, and the Unix
+`share/man` tree inside that directory, on the target volume. Before restoring,
+it verifies that the managed prefix still resolves to that directory.
 The backup preserves link text and the original junction or symlink type on
 Windows. On install failure it finds newly added planned packages by their
 directory entries and tries an offline npm uninstall. It then removes filesystem entries absent from

@@ -154,6 +154,41 @@ class MigrationRollback(unittest.TestCase):
     def test_local_tarball(self):
         self.verify_failure("local-tarball", "LOCAL_TARBALL", "REGISTRY_TARBALL")
 
+    def test_relocated_target(self):
+        root = self.root / "relocated-target"
+        root.mkdir()
+        project = root / "incoming"
+        name = "osdk-migration-relocated"
+        write_project(project, name, "RELOCATED")
+        incoming = pack(project, root / "incoming.tgz")
+        with loopback_registry({name: incoming}) as server:
+            env = registry_env(root, server.url)
+            source, target = (Path(env["OSDK_INSTALL_DIR"]) / "node" / v for v in (SOURCE, TARGET))
+            for prefix in (source, target):
+                shutil.copytree(self.nodes / prefix.name, prefix, symlinks=True)
+            npm(env | {"npm_config_cache": str(root / "source-cache")}, source,
+                "install", "-g", incoming[1])
+            destination = root / "another directory" / TARGET
+            destination.parent.mkdir()
+            target.rename(destination)
+            target.symlink_to(destination, target_is_directory=True)
+            original_link = os.readlink(target)
+            launcher = destination / "bin" / name
+            self.assertFalse(os.path.lexists(launcher))
+
+            env["npm_config_cache"] = str(root / "migration-cache")
+            command = (self.osdk, "node", "migrate-packages", "--from", SOURCE, "--to", TARGET)
+            self.assertIn(f"would install {name}@{VERSION}", run(env, root, *command).stdout)
+            self.assertEqual(server.requests, [])
+            apply = run(env, root, *command, "--apply")
+            self.assertEqual(os.readlink(target), original_link)
+            self.assertEqual(launcher.resolve(strict=True), destination / MODULES / name / "cli.js")
+            output = run(env | {"PATH": f"{target / 'bin'}{os.pathsep}{env['PATH']}"},
+                         root, target / "bin" / name).stdout.strip()
+            print(json.dumps({"scenario": "relocated-target", "exit": apply.returncode,
+                              "prefix_link": original_link, "output": output}), flush=True)
+            self.assertEqual(output, "RELOCATED")
+
     def test_manpage_collision(self):
         self.verify_manpage_collision(force=False)
 
