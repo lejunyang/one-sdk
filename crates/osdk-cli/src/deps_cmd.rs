@@ -483,6 +483,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             continue;
         }
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
+        let command = ProviderCommand::resolve(app, &item.plan, &tools)?;
         if item.plan.frozen
             && item
                 .native_lock
@@ -496,7 +497,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 &item.config,
                 item.unit.as_ref(),
                 &options,
-                Some(&tools),
+                Some((&tools, &command)),
             )?;
             if options.frozen {
                 require_frozen(&item.plan, &item.label())?;
@@ -526,7 +527,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         if options.explain {
             println!("    sources: {evidence}");
         }
-        run_plan(app, item, &tools)?;
+        run_plan(app, item, &tools, &command, options.no_install_tools)?;
         // Record the material freshness was decided on.
         item.plan.env = planned_env;
         record(app, item, &tools)?;
@@ -541,11 +542,11 @@ fn plan_project(
     config: &ProviderConfig,
     unit: Option<&deps::workspace::WorkspaceUnit>,
     options: &DepsOptions,
-    prepared_tools: Option<&[ReadyTool]>,
+    prepared: Option<(&[ReadyTool], &ProviderCommand)>,
 ) -> anyhow::Result<(RunPlan, Option<NativeLockOwner>)> {
     let native_lock = if project.provider == "cargo" && config.run.is_none() {
         let cwd = deps::effective_cwd(&project.root, config.dir.as_deref());
-        let owner = deps::workspace::native_lock_owner(
+        let mut owner = deps::workspace::native_lock_owner(
             project,
             &cwd,
             &CargoLockProbe {
@@ -553,10 +554,15 @@ fn plan_project(
                 project_root: &project.root,
                 choice,
                 config,
-                prepared_tools,
+                prepared,
                 explain: options.explain,
             },
         )?;
+        if owner.status == NativeLockStatus::CargoUnavailable && prepared.is_some() {
+            owner.reason = Some(
+                "the shared Cargo entry could not confirm the workspace in a read-only query; Cargo will check the lock during fetch".into(),
+            );
+        }
         if options.explain {
             if !owner.inputs.is_empty() {
                 println!("    Cargo workspace root: {}", owner.root.display());
@@ -570,7 +576,9 @@ fn plan_project(
         }
         let keep_local_lock = cwd == project.root
             && match owner.status {
-                NativeLockStatus::CargoUnavailable => prepared_tools.is_none(),
+                // The selected project already has a local lock. Keep the
+                // locked fetch when a shared proxy cannot answer the query.
+                NativeLockStatus::CargoUnavailable => true,
                 // Keep the locked command for a confirmed workspace root,
                 // even if its effective lock path cannot be fingerprinted.
                 NativeLockStatus::CargoLockPathUnknown => {
@@ -1089,7 +1097,7 @@ struct CargoLockProbe<'a> {
     project_root: &'a Path,
     choice: &'a InstallerChoice,
     config: &'a ProviderConfig,
-    prepared_tools: Option<&'a [ReadyTool]>,
+    prepared: Option<(&'a [ReadyTool], &'a ProviderCommand)>,
     explain: bool,
 }
 
@@ -1109,7 +1117,7 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                 self.app
             };
             let installed;
-            let tools = if let Some(tools) = self.prepared_tools {
+            let tools = if let Some((tools, _)) = self.prepared {
                 tools
             } else {
                 let required = &deps::provider_schema("cargo").unwrap().required_tools[0];
@@ -1136,13 +1144,23 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                 )?];
                 &installed
             };
-            // Use Cargo from the toolchain bin, without falling through to a
-            // rustup proxy that could install a toolchain during preview.
-            let Some(program) =
-                find_program(program_candidates, tools[0].bin_dirs.first().into_iter())
-            else {
-                return Ok(None);
+            let program;
+            let path;
+            let (program, path) = if let Some((_, prepared)) = self.prepared {
+                (&prepared.program, &prepared.path)
+            } else {
+                // Preview uses the normal managed lookup, but only runs Cargo
+                // from the toolchain itself. A shared bin may contain a proxy.
+                let Some(candidate) = find_tool_program("rust", program_candidates, tools)
+                    .filter(|program| cargo_in_toolchain(program, tools))
+                else {
+                    return Ok(None);
+                };
+                program = candidate;
+                path = tool_path(app, tools)?;
+                (&program, &path)
             };
+            let shared = !cargo_in_toolchain(program, tools);
             if self.explain && args[0] == "metadata" {
                 println!("    Cargo workspace query: {}", program.display());
             }
@@ -1153,16 +1171,25 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             let probe_env = child_env(&self.config.env, tools)
                 .into_iter()
                 .filter(|(key, _)| {
-                    ["CARGO_HOME", "RUSTUP_HOME", CARGO_LOCKFILE_ENV, home_key]
-                        .iter()
-                        .any(|name| matches_os_env_key(key.as_ref(), name))
+                    [
+                        "CARGO_HOME",
+                        "RUSTUP_HOME",
+                        "RUSTUP_TOOLCHAIN",
+                        CARGO_LOCKFILE_ENV,
+                        home_key,
+                    ]
+                    .iter()
+                    .any(|name| matches_os_env_key(key.as_ref(), name))
                 });
             let mut command = std::process::Command::new(program);
             command
                 .args(args)
                 .current_dir(cwd)
-                .env("PATH", tool_path(app, tools)?)
+                .env("PATH", path)
                 .envs(probe_env);
+            if shared {
+                command.env("RUSTUP_AUTO_INSTALL", "0");
+            }
             let env_path = |name| {
                 command
                     .get_envs()
@@ -1186,14 +1213,22 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                     home.map(|home| cwd.join(home).join(".cargo"))
                 });
             let cargo_lockfile_override = cargo_lockfile_env(&command);
+            let output = command.output();
+            if shared && !output.as_ref().is_ok_and(|output| output.status.success()) {
+                return Ok(None);
+            }
             Ok(Some(NativeLockQuery {
-                output: command.output()?,
+                output: output?,
                 cargo_home,
                 cargo_lockfile_override,
             }))
         })()
         .map_err(std::io::Error::other)
     }
+}
+
+fn cargo_in_toolchain(program: &Path, tools: &[ReadyTool]) -> bool {
+    program.parent() == tools[0].bin_dirs.first().map(PathBuf::as_path)
 }
 
 fn matches_os_env_key(key: &OsStr, name: &str) -> bool {
@@ -1227,47 +1262,49 @@ fn cargo_lockfile_env(command: &std::process::Command) -> Option<PathBuf> {
     value.and_then(OsStr::to_str).map(PathBuf::from)
 }
 
-/// Run the provider's command with the resolved tools on PATH.
-///
-/// The program is resolved out of the install's own bin directory rather than
-/// through an osdk shim. A shim refuses when no version is selected for the
-/// current directory (`osdk-shim: no version of 'pnpm' selected`), and the
-/// situation `deps` exists for is exactly "just installed, never `use`d".
-///
-/// Runtime bin directories are *prepended* to PATH rather than appended: npm and
-/// pnpm are node scripts and dependency lifecycle hooks invoke `node` directly,
-/// so an unrelated node earlier on PATH would win and the install would run
-/// under a runtime osdk did not choose.
-fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+/// The executable and PATH shared by a prepared provider's probe and install.
+struct ProviderCommand {
+    program: PathBuf,
+    path: OsString,
+}
+
+impl ProviderCommand {
+    fn resolve(app: &App, plan: &RunPlan, tools: &[ReadyTool]) -> anyhow::Result<Self> {
+        let program = resolve_program(plan, tools).ok_or_else(|| {
+            anyhow!(
+                "could not find `{}` in the install for `{}`",
+                plan.program_candidates.join("` or `"),
+                plan.tool
+            )
+        })?;
+        let path = tool_path(app, tools)?;
+        // Windows CreateProcess only tries .exe for bare names. Resolve
+        // custom commands such as pnpm.cmd against the same child PATH.
+        let program = crate::commands::resolve_program_in_dirs(
+            &program,
+            &std::env::split_paths(&path).collect::<Vec<_>>(),
+        );
+        Ok(Self { program, path })
+    }
+}
+
+fn run_plan(
+    app: &App,
+    item: &Resolved,
+    tools: &[ReadyTool],
+    prepared: &ProviderCommand,
+    no_install_tools: bool,
+) -> anyhow::Result<()> {
     for tool in tools {
         if let Some(target) = &tool.system {
             target.command(&app.ctx, &target.tool)?;
         }
     }
-    let program = resolve_program(&item.plan, tools).ok_or_else(|| {
-        anyhow!(
-            "could not find `{}` in the install for `{}`",
-            item.plan.program_candidates.join("` or `"),
-            item.plan.tool
-        )
-    })?;
-
-    let path = tool_path(app, tools)?;
-
-    // A bare name is left to the OS, but Windows `CreateProcess` only tries
-    // `.exe`: a custom `run = "pnpm ..."` missed the managed `pnpm.cmd` on the
-    // PATH built above and failed with "program not found". Resolve it against
-    // that same PATH first; explicit paths and Unix are left untouched.
-    let program = crate::commands::resolve_program_in_dirs(
-        &program,
-        &std::env::split_paths(&path).collect::<Vec<_>>(),
-    );
-
     // Already absolute: the provider resolved \[deps.<p>].dir\ against the project
     // root. Joining again would be a no-op for an absolute path but would quietly
     // change meaning if a provider ever returned a relative one.
     let cwd = &item.plan.cwd;
-    let mut command = std::process::Command::new(&program);
+    let mut command = std::process::Command::new(&prepared.program);
     let mut external_env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
     for tool in tools {
         if let Some(target) = &tool.system {
@@ -1281,8 +1318,15 @@ fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<(
     command
         .args(&item.plan.args)
         .current_dir(cwd)
-        .env("PATH", &path)
+        .env("PATH", &prepared.path)
         .envs(&child_env);
+    if no_install_tools
+        && item.project.provider == "cargo"
+        && item.config.run.is_none()
+        && !cargo_in_toolchain(&prepared.program, tools)
+    {
+        command.env("RUSTUP_AUTO_INSTALL", "0");
+    }
 
     println!("{}", display_command(item));
 
@@ -1290,14 +1334,14 @@ fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<(
     // failure here stops the run: continuing would hand the main command an
     // environment the tool already said it could not build.
     for step in &item.plan.prelude {
-        let mut prelude = std::process::Command::new(&program);
+        let mut prelude = std::process::Command::new(&prepared.program);
         if tools.iter().any(|t| t.system.is_some()) {
             prelude.env_clear().envs(&external_env);
         }
         prelude
             .args(step)
             .current_dir(cwd)
-            .env("PATH", &path)
+            .env("PATH", &prepared.path)
             .envs(&child_env);
         run_bounded(prelude, item.config.timeout)?;
     }

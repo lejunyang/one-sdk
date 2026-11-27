@@ -119,6 +119,8 @@ see the workspace root and effective lock.
 If Rust is missing, a local `Cargo.lock` is enough to preview a locked fetch.
 An actual run without `--no-install-tools` can prepare Rust first, then use that
 Cargo to check which lock applies before fetching.
+If linked Rust provides Cargo through the shared rustup proxy, the actual run
+can use that entry point for the locked fetch.
 For a standalone crate with a local lock, even plain `deps` keeps `--locked`
 when osdk cannot determine the effective path, so Cargo can validate the lock.
 

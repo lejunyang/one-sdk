@@ -641,6 +641,12 @@ locked plan. Actual execution prepares Rust under the install lock and recompute
 the plan with the prepared Cargo before fetching. A provisional plan cannot use
 cached freshness. Without Cargo or a local lock, a member's frozen plan requires
 installing or linking Rust first.
+Previews query Cargo only in the toolchain directory. If execution resolves
+Cargo to the rustup proxy in the shared bin directory, replanning and fetch
+use the same executable. The read-only query disables rustup auto-install,
+as does fetch with `--no-install-tools`. If the proxy cannot answer the
+query, a project with a detected local lock still runs `cargo fetch --locked`
+and bypasses the freshness cache.
 
 osdk resolves the lock path using Cargo's configuration precedence, including
 ancestor and included files and `CARGO_HOME`. Cargo 1.97 and later support

@@ -45,6 +45,7 @@ Cargo 从有效的 `HOME`（Windows 上是 `USERPROFILE`）下的 `.cargo` 读�
 独立 crate 已有本地锁时，即使无法确定实际锁路径，普通 `deps` 也保留 `--locked`。
 Rust 尚未安装时，本地锁可以用于预览。实际调用若允许安装工具，osdk 会先准备 Rust，
 再用该工具链确认生效的锁。
+链接的 Rust 可以通过共享的 rustup 代理执行冻结拉取。`--no-install-tools` 仍禁止获取工具。
 
 成功安装后写入 `osdk.lock` 的 `run` 使用跨平台规范命令名（如 `bun`、`cargo`），
 不会记录仅供 Windows 查找可执行文件使用的 `.exe` / `.cmd` 后缀。

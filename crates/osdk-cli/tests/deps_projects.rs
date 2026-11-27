@@ -116,6 +116,24 @@ impl CargoWorkspace {
         );
     }
 
+    fn link_rust_with_shared_cargo(&self) -> PathBuf {
+        let root = self.temp.path();
+        let rustc = matching_rustc(&self.cargo);
+        let linked = root.join("local-rust");
+        std::fs::create_dir_all(linked.join("bin")).unwrap();
+        // The linked sysroot contributes rustc, while the shared bin owns Cargo.
+        std::fs::copy(&rustc, linked.join("bin").join(rustc.file_name().unwrap())).unwrap();
+        write(root, "state/installs/rust/trial-rust/.osdk-complete", "");
+        write(
+            root,
+            "state/installs/rust/trial-rust/.osdk-linked",
+            linked.to_str().unwrap(),
+        );
+        let bin = root.join("state/data/cargo/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        bin.join(self.cargo.file_name().unwrap())
+    }
+
     fn native(&self, args: &[&str]) -> Output {
         self.command(&self.cargo).args(args).output().unwrap()
     }
@@ -173,6 +191,55 @@ fn cargo_metadata_unavailable_explains_why_a_member_cannot_freeze() {
     );
     assert!(error.contains("osdk install rust"), "{error}");
     fixture.assert_locks(None);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_standalone_frozen_uses_cargo_from_the_shared_bin() {
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    let lock = fixture.generate_lock();
+    let shared = fixture.link_rust_with_shared_cargo();
+    std::fs::copy(&fixture.cargo, shared).unwrap();
+
+    let preview = fixture.run("cargo", &["--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+    let actual = fixture.run("cargo", &["--explain"]);
+    assert!(actual.status.success(), "{actual:?}");
+    let stdout = String::from_utf8_lossy(&actual.stdout);
+    assert!(stdout.contains("Cargo workspace query:"), "{stdout}");
+    assert!(stdout.contains("cargo fetch --locked"), "{stdout}");
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
+#[cfg(unix)]
+fn cargo_standalone_frozen_rechecks_shared_proxy_when_metadata_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    let lock = fixture.generate_lock();
+    let proxy = fixture.link_rust_with_shared_cargo();
+    std::fs::write(
+        &proxy,
+        "#!/bin/sh\n[ \"$RUSTUP_AUTO_INSTALL\" = '0' ] || exit 2\n[ \"$1\" != metadata ] || exit 1\nexec \"$(dirname \"$RUSTC\")/cargo\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..2 {
+        let actual = fixture
+            .osdk()
+            .env("RUSTUP_AUTO_INSTALL", "1")
+            .args(["deps", "cargo", "--frozen", "--no-install-tools"])
+            .output()
+            .unwrap();
+        assert!(actual.status.success(), "{actual:?}");
+        assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    }
+    fixture.assert_locks(Some(&lock));
 }
 
 #[test]
