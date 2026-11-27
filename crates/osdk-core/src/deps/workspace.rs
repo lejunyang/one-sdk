@@ -25,10 +25,13 @@ pub struct NativeLockOwner {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeLockStatus {
+    /// The tool's answer is conclusive, including membership errors.
     Checked,
+    /// The configured tool is not available for a read-only query yet.
     CargoUnavailable,
+    /// Cargo confirmed membership, but the effective lock path is unresolved.
     CargoLockPathUnknown,
 }
 
@@ -645,7 +648,7 @@ mod tests {
         );
         assert!(owner.reason.is_none());
         assert!(owner.inputs_complete);
-        assert!(!owner.defer_to_cargo);
+        assert_eq!(owner.status, NativeLockStatus::Checked);
 
         let mut unknown_home = probe(&[&member.manifest, &other]);
         unknown_home.cargo_home = None;
@@ -653,12 +656,12 @@ mod tests {
         assert_eq!(owner.root, root);
         assert!(owner.lock.is_none());
         assert!(!owner.inputs_complete);
-        assert!(owner.defer_to_cargo);
+        assert_eq!(owner.status, NativeLockStatus::CargoLockPathUnknown);
 
         let owner = native_lock_owner(&member, &member.root, &probe(&[&other])).unwrap();
         assert!(owner.lock.is_none());
         assert!(owner.inputs.is_empty());
-        assert!(!owner.defer_to_cargo);
+        assert_eq!(owner.status, NativeLockStatus::Checked);
         assert!(owner
             .reason
             .unwrap()
