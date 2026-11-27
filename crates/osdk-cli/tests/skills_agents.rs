@@ -324,6 +324,10 @@ fn skills_list_and_remove_report_local_unlocked_skills_before_ancestor_entries()
             "{message}"
         );
         assert!(
+            message.contains("found in project agent directories"),
+            "{message}"
+        );
+        assert!(
             message.contains(&installed.display().to_string()),
             "{message}"
         );

@@ -164,7 +164,7 @@ fn unlocked_skill_message(name: &str, paths: &[PathBuf]) -> String {
         .map(|path| format!("`{}`", path.display()))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("skill `{name}` is not recorded in the lock; found in project Agent directories: {locations}")
+    format!("skill `{name}` is not recorded in the lock; found in project agent directories: {locations}")
 }
 
 /// Older releases could record a child's installation in an ancestor lock.
