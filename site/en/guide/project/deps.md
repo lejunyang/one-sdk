@@ -106,7 +106,10 @@ osdk uses the installed or linked Cargo to check workspace membership, then runs
 `cargo fetch --locked` in the member directory. The same plan appears with
 `--dry-run`. Cargo uses the root `Cargo.lock` by default. Cargo 1.97 and later can
 select another lock with `resolver.lockfile-path` or
-`CARGO_RESOLVER_LOCKFILE_PATH`. Cargo ignores a leftover lock in a member directory.
+`CARGO_RESOLVER_LOCKFILE_PATH`. An empty `CARGO_HOME` makes Cargo read configuration
+from `.cargo` under the effective home directory. `[deps.cargo.env]` can set that
+directory through `HOME` (or `USERPROFILE` on Windows).
+Cargo ignores a leftover lock in a member directory.
 An excluded crate can use its own lock, while Cargo rejects an unlisted crate.
 A missing effective lock rejects the frozen plan. Cargo rejects a stale lock and
 leaves it unchanged. For path dependencies outside the workspace, osdk runs

@@ -296,12 +296,15 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             &config,
             &resolved_tool_versions(app, &config),
         )?;
-        if let Some(reason) = native_lock
-            .as_ref()
-            .and_then(|owner| owner.reason.as_deref())
-        {
-            plan.downgraded_reason =
-                Some(format!("{reason}; running `cargo fetch` without --locked"));
+        if let Some(owner) = &native_lock {
+            if options.frozen && owner.defer_to_cargo {
+                plan.args.push("--locked".into());
+                plan.frozen = true;
+                plan.downgraded_reason = None;
+            } else if let Some(reason) = &owner.reason {
+                plan.downgraded_reason =
+                    Some(format!("{reason}; running `cargo fetch` without --locked"));
+            }
         }
         if unit.as_ref().is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
             plan.args.push("--all-packages".into());
@@ -1058,12 +1061,7 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             if self.explain && args[0] == "metadata" {
                 println!("    Cargo workspace query: {}", program.display());
             }
-            let mut command = std::process::Command::new(program);
-            command
-                .args(args)
-                .current_dir(cwd)
-                .env("PATH", tool_path(app, &tools)?)
-                .envs(child_env(&BTreeMap::new(), &tools));
+            let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
             let matches_key = |key: &std::ffi::OsStr, name: &str| {
                 if cfg!(windows) {
                     key.eq_ignore_ascii_case(std::ffi::OsStr::new(name))
@@ -1071,16 +1069,25 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                     key == name
                 }
             };
-            // Forward only the provider's Cargo configuration paths. Other
-            // overrides can select executable hooks and belong to the fetch.
-            for (key, value) in &self.config.env {
-                if ["CARGO_HOME", CARGO_LOCKFILE_ENV]
-                    .iter()
-                    .any(|name| matches_key(key.as_ref(), name))
-                {
-                    command.env(key, value);
-                }
-            }
+            // Take configuration paths from the same tool/provider overlay
+            // as fetch. Keep other provider overrides, including executable
+            // hooks, out of the read-only query.
+            let mut probe_env = child_env(&BTreeMap::new(), &tools);
+            probe_env.extend(
+                child_env(&self.config.env, &tools)
+                    .into_iter()
+                    .filter(|(key, _)| {
+                        ["CARGO_HOME", CARGO_LOCKFILE_ENV, home_key]
+                            .iter()
+                            .any(|name| matches_key(key.as_ref(), name))
+                    }),
+            );
+            let mut command = std::process::Command::new(program);
+            command
+                .args(args)
+                .current_dir(cwd)
+                .env("PATH", tool_path(app, &tools)?)
+                .envs(probe_env);
             let env_path = |name| {
                 command
                     .get_envs()
@@ -1091,7 +1098,18 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             let cargo_home = env_path("CARGO_HOME")
                 .filter(|path| !path.as_os_str().is_empty())
                 .map(|path| cwd.join(path))
-                .or_else(|| std::env::home_dir().map(|home| home.join(".cargo")));
+                .or_else(|| {
+                    let home = match env_path(home_key) {
+                        Some(home) if !home.as_os_str().is_empty() => Some(home),
+                        // An empty child override masks the parent's profile,
+                        // so our own home_dir() could report the wrong home.
+                        Some(_) if std::env::var_os(home_key).is_some_and(|v| !v.is_empty()) => {
+                            None
+                        }
+                        _ => std::env::home_dir(),
+                    };
+                    home.map(|home| cwd.join(home).join(".cargo"))
+                });
             let cargo_lockfile_override = env_path(CARGO_LOCKFILE_ENV);
             Ok(Some(NativeLockQuery {
                 output: command.output()?,

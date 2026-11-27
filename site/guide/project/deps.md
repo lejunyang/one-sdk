@@ -98,7 +98,9 @@ osdk deps //crates/demo:cargo --frozen --no-install-tools
 osdk 用已安装或已链接的 Cargo 确认成员归属，在成员目录运行
 `cargo fetch --locked`。`--dry-run` 会展示同一计划。Cargo 默认使用工作区根的
 `Cargo.lock`，1.97 起可用 `resolver.lockfile-path` 或 `CARGO_RESOLVER_LOCKFILE_PATH`
-指定另一份锁。成员目录残留的本地锁不会参与归属。被排除的 crate 可以使用自己的锁，
+指定另一份锁。若将 `CARGO_HOME` 设为空，Cargo 从当前用户目录的 `.cargo` 读取配置，
+也会使用 `[deps.cargo.env]` 指定的 `HOME`（Windows 上是 `USERPROFILE`）。
+成员目录残留的本地锁不会参与归属。被排除的 crate 可以使用自己的锁，
 未列入工作区的 crate 由 Cargo 拒绝。实际生效的锁缺失时，osdk 会拒绝冻结计划。
 锁过期时，Cargo 会拒绝拉取并保留原锁。存在工作区外的路径依赖时，osdk 会运行
 `cargo fetch --locked` 交给 Cargo 校验。用 `--list --all --explain` 可查看根和锁。

@@ -62,7 +62,8 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 Cargo 成员可从根配置用 `[deps].roots` 单独声明，启用 `[deps.cargo]` 即可。
 已安装或已链接的 Cargo 决定成员归属。确认的成员在成员目录拉取，默认使用工作区根锁，
 也支持 Cargo 1.97 起通过 `resolver.lockfile-path` 或 `CARGO_RESOLVER_LOCKFILE_PATH`
-指定的锁。新鲜度依据实际生效的锁、Cargo 配置、根清单及成员清单。
+指定的锁。若 `CARGO_HOME` 为空，配置从有效的 `HOME`（Windows 上是 `USERPROFILE`）
+下的 `.cargo` 读取。新鲜度依据实际生效的锁、Cargo 配置、根清单及成员清单。
 工作区外的路径依赖会触发实际的冻结拉取。Cargo 的 `sources = []` 会关闭新鲜度判定。
 
 裸 `depends` 名称限定同项目或共享 workspace 内的 provider；跨安装单元使用 `//path:provider`。依赖顺序不会隐式启用未选择的 provider。共享成员的包管理器版本声明冲突会报错。

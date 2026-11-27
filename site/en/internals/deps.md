@@ -624,9 +624,11 @@ could not run `cargo --version` -- exactly the `[sys.pkg]` accident.
 
 For a built-in Cargo project, planning runs
 `cargo metadata --no-deps --format-version 1 --offline` from the same directory
-as the fetch, using Cargo directly from the installed or linked toolchain. Both
-commands see the same `CARGO_HOME` and `CARGO_RESOLVER_LOCKFILE_PATH`. Other
-provider environment overrides are applied to the fetch.
+as the fetch, using Cargo directly from the installed or linked toolchain.
+osdk takes Cargo's configuration variables from the merged fetch environment.
+An empty `CARGO_HOME` falls back to `.cargo` under the effective `HOME`
+(`USERPROFILE` on Windows). Both commands see the same
+`CARGO_RESOLVER_LOCKFILE_PATH`.
 
 Cargo reports the workspace root and member manifests. osdk compares canonical
 paths and uses the root lock for a confirmed member. A lock next to the selected
@@ -644,7 +646,9 @@ ancestor and included files and `CARGO_HOME`. Cargo 1.97 and later support
 root manifest and member manifests feed the plan, the check under the install
 lock and the success record. If metadata lists a local dependency outside the
 workspace, or an override may introduce local dependencies the query cannot
-see, osdk runs `fetch --locked` to let Cargo validate the lock.
+see, osdk runs `fetch --locked` to let Cargo validate the lock. Once Cargo confirms
+the workspace, an explicit `--frozen` also runs `fetch --locked` without using a
+cached result if osdk cannot establish the effective lock path.
 `sources = []` disables freshness for Cargo.
 
 ## The auto gate: freshness only, never a deep scan

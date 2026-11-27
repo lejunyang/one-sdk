@@ -21,6 +21,8 @@ pub struct NativeLockOwner {
     pub inputs: Vec<PathBuf>,
     /// Cargo can validate a locked fetch even when metadata cannot prove freshness.
     pub inputs_complete: bool,
+    /// Cargo confirmed membership, but the effective lock path is unresolved.
+    pub defer_to_cargo: bool,
     pub reason: Option<String>,
 }
 
@@ -67,6 +69,7 @@ pub fn native_lock_owner(
         lock: project.native_lock.clone(),
         inputs: Vec::new(),
         inputs_complete: true,
+        defer_to_cargo: false,
         reason: None,
     };
     if project.provider != "cargo" {
@@ -129,26 +132,29 @@ impl NativeLockOwner {
             return Ok(());
         }
 
-        let config = CargoConfigInputs::load(cwd, query.cargo_home.as_deref())?;
-        let override_path = query
-            .cargo_lockfile_override
-            .map(|path| cwd.join(path))
-            .or(config.lockfile);
-        let configured = match override_path {
-            Some(path) if cargo_supports_lockfile_override(cwd, probe)? => Some(path),
-            _ => None,
+        self.root.clone_from(&root);
+        let (config, configured) = match cargo_lock_configuration(cwd, &query, probe) {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                self.defer_to_cargo = true;
+                self.reason = Some(format!(
+                    "cannot establish the effective Cargo lockfile: {error}"
+                ));
+                return Ok(());
+            }
         };
         let lock = configured
             .clone()
             .unwrap_or_else(|| root.join("Cargo.lock"));
         let root_manifest = root.join("Cargo.toml");
-        let manifest = read_cargo_toml(&root_manifest)?;
         // --no-deps can describe direct path dependencies of every member,
         // but cannot see the dependency graph behind nonmembers or overrides.
         self.inputs_complete = !config.local_overrides
-            && !["patch", "replace"]
-                .iter()
-                .any(|key| manifest.contains_key(*key))
+            && read_cargo_toml(&root_manifest).is_ok_and(|manifest| {
+                !["patch", "replace"]
+                    .iter()
+                    .any(|key| manifest.contains_key(*key))
+            })
             && metadata
                 .packages
                 .iter()
@@ -180,9 +186,29 @@ impl NativeLockOwner {
                 root.display()
             ));
         }
-        self.root = root;
         Ok(())
     }
+}
+
+fn cargo_lock_configuration(
+    cwd: &Path,
+    query: &NativeLockQuery,
+    probe: &dyn NativeLockProbe,
+) -> Result<(CargoConfigInputs, Option<PathBuf>)> {
+    let cargo_home = query.cargo_home.as_deref().ok_or_else(|| {
+        Error::config("the fetch environment leaves Cargo's home to the operating system")
+    })?;
+    let mut config = CargoConfigInputs::load(cwd, cargo_home)?;
+    let override_path = query
+        .cargo_lockfile_override
+        .as_ref()
+        .map(|path| cwd.join(path))
+        .or_else(|| config.lockfile.take());
+    let configured = match override_path {
+        Some(path) if cargo_supports_lockfile_override(cwd, probe)? => Some(path),
+        _ => None,
+    };
+    Ok((config, configured))
 }
 
 fn cargo_supports_lockfile_override(cwd: &Path, probe: &dyn NativeLockProbe) -> Result<bool> {
@@ -216,13 +242,13 @@ enum CargoConfigInclude {
 }
 
 impl CargoConfigInputs {
-    fn load(cwd: &Path, cargo_home: Option<&Path>) -> Result<Self> {
+    fn load(cwd: &Path, cargo_home: &Path) -> Result<Self> {
         // Stack order mirrors Cargo's scalar precedence: cwd before parents,
         // then CARGO_HOME. The extensionless filename wins at each location.
         let mut pending: Vec<_> = cwd
             .ancestors()
             .map(|dir| dir.join(".cargo"))
-            .chain(cargo_home.map(Path::to_path_buf))
+            .chain(std::iter::once(cargo_home.to_path_buf()))
             .filter_map(|dir| {
                 ["config", "config.toml"]
                     .map(|name| dir.join(name))
@@ -518,7 +544,10 @@ fn check_boundary(root: &Path, directory: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    struct CargoProbe(serde_json::Value);
+    struct CargoProbe {
+        metadata: serde_json::Value,
+        cargo_home: Option<PathBuf>,
+    }
 
     impl NativeLockProbe for CargoProbe {
         fn query(
@@ -542,10 +571,10 @@ mod tests {
             Ok(Some(NativeLockQuery {
                 output: std::process::Output {
                     status: std::process::ExitStatus::default(),
-                    stdout: serde_json::to_vec(&self.0).unwrap(),
+                    stdout: serde_json::to_vec(&self.metadata).unwrap(),
                     stderr: Vec::new(),
                 },
-                cargo_home: None,
+                cargo_home: self.cargo_home.clone(),
                 cargo_lockfile_override: None,
             }))
         }
@@ -578,11 +607,12 @@ mod tests {
             declared_manager: None,
         };
         let other = root.join("other/Cargo.toml");
-        let probe = |manifests: &[&Path]| {
-            CargoProbe(serde_json::json!({
+        let probe = |manifests: &[&Path]| CargoProbe {
+            metadata: serde_json::json!({
                 "workspace_root": root,
                 "packages": manifests.iter().map(|path| serde_json::json!({"manifest_path": path, "dependencies": []})).collect::<Vec<_>>(),
-            }))
+            }),
+            cargo_home: Some(root.join("cargo-home")),
         };
         let owner =
             native_lock_owner(&member, &member.root, &probe(&[&member.manifest, &other])).unwrap();
@@ -600,10 +630,20 @@ mod tests {
         );
         assert!(owner.reason.is_none());
         assert!(owner.inputs_complete);
+        assert!(!owner.defer_to_cargo);
+
+        let mut unknown_home = probe(&[&member.manifest, &other]);
+        unknown_home.cargo_home = None;
+        let owner = native_lock_owner(&member, &member.root, &unknown_home).unwrap();
+        assert_eq!(owner.root, root);
+        assert!(owner.lock.is_none());
+        assert!(!owner.inputs_complete);
+        assert!(owner.defer_to_cargo);
 
         let owner = native_lock_owner(&member, &member.root, &probe(&[&other])).unwrap();
         assert!(owner.lock.is_none());
         assert!(owner.inputs.is_empty());
+        assert!(!owner.defer_to_cargo);
         assert!(owner
             .reason
             .unwrap()

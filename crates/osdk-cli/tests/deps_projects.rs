@@ -448,6 +448,69 @@ fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
     all(windows, target_env = "gnu"),
     ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
 )]
+fn cargo_workspace_frozen_tracks_lock_under_provider_home() {
+    let fixture = CargoWorkspace::new(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    let home = root.join("provider-home");
+    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let config = root.join("osdk.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let home_value = toml::Value::String(home.to_str().unwrap().into());
+    std::fs::write(
+        config,
+        format!("{text}[deps.cargo.env]\nCARGO_HOME = ''\n{home_key} = {home_value}\n"),
+    )
+    .unwrap();
+    write(
+        root,
+        "provider-home/.cargo/config.toml",
+        "[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+    );
+    let configured_lock = home.join("alternate/Cargo.lock");
+    std::fs::create_dir_all(configured_lock.parent().unwrap()).unwrap();
+    std::fs::write(&configured_lock, &lock).unwrap();
+    let native = || {
+        fixture
+            .command(&fixture.cargo)
+            .current_dir(root.join("crates/demo"))
+            .env("CARGO_HOME", "")
+            .env(home_key, &home)
+            .args(["fetch", "--locked", "--offline"])
+            .output()
+            .unwrap()
+    };
+    let native_first = native();
+    assert!(native_first.status.success(), "{native_first:?}");
+
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    let unchanged = fixture.member(&[]);
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+    assert_eq!(std::fs::read(&configured_lock).unwrap(), lock);
+    std::fs::remove_file(&configured_lock).unwrap();
+    let native_missing = native();
+    assert!(!native_missing.status.success(), "{native_missing:?}");
+    assert!(String::from_utf8_lossy(&native_missing.stderr).contains("alternate"));
+
+    let missing = fixture.member(&[]);
+    assert!(!missing.status.success(), "{missing:?}");
+    let error = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        error.contains("provider-home") && error.contains("alternate"),
+        "{error}"
+    );
+    assert!(!configured_lock.exists());
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
 fn cargo_workspace_frozen_rechecks_nonmember_path_dependencies() {
     let cargo = native_test_cargo();
     let fixture = CargoWorkspace::new(cargo);
