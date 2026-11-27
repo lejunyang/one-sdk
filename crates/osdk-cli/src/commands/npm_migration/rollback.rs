@@ -9,13 +9,20 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use osdk_core::store::dirlink;
 
-use super::{modules, npm_command, ManagedNodeTools};
+#[cfg(windows)]
+use super::npm_command;
+use super::{modules, ManagedNodeTools};
+
+#[cfg(unix)]
+mod man;
 
 pub(in crate::commands) struct Snapshot {
     prefix: PathBuf,
     bin: PathBuf,
     backup: tempfile::TempDir,
     directory_permissions: BTreeMap<PathBuf, Permissions>,
+    #[cfg(unix)]
+    man_sections: BTreeMap<String, man::SectionDirectory>,
 }
 
 impl Snapshot {
@@ -33,17 +40,15 @@ impl Snapshot {
             bin,
             backup,
             directory_permissions: BTreeMap::new(),
+            #[cfg(unix)]
+            man_sections: BTreeMap::new(),
         };
 
         let modules = modules(&snapshot.prefix);
         check_directory_if_present(modules.parent().unwrap())?;
         snapshot.capture_tree(&modules, "node_modules")?;
         #[cfg(unix)]
-        {
-            let man = snapshot.prefix.join("share/man");
-            check_directory_if_present(man.parent().unwrap())?;
-            snapshot.capture_tree(&man, "man")?;
-        }
+        snapshot.capture_manpages()?;
         check_bin(&snapshot.bin)?;
         let backup_bin = snapshot.backup.path().join("bin");
         fs::create_dir(&backup_bin)?;
@@ -109,28 +114,31 @@ impl Snapshot {
         let modules = modules(&self.prefix);
         let old_modules = self.backup.path().join("node_modules");
         check_directory_if_present(modules.parent().unwrap())?;
-        if inspect(&modules)?.is_some_and(|meta| real_directory(&meta)) {
-            let mut args = vec!["uninstall", "-g", "--offline", "--ignore-scripts"];
-            for name in planned {
-                if added_package(name, &old_modules, &modules)? {
-                    args.push(name);
-                }
-            }
-            if args.len() > 4 {
-                // npm can reject a partially installed tree. The filesystem
-                // pass below removes whatever is left, including incomplete packages.
-                let _ = npm_command(tools, &args);
-            }
-        }
-        self.verify_prefix(&tools.prefix)?;
-        check_directory_if_present(modules.parent().unwrap())?;
-        self.restore_tree(&old_modules, &modules)?;
         #[cfg(unix)]
         {
-            let man = self.prefix.join("share/man");
-            check_directory_if_present(man.parent().unwrap())?;
-            self.restore_tree(&self.backup.path().join("man"), &man)?;
+            // npm uninstall removes manifest-declared man paths without checking
+            // who owns the live entry. Restore the snapshot directly on Unix.
+            self.restore_manpages(planned)?;
         }
+        #[cfg(windows)]
+        {
+            if inspect(&modules)?.is_some_and(|meta| real_directory(&meta)) {
+                let mut args = vec!["uninstall", "-g", "--offline", "--ignore-scripts"];
+                for name in planned {
+                    if added_package(name, &old_modules, &modules)? {
+                        args.push(name);
+                    }
+                }
+                if args.len() > 4 {
+                    // npm can reject a partially installed tree. The filesystem
+                    // pass below removes whatever is left, including incomplete packages.
+                    let _ = npm_command(tools, &args);
+                }
+            }
+            self.verify_prefix(&tools.prefix)?;
+            check_directory_if_present(modules.parent().unwrap())?;
+        }
+        self.restore_tree(&old_modules, &modules)?;
 
         check_bin(&self.bin)?;
         let old_bin = self.backup.path().join("bin");
@@ -272,6 +280,7 @@ fn is_launcher(name: &OsStr, metadata: &Metadata) -> bool {
     !runtime && !real_directory(metadata)
 }
 
+#[cfg(windows)]
 fn added_package(name: &str, before: &Path, current: &Path) -> Result<bool> {
     let Ok(id) = osdk_core::tool::ToolId::dynamic("npm", name) else {
         return Ok(false);

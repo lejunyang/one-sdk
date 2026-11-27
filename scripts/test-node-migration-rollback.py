@@ -102,6 +102,8 @@ class Registry(http.server.BaseHTTPRequestHandler):
             }).encode()
             content_type = "application/json"
         elif path.startswith("/tarballs/") and archive_name != MISSING and archive_name in self.server.packages:
+            if self.server.before_tarball:
+                self.server.before_tarball(archive_name)
             _, tarball = self.server.packages[archive_name]
             body, content_type = tarball.read_bytes(), "application/octet-stream"
         else:
@@ -122,6 +124,7 @@ def loopback_registry(packages):
         server.packages = packages
         server.url = f"http://127.0.0.1:{server.server_port}"
         server.requests = []
+        server.before_tarball = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -195,12 +198,23 @@ class MigrationRollback(unittest.TestCase):
     def test_forced_manpage_collision(self):
         self.verify_manpage_collision(force=True)
 
-    def verify_manpage_collision(self, force):
-        root = self.root / f"manpage-{force}"
+    def test_forced_manpage_collision_in_linked_section(self):
+        self.verify_manpage_collision(force=True, section_target="../manual-store/man1")
+
+    def test_forced_manpage_collision_in_section_linked_within_man_tree(self):
+        self.verify_manpage_collision(force=True, section_target="manual-pages")
+
+    def test_forced_manpage_collision_from_legacy_uppercase_package(self):
+        self.verify_manpage_collision(
+            force=True, section_target="../manual-store/man1",
+            incoming_name="Osdk-migration-manpage",
+        )
+
+    def verify_manpage_collision(self, force, section_target=None, incoming_name="osdk-migration-manpage"):
+        root = self.root / self._testMethodName
         root.mkdir()
         original, incoming = root / "original", root / "incoming"
         collision, added = "osdk-collision.1", "osdk-added.1"
-        incoming_name = "osdk-migration-manpage"
         write_project(original, CLI, "ORIGINAL")
         write_project(incoming, incoming_name, "INCOMING")
         for project, names in [(original, [collision]), (incoming, [added, collision])]:
@@ -208,12 +222,14 @@ class MigrationRollback(unittest.TestCase):
             data = json.loads(manifest.read_text(encoding="utf-8"))
             data["man"] = names
             if project == incoming and force:
-                # Prove npm replaced the existing man link before it failed.
+                # Fail only after npm has made both man-page writes.
                 data["scripts"] = {"postinstall": "node verify-overwrite.cjs"}
                 (project / "verify-overwrite.cjs").write_text(
-                    'const link = require("fs").readlinkSync('
-                    'process.env.npm_config_prefix + "/share/man/man1/osdk-collision.1");\n'
-                    f'process.exit(link.includes("{incoming_name}") ? 47 : 48);\n',
+                    'const { readlinkSync } = require("node:fs");\n'
+                    'const section = process.env.npm_config_prefix + "/share/man/man1/";\n'
+                    f'const pages = {json.dumps([collision, added])};\n'
+                    f'process.exit(pages.every(page => readlinkSync(section + page)'
+                    f'.includes("/{incoming_name}/")) ? 47 : 48);\n',
                     encoding="utf-8",
                 )
             manifest.write_text(json.dumps(data), encoding="utf-8")
@@ -228,12 +244,30 @@ class MigrationRollback(unittest.TestCase):
                 shutil.copytree(self.nodes / prefix.name, prefix, symlinks=True)
             npm(env | {"npm_config_cache": str(root / "source-cache")}, source,
                 "install", "-g", "--ignore-scripts", incoming_fixture[1])
+            man = target / "share/man/man1"
+            if section_target:
+                section_dir = man.parent / section_target
+                section_dir.parent.mkdir(parents=True, exist_ok=True)
+                man.rename(section_dir)
+                man.symlink_to(section_target, target_is_directory=True)
             npm(env | {"npm_config_cache": str(root / "target-cache")}, target,
                 "install", "-g", original_tarball)
-            man = target / "share/man/man1"
             original_link = os.readlink(man / collision)
             original_destination = (man / collision).resolve(strict=True)
+            self.assertEqual((man / collision).read_text(encoding="utf-8"), "original")
             self.assertFalse(os.path.lexists(man / added))
+
+            if section_target:
+                manual_dir = man.resolve(strict=True)
+                independent = manual_dir / "independent.1"
+                independent_link = manual_dir / "independent-link.1"
+
+                def add_independent_manpages(name):
+                    if name == incoming_name:
+                        independent.write_text("independent page", encoding="utf-8")
+                        independent_link.symlink_to(independent.name)
+
+                server.before_tarball = add_independent_manpages
 
             env["npm_config_cache"] = str(root / "migration-cache")
             if force:
@@ -241,12 +275,21 @@ class MigrationRollback(unittest.TestCase):
             failure = run(env, root, self.osdk, "node", "migrate-packages",
                           "--from", SOURCE, "--to", TARGET, "--apply", code=1)
             print(json.dumps({
-                "scenario": "manpage-collision", "force": force, "exit": failure.returncode,
+                "scenario": self._testMethodName, "force": force, "exit": failure.returncode,
+                "incoming_package": incoming_name, "section_target": section_target,
                 "original_link": original_link, "current_link": os.readlink(man / collision),
-                "added_link": os.path.lexists(man / added), "stderr": failure.stderr,
+                "added_link": os.path.lexists(man / added),
+                "independent_file": section_target and independent.exists(),
+                "independent_link": section_target and independent_link.is_symlink(),
+                "stderr": failure.stderr,
             }), flush=True)
             self.assertIn("restored the target Node package set", failure.stderr)
             self.assertIn("npm error code 47" if force else "EEXIST", failure.stderr)
+            self.assertIn((f"/tarballs/{incoming_name}.tgz", 200), server.requests)
+            if section_target:
+                self.assertEqual(os.readlink(man), section_target)
+                self.assertEqual(independent.read_text(encoding="utf-8"), "independent page")
+                self.assertEqual(os.readlink(independent_link), independent.name)
             self.assertEqual(os.readlink(man / collision), original_link)
             self.assertEqual((man / collision).resolve(strict=True), original_destination)
             self.assertEqual((man / collision).read_text(encoding="utf-8"), "original")

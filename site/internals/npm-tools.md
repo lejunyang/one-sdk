@@ -325,13 +325,15 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 相对链接在发布回原位置后仍指向原目标。
 
 Node 版本间迁移（`--to`）也显式指定 prefix，不受激活变量或 builtin 默认值影响。
-执行前解析目标 prefix，在实际目录内备份全局 `node_modules`、命令入口和 Unix 的 `share/man` 目录。
+执行前解析目标 prefix，在实际目录内备份全局 `node_modules` 和命令入口。Unix 上也按
+`share/man/manN` 章节目录的实际指向备份手册入口。
 回滚前检查受管 prefix 是否仍指向原目录。
 备份保留原链接文本，Windows 上也保留 junction 和符号链接各自的类型。
 打开 junction 备份目录时使用 Rust 的 Windows 长路径转换，覆盖备份路径超过 `MAX_PATH` 的情况。
-安装失败后按目录条目识别已落盘的新增包，先尝试离线卸载这些计划内的包，再按快照清除
-残留内容和入口。这个过程无需 npm 重新枚举包或读取残缺的 manifest。原有文件和链接只在
-发生变化时从备份还原，命令保留安装失败的错误。回滚失败时保留备份并报告路径。
+安装失败后，Windows 先尝试离线卸载已落盘的计划内新增包。Unix 复核手册章节目录的指向，
+只清除或还原指向本次计划内包的手册链接，保留无关的并发写入。
+随后按快照清理残留包和命令入口，无需 npm 重新枚举包或读取残缺的 manifest。
+原有文件和链接只在发生变化时从备份还原，命令保留安装失败的错误。回滚失败时保留备份并报告路径。
 
 `--allow-scripts` 要求共享迁移且显式 `--package`，将安装参数改为 `--ignore-scripts=false`，
 覆盖继承的 ignore-scripts 配置，允许选中包及其依赖执行 npm 生命周期脚本。预览仍不调用 npm；

@@ -5571,8 +5571,6 @@ elif [ "$1" = "install" ] && [ "$3" = "eslint@9.1.0" ]; then
   ln -s ../lib/node_modules/eslint/cli.js "$prefix/bin/eslint"
   printf '%s\n' 'fixture tarball 404' >&2
   exit 9
-elif [ "$1" = "uninstall" ]; then
-  exit 8
 fi
 "#,
         prefix.display(),
@@ -5613,11 +5611,7 @@ fi
         .collect();
     assert_eq!(
         commands,
-        [
-            "ls -g --depth=0 --json --long",
-            "install -g eslint@9.1.0",
-            "uninstall -g --offline --ignore-scripts eslint",
-        ]
+        ["ls -g --depth=0 --json --long", "install -g eslint@9.1.0",]
     );
 }
 

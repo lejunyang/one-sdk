@@ -433,17 +433,20 @@ to their original targets once published at the original location.
 
 Node-to-Node migration (`--to`) also pins prefixes explicitly, independent of
 activation variables and builtin defaults. Before installing, it resolves the
-target prefix and backs up global `node_modules`, launchers, and the Unix
-`share/man` tree inside that directory, on the target volume. Before restoring,
-it verifies that the managed prefix still resolves to that directory.
+target prefix and backs up global `node_modules` and launchers inside that
+directory, on the target volume. On Unix it also backs up man pages from the
+resolved `share/man/manN` section directories. Before restoring, it verifies
+that the managed prefix still resolves to that directory.
 The backup preserves link text and the original junction or symlink type on
 Windows. Junction backups use Rust's Windows path conversion when the backup
-path exceeds `MAX_PATH`. On install failure it finds newly added planned packages
-by their directory entries and tries an offline npm uninstall. It then removes
-filesystem entries absent from the backup, including leftovers with incomplete
-manifests. It restores original files and links only where they changed, and the
-command reports the original install error. Failed rollback keeps the backup
-and reports its path.
+path exceeds `MAX_PATH`. On install failure, Windows tries an offline npm
+uninstall of newly added planned packages. Unix verifies the man section
+destinations and only removes or restores man links that point to packages
+in the migration plan, preserving unrelated concurrent writes.
+The rollback then uses the backup to clean up leftover packages and launchers,
+including packages with incomplete manifests. It restores original files and
+links where they changed and reports the original install error. Failed rollback
+keeps the backup and reports its path.
 
 `--allow-scripts` requires shared migration and explicit `--package` selection.
 It passes `--ignore-scripts=false` to override inherited ignore-scripts settings,
