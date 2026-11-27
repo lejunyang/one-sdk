@@ -136,6 +136,10 @@ by a later `add`, `update`, or `sync`. A legacy lock without `install_mode` infe
 its placement from the existing target (link versus real directory). A local source
 that overlaps its destination is rejected before staging so it cannot delete itself.
 
+For each skill, `update` prepares every Agent target before changing the active
+installation. If a target fails to activate, the previous installation and lock
+entry are preserved.
+
 ## Security
 
 - **Fail-closed downloads:** a GitHub tarball goes through osdk's existing download

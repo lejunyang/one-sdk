@@ -571,6 +571,41 @@ fn skills_update_keeps_an_unchanged_short_pin_offline() {
     assert_eq!(std::fs::read_to_string(lock).unwrap(), locked);
 }
 
+#[test]
+fn skills_update_leaves_existing_contents_and_lock_when_a_target_is_blocked() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(root, DEMO_DECLARATION);
+    let sync = osdk(root, &project, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+
+    let codex = project.join(".agents/skills/demo/SKILL.md");
+    let lock = project.join("osdk.lock");
+    let before = std::fs::read(&lock).unwrap();
+    let edited = format!("{DEMO_SKILL}\nLocal edit\n");
+    std::fs::write(&codex, &edited).unwrap();
+    let blocker = project.join(".claude/skills");
+    std::fs::create_dir(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, b"blocked").unwrap();
+    // Cursor uses the same path as Codex, which sorts before the blocked path.
+    std::fs::write(
+        project.join("osdk.toml"),
+        DEMO_DECLARATION.replace("\"codex\"", "\"codex\", \"cursor\", \"claude-code\""),
+    )
+    .unwrap();
+
+    let update = osdk(root, &project, &["--offline", "skills", "update", "demo"]);
+    assert!(!update.status.success(), "{update:?}");
+    let stderr = String::from_utf8_lossy(&update.stderr);
+    assert!(
+        stderr.contains(".claude") && stderr.contains("skills"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&codex).unwrap(), edited.as_bytes());
+    assert_eq!(std::fs::read(&blocker).unwrap(), b"blocked");
+    assert_eq!(std::fs::read(&lock).unwrap(), before);
+}
+
 /// Editing a skill's `agents` in osdk.toml must reach the lock and the disk on
 /// `skills update`. It used to re-resolve only the source, so an agent removed
 /// from the declaration stayed installed and recorded.

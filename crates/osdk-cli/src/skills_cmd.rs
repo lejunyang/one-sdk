@@ -468,6 +468,23 @@ fn unlink_agents(
     scope_root: &Path,
     global: bool,
 ) -> Result<bool> {
+    let plan = plan_agent_unlinks(remove_from, remaining, scope_root, global)?;
+    let mut removed_any = false;
+    for step in &plan {
+        if !step.physically_unlink || install::unlink_from(&step.dir(scope_root, global)?, name)? {
+            removed_any = true;
+            step.report(name);
+        }
+    }
+    Ok(removed_any)
+}
+
+fn plan_agent_unlinks(
+    remove_from: &[String],
+    remaining: &[String],
+    scope_root: &Path,
+    global: bool,
+) -> Result<Vec<UnlinkStep>> {
     let mut dir_of: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
     for agent_id in remove_from.iter().chain(remaining.iter()) {
         let Some(target) = agent_target(agent_id) else {
@@ -480,31 +497,7 @@ fn unlink_agents(
         let canonical = dir.canonicalize().unwrap_or(dir);
         dir_of.insert(agent_id.clone(), canonical);
     }
-    let plan = plan_unlinks(remove_from, remaining, &dir_of);
-
-    let mut removed_any = false;
-    for step in &plan {
-        if step.physically_unlink {
-            let dir = agent_dir(
-                agent_target(&step.agent).expect("planned agent exists"),
-                scope_root,
-                global,
-            )?;
-            if install::unlink_from(&dir, name)? {
-                removed_any = true;
-                println!("removed `{name}` from {}", step.agent);
-            }
-        } else {
-            // A remaining agent shares this directory, or another removed agent
-            // already unlinked it: keep the files, only drop ownership in lock.
-            removed_any = true;
-            println!(
-                "unlinked `{name}` from {} (shared dir kept for other agents)",
-                step.agent
-            );
-        }
-    }
-    Ok(removed_any)
+    Ok(plan_unlinks(remove_from, remaining, &dir_of))
 }
 
 /// The agents the project now declares for `name`, when it declares any.
@@ -522,18 +515,17 @@ fn declared_agents(app: &App, name: &str) -> Option<Vec<String>> {
     (!agents.is_empty()).then(|| agents.clone())
 }
 
-/// Install a prepared replacement on the final set of agents, or use the
-/// locked bytes for newly declared agents. Unlink dropped agents after linking
-/// succeeds and return whether the Agent list changed.
-async fn update_skill_targets(
+/// Prepare a replacement for the final set of agents, or use the locked
+/// bytes for newly declared agents. Dropped agents join the same transaction.
+async fn prepare_skill_targets<'a>(
     app: &App,
-    name: &str,
+    name: &'a str,
     entry: &mut LockedSkill,
     scope_root: &Path,
     global: bool,
     mode: LinkMode,
     replacement: Option<PathBuf>,
-) -> Result<bool> {
+) -> Result<(install::SkillTargetChanges<'a>, Vec<UnlinkStep>)> {
     let declared = declared_agents(app, name).unwrap_or_else(|| entry.agents.clone());
     let removed: Vec<String> = entry
         .agents
@@ -568,24 +560,28 @@ async fn update_skill_targets(
         }
         None => None,
     };
+    let mut changes = install::SkillTargetChanges::new(name)?;
     if let Some((agents, staged)) = installation {
         let targets = agents
             .iter()
             .filter_map(|agent| agent_target(agent))
             .collect::<Vec<_>>();
         for agent_dir in agent_dirs_by_path(&targets, scope_root, global)?.keys() {
-            install::link_into(agent_dir, name, &staged, mode)?;
+            changes.replace(agent_dir, &staged, mode)?;
         }
     }
+    let mut unlinks = Vec::new();
     if !removed.is_empty() {
-        unlink_agents(name, &removed, &declared, scope_root, global)?;
+        for step in plan_agent_unlinks(&removed, &declared, scope_root, global)? {
+            if !step.physically_unlink || changes.remove(&step.dir(scope_root, global)?)? {
+                unlinks.push(step);
+            }
+        }
     }
-    let agents_changed = !removed.is_empty() || !added.is_empty();
-    if agents_changed {
-        println!("`{name}`: agents now {}", declared.join(", "));
+    if !removed.is_empty() || !added.is_empty() {
         entry.agents = declared;
     }
-    Ok(agents_changed)
+    Ok((changes, unlinks))
 }
 
 fn declaration_applies(app: &App, declaration: &SkillDeclaration) -> bool {
@@ -852,108 +848,122 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
 
     let scope_root = scope_root(app, global)?;
     let fallback_mode = link_mode(app, false);
-    let mut changed = false;
     for name in &names {
-        let Some(entry) = lock.skills.get_mut(name) else {
+        let Some(locked) = lock.skills.get(name) else {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
-        let mode = install_mode_for_entry(entry, name, &scope_root, global, fallback_mode)?;
-        let source = SkillSource::parse(&entry.source)?;
-        let SkillSource::GitHub {
-            owner,
-            repo,
-            subdir,
-        } = &source
-        else {
-            changed |=
-                update_skill_targets(app, name, entry, &scope_root, global, mode, None).await?;
-            println!("`{name}`: local source, nothing to update");
-            continue;
-        };
-        // New locks carry the user's request independently from the immutable
-        // commit. Legacy locks fall back to project configuration for migration.
-        let configured_reference = app
-            .ctx
-            .config
-            .skills
-            .get(name)
-            .map(|declaration| declaration.r#ref.as_deref());
-        let requested_reference = configured_reference.unwrap_or(entry.requested_ref.as_deref());
-        let reference = reference_for_update(requested_reference);
-        let requested_ref = normalized_requested_ref(requested_reference);
-        // An abbreviated pin can reuse a resolution made for that same request.
-        let pinned_commit = reference.and_then(|reference| reference.strip_prefix("rev:"));
-        let commit = match &entry.resolved_commit {
-            Some(commit)
-                if pinned_commit.is_some_and(|pin| {
-                    pin.eq_ignore_ascii_case(commit)
-                        || (entry.requested_ref == requested_ref
-                            && !pin.is_empty()
-                            && commit
-                                .get(..pin.len())
-                                .is_some_and(|prefix| pin.eq_ignore_ascii_case(prefix)))
-                }) =>
-            {
-                commit.clone()
+        let mode = install_mode_for_entry(locked, name, &scope_root, global, fallback_mode)?;
+        let mut entry = locked.clone();
+        let (replacement, message) = resolve_skill_update(app, name, &mut entry, mode).await?;
+        let (targets, unlinks) = prepare_skill_targets(
+            app,
+            name,
+            &mut entry,
+            &scope_root,
+            global,
+            mode,
+            replacement,
+        )
+        .await?;
+        if &entry != locked {
+            let agents_changed = entry.agents != locked.agents;
+            lock.skills.insert(name.clone(), entry);
+            // Save each skill before discarding its backups. A later skill can
+            // fail independently, even when one invocation updates several.
+            targets.apply(|| lockfile::save_before_directory_sync(&lock_path, &lock))?;
+            // A directory sync error occurs after the lock has been replaced.
+            lockfile::sync_directory(&lock_path)?;
+            for step in &unlinks {
+                step.report(name);
             }
-            _ => skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
-                .await
-                .with_context(|| format!("re-resolving {owner}/{repo}"))?,
-        };
-        if Some(&commit) == entry.resolved_commit.as_ref() {
-            changed |=
-                update_skill_targets(app, name, entry, &scope_root, global, mode, None).await?;
-            if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
-                entry.requested_ref = requested_ref;
-                entry.install_mode = Some(mode);
-                changed = true;
+            if agents_changed {
                 println!(
-                    "`{name}`: already at {}, migrated lock metadata",
-                    &commit[..commit.len().min(12)]
+                    "`{name}`: agents now {}",
+                    lock.skills[name].agents.join(", ")
                 );
-            } else {
-                println!("`{name}`: already at {}", &commit[..commit.len().min(12)]);
             }
-            continue;
         }
-
-        let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
-        let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
-        let wanted_dir = entry.skill.as_deref().unwrap_or(name);
-        let skill_root = recorded_skill_root(&root, wanted_dir)?;
-        let package = install::read_skill_dir(&skill_root)?;
-        let content_hash = package.content_hash();
-        let content_changed = content_hash != entry.content_hash;
-        let staged = if content_changed {
-            Some(install::stage(
-                &app.ctx.dirs,
-                &source.canonical(),
-                &package,
-                mode,
-            )?)
-        } else {
-            None
-        };
-        update_skill_targets(app, name, entry, &scope_root, global, mode, staged).await?;
-        entry.requested_ref = requested_ref;
-        entry.resolved_commit = Some(commit.clone());
-        entry.content_hash = content_hash;
-        entry.install_mode = Some(mode);
-        changed = true;
-        if content_changed {
-            println!("`{name}`: updated to {}", &commit[..commit.len().min(12)]);
-        } else {
-            println!(
-                "`{name}`: source advanced to {}, skill content unchanged",
-                &commit[..commit.len().min(12)]
-            );
-        }
-    }
-
-    if changed {
-        lockfile::save(&lock_path, &lock)?;
+        println!("`{name}`: {message}");
     }
     Ok(())
+}
+
+async fn resolve_skill_update(
+    app: &App,
+    name: &str,
+    entry: &mut LockedSkill,
+    mode: LinkMode,
+) -> Result<(Option<PathBuf>, String)> {
+    let source = SkillSource::parse(&entry.source)?;
+    let SkillSource::GitHub {
+        owner,
+        repo,
+        subdir,
+    } = &source
+    else {
+        return Ok((None, "local source, nothing to update".into()));
+    };
+    // New locks carry the user's request independently from the immutable
+    // commit. Legacy locks fall back to project configuration for migration.
+    let configured_reference = app
+        .ctx
+        .config
+        .skills
+        .get(name)
+        .map(|declaration| declaration.r#ref.as_deref());
+    let requested_reference = configured_reference.unwrap_or(entry.requested_ref.as_deref());
+    let reference = reference_for_update(requested_reference);
+    let requested_ref = normalized_requested_ref(requested_reference);
+    // An abbreviated pin can reuse a resolution made for that same request.
+    let pinned_commit = reference.and_then(|reference| reference.strip_prefix("rev:"));
+    let commit = match &entry.resolved_commit {
+        Some(commit)
+            if pinned_commit.is_some_and(|pin| {
+                pin.eq_ignore_ascii_case(commit)
+                    || (entry.requested_ref == requested_ref
+                        && !pin.is_empty()
+                        && commit
+                            .get(..pin.len())
+                            .is_some_and(|prefix| pin.eq_ignore_ascii_case(prefix)))
+            }) =>
+        {
+            commit.clone()
+        }
+        _ => skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
+            .await
+            .with_context(|| format!("re-resolving {owner}/{repo}"))?,
+    };
+    let short_commit = &commit[..commit.len().min(12)];
+    if Some(&commit) == entry.resolved_commit.as_ref() {
+        let mut message = format!("already at {short_commit}");
+        if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
+            entry.requested_ref = requested_ref;
+            entry.install_mode = Some(mode);
+            message.push_str(", migrated lock metadata");
+        }
+        return Ok((None, message));
+    }
+
+    let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
+    let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
+    let wanted_dir = entry.skill.as_deref().unwrap_or(name);
+    let skill_root = recorded_skill_root(&root, wanted_dir)?;
+    let package = install::read_skill_dir(&skill_root)?;
+    let content_hash = package.content_hash();
+    let (replacement, message) = if content_hash != entry.content_hash {
+        let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
+        (Some(staged), format!("updated to {short_commit}"))
+    } else {
+        (
+            None,
+            format!("source advanced to {short_commit}, skill content unchanged"),
+        )
+    };
+    entry.requested_ref = requested_ref;
+    entry.resolved_commit = Some(commit);
+    entry.content_hash = content_hash;
+    entry.install_mode = Some(mode);
+    Ok((replacement, message))
 }
 
 /// Interpret a declaration ref for an explicit `skills update`.
@@ -1587,6 +1597,27 @@ fn home_dir() -> Result<PathBuf> {
 struct UnlinkStep {
     agent: String,
     physically_unlink: bool,
+}
+
+impl UnlinkStep {
+    fn dir(&self, scope_root: &Path, global: bool) -> Result<PathBuf> {
+        agent_dir(
+            agent_target(&self.agent).expect("planned agent exists"),
+            scope_root,
+            global,
+        )
+    }
+
+    fn report(&self, name: &str) {
+        if self.physically_unlink {
+            println!("removed `{name}` from {}", self.agent);
+        } else {
+            println!(
+                "unlinked `{name}` from {} (shared dir kept for other agents)",
+                self.agent
+            );
+        }
+    }
 }
 
 /// Decide, for each agent being removed, whether to physically unlink its skills

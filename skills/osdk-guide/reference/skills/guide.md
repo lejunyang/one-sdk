@@ -30,5 +30,7 @@ osdk skills update name
 技能时，移除锁条目再同步，或显式调用 `add`。配置见
 `reference/configuration/skills.md`。
 
+`update` 先为同一技能准备所有 Agent 目标。任何目标激活失败时，保留原安装内容和锁条目。
+
 GitHub tarball 必须成功下载并安全解包后才算候选成功；HTTP 200 错页或损坏归档会被清理，
 随后尝试下一个 GitHub 下载入口。

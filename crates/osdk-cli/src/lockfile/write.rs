@@ -1051,6 +1051,13 @@ pub(crate) fn locked_native_lock_from_options(
 }
 
 pub(crate) fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
+    save_before_directory_sync(path, lockfile)?;
+    sync_directory(path)
+}
+
+/// Replace the lockfile. Callers coordinating other filesystem changes can
+/// treat a successful replacement as committed and sync the directory separately.
+pub(crate) fn save_before_directory_sync(path: &Path, lockfile: &Lockfile) -> Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1078,8 +1085,7 @@ pub(crate) fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
             maximum = MAX_LOCKFILE_BYTES
         ));
     }
-    atomic_write(path, text.as_bytes())?;
-    Ok(())
+    atomic_write(path, text.as_bytes())
 }
 
 pub(crate) fn migrate_npm_entries_to_schema_three(lockfile: &mut Lockfile) -> Result<()> {
@@ -1127,11 +1133,20 @@ pub(crate) fn migrate_npm_entries_to_schema_three(lockfile: &mut Lockfile) -> Re
     Ok(())
 }
 
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
+fn lock_parent(path: &Path) -> &Path {
+    path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+        .unwrap_or_else(|| Path::new("."))
+}
+
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
+    let parent = lock_parent(path);
+    osdk_core::fs::sync_parent(parent)
+        .with_context(|| format!("syncing lockfile directory {}", parent.display()))
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = lock_parent(path);
     std::fs::create_dir_all(parent)
         .with_context(|| osdk_core::t!("err.fs_directory_create", path = parent.display()))?;
     let file_name = path
@@ -1167,10 +1182,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| osdk_core::t!("err.fs_file_sync", path = temporary.display()))?;
         drop(file);
         osdk_core::fs::atomic_replace(&temporary, path)
-            .with_context(|| osdk_core::t!("err.fs_file_replace", path = path.display()))?;
-        osdk_core::fs::sync_parent(parent)
-            .with_context(|| format!("syncing lockfile directory {}", parent.display()))?;
-        Ok(())
+            .with_context(|| osdk_core::t!("err.fs_file_replace", path = path.display()))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
