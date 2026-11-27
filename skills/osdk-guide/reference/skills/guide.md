@@ -30,6 +30,10 @@ osdk skills update name
 技能时，移除锁条目再同步，或显式调用 `add`。配置见
 `reference/configuration/skills.md`。
 
+升级后若 `list` 或 `remove` 提示子项目技能登记在上级锁里，先核对归属，再把提示所列的
+完整技能表原样复制到子项目锁。新建锁先写 `schema = 4`。仅当条目只归该子项目时才从
+上级锁移走。回到子项目运行 `osdk skills list` 核对，再重试原命令。
+
 `update` 遵循声明中的 `when`，跳过当前平台不适用的技能，保留已有安装和锁条目。
 它先为同一技能准备所有 Agent 目标。任何目标激活失败时，保留原安装内容和锁条目。
 

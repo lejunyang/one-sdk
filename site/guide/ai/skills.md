@@ -166,3 +166,12 @@ agents = ["claude-code", "codex"]
 使用用户级 Agent 目录与用户配置目录下的 `osdk.lock`。传 `-g` 可显式选择用户范围。
 `skills path` 按配置选择范围。未配置 `scope` 时，先查项目锁，再查用户锁。
 完整字段说明见 `osdk-guide` 的 `reference/configuration/skills.md`。
+
+### 恢复旧版子项目的技能
+
+旧版可能把子项目安装的技能记在上级 `osdk.lock` 中。如果 `osdk skills list` 或
+`osdk skills remove demo` 报告这类安装，先确认提示中的条目确实归这个子项目。
+将上级锁中的完整 `[skills.demo]` 表原样复制到提示所列的子项目锁中，新建锁时先写一行
+`schema = 4`。这样可保留原来的提交、内容哈希、Agent 和安装方式。仅在确认条目只归这个
+子项目时，才从上级锁中移走该表。回到子项目运行 `osdk skills list` 核对，再重试
+`osdk skills remove demo` 或原命令。

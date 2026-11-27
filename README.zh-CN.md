@@ -786,6 +786,9 @@ osdk skills remove web-design-guidelines
 要更换固定 commit，修改 `ref` 后联网运行 `skills update`。
 设置 `[skills].scope = "global"` 默认使用用户级 Agent 目录，也可为单次命令传 `-g`。
 
+如果 `skills list` 或 `skills remove` 提示旧版把子项目技能记在上级锁里，见
+[子项目恢复指南](site/guide/ai/skills.md#恢复旧版子项目的技能)。
+
 指南：[Agent skills](site/guide/ai/skills.md)
 
 ## 场景：控制下载源、离线与安全策略

@@ -207,3 +207,15 @@ select user scope. `skills path` uses the configured scope. With `scope` unset,
 it checks the project lock first, then the user lock. See
 `reference/configuration/skills.md` in the `osdk-guide` skill for the full field
 reference.
+
+### Recovering skills installed by an older version in a subproject
+
+Older releases could record a subproject's installed skill in an ancestor's
+`osdk.lock`. If `osdk skills list` or `osdk skills remove demo` reports this
+layout, verify that the reported entry belongs to the subproject. Copy the
+entire `[skills.demo]` table verbatim into the subproject lock named in the hint.
+If creating the lock, start it with `schema = 4`. This preserves the pinned
+commit, content hash, Agents, and installation mode. Remove the table from the
+ancestor lock only if it belongs exclusively to this subproject. Run
+`osdk skills list` in the subproject to verify, then retry
+`osdk skills remove demo` or your original command.

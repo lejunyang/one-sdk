@@ -111,9 +111,9 @@ fn list(app: &App, global: bool) -> Result<()> {
     } else {
         Default::default()
     };
-    if skills.is_empty() {
+    let recovery = legacy_skill_recovery(app, global, None, &skills);
+    if skills.is_empty() && recovery.is_none() {
         println!("No skills installed.");
-        return Ok(());
     }
     for (name, entry) in &skills {
         let agents = if entry.agents.is_empty() {
@@ -123,7 +123,59 @@ fn list(app: &App, global: bool) -> Result<()> {
         };
         println!("{name}  <- {}  [{}]", entry.source, agents);
     }
+    if let Some(hint) = recovery {
+        eprintln!("{hint}");
+    }
     Ok(())
+}
+
+/// Older releases could record a child's installation in the nearest existing
+/// ancestor lock. Check the recorded Agent locations, but leave ownership for
+/// the user to verify.
+fn legacy_skill_recovery(
+    app: &App,
+    global: bool,
+    wanted: Option<&str>,
+    recorded: &BTreeMap<String, LockedSkill>,
+) -> Option<String> {
+    let project = app.ctx.config.project.as_ref()?;
+    if global || project.is_external() {
+        return None;
+    }
+    let ancestor = lockfile::find(project.root.parent()?)?;
+    // A diagnostic about an unrelated lock should never block this project's commands.
+    let lock = lockfile::load(&ancestor).ok()?;
+    let matches = lock.skills.iter().filter(|(name, entry)| {
+        wanted.is_none_or(|wanted| wanted == *name)
+            && !recorded.contains_key(*name)
+            && skills::validate_skill_name(name).is_ok()
+            && entry
+                .agents
+                .iter()
+                .filter_map(|id| agent_target(id))
+                .any(|agent| {
+                    agent
+                        .project_dir(&project.root)
+                        .join(name)
+                        .join(install::SKILL_MANIFEST)
+                        .is_file()
+                })
+    });
+    let mut hints = Vec::new();
+    for (name, _) in matches {
+        let table = format!("[skills.{name:?}]");
+        hints.push(format!(
+            "Skill `{name}` is installed here and {table} is recorded in ancestor lock `{}`.\n\
+             Verify that the entry belongs to this project. Copy the full {table} table verbatim \
+             into `{}` (start it with `schema = {}` if absent). \
+             Remove the ancestor entry only if it belongs exclusively to this project. \
+             Run `osdk skills list` here to verify, then rerun your original command.",
+            ancestor.display(),
+            project.lock_path.display(),
+            lockfile::schema_version(),
+        ));
+    }
+    (!hints.is_empty()).then(|| hints.join("\n"))
 }
 
 /// Print the staged store path of an installed skill.
@@ -416,12 +468,20 @@ fn target_ids<'a>(targets: &'a [&AgentTarget]) -> impl Iterator<Item = &'static 
 fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Result<()> {
     osdk_core::skills::validate_skill_name(name)?;
     let lock_path = lock_path_for(app, global);
-    if !lock_path.is_file() {
-        anyhow::bail!("no lockfile; nothing to remove");
-    }
-    let mut lock = lockfile::load(&lock_path)?;
+    let has_lock = lock_path.is_file();
+    let mut lock = if has_lock {
+        lockfile::load(&lock_path)?
+    } else {
+        lockfile::Lockfile::default()
+    };
     let Some(entry) = lock.skills.get(name).cloned() else {
-        anyhow::bail!("skill `{name}` is not recorded in the lock");
+        if let Some(hint) = legacy_skill_recovery(app, global, Some(name), &lock.skills) {
+            anyhow::bail!("{hint}");
+        }
+        if has_lock {
+            anyhow::bail!("skill `{name}` is not recorded in the lock");
+        }
+        anyhow::bail!("no lockfile; nothing to remove");
     };
 
     let scope_root = scope_root(app, global)?;

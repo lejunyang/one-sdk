@@ -891,6 +891,9 @@ with network access.
 Set `[skills].scope = "global"` to use user-level Agent directories by default,
 or pass `-g` on an individual command.
 
+If `skills list` or `skills remove` reports an older installation recorded in an
+ancestor lock, follow the [subproject recovery guide](site/en/guide/ai/skills.md#recovering-skills-installed-by-an-older-version-in-a-subproject).
+
 Guide: [Agent skills](site/en/guide/ai/skills.md)
 
 ## Scenario: control sources, offline use, and trust
