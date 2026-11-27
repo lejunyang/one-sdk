@@ -785,11 +785,10 @@ async fn sync(app: &App, global: bool) -> Result<()> {
     if installations
         .iter()
         .any(SkillInstallation::replaces_existing_skill)
-        && !crate::prompt::confirm_outside_ci(
-            app.prompt.as_ref(),
-            "Replace existing unlocked skill files?",
-        )
-        .context("move the existing skill directories aside before syncing to keep them")?
+        && !app
+            .prompt
+            .confirm("Replace existing unlocked skill files?")
+            .context("move the existing skill directories aside before syncing to keep them")?
     {
         println!("Installation cancelled.");
         return Ok(());

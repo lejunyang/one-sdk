@@ -421,7 +421,7 @@ fn skills_sync_confirms_before_replacing_unlocked_contents() {
 #[test]
 fn skills_sync_preserves_unlocked_executable_scripts_without_confirmation() {
     use std::fs::File;
-    use std::io::IsTerminal;
+    use std::io::{IsTerminal, Read, Write};
     use std::os::fd::FromRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
@@ -473,46 +473,72 @@ fn skills_sync_preserves_unlocked_executable_scripts_without_confirmation() {
         );
         assert!(!lock.exists());
     };
-    let sync = osdk(root, &project, &["skills", "sync"]);
+    let sync = osdk_command(root, &project, &["skills", "sync"])
+        .env_remove("CI")
+        .output()
+        .unwrap();
     assert_eq!(sync.status.code(), Some(1), "{sync:?}");
     assert_preserved();
 
-    let mut master_fd = -1;
-    let mut slave_fd = -1;
-    let opened = unsafe {
-        libc::openpty(
-            &mut master_fd,
-            &mut slave_fd,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
-    // With the master open and no input, an interactive prompt would wait.
-    let _master = unsafe { File::from_raw_fd(master_fd) };
-    let slave = unsafe { File::from_raw_fd(slave_fd) };
-    assert!(slave.is_terminal());
-    let run_in_ci = |args: &[&str]| {
+    let run_in_terminal = |ci: &str, args: &[&str], answer: Option<&[u8]>| {
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        let opened = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+        let mut master = unsafe { File::from_raw_fd(master_fd) };
+        let slave = unsafe { File::from_raw_fd(slave_fd) };
+        assert!(slave.is_terminal());
+        assert_eq!(
+            unsafe { libc::fcntl(master_fd, libc::F_SETFL, libc::O_NONBLOCK) },
+            0
+        );
         let mut command = osdk_command(root, &project, args);
         command
-            .env("CI", "true")
+            .env("CI", ci)
+            .env("TERM", "xterm")
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::from(slave.try_clone().unwrap()));
         let mut child = command.spawn().unwrap();
+        if let Some(answer) = answer {
+            master.write_all(answer).unwrap();
+        }
+        let mut stderr = Vec::new();
+        let mut drain_terminal = || {
+            // Keep a slave handle open until capture is complete, including on macOS.
+            if let Err(error) = master.read_to_end(&mut stderr) {
+                assert_eq!(error.kind(), ErrorKind::WouldBlock, "{error}");
+            }
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
         while child.try_wait().unwrap().is_none() {
+            drain_terminal();
             if Instant::now() >= deadline {
                 child.kill().unwrap();
-                let output = child.wait_with_output().unwrap();
-                panic!("CI sync waited for interactive confirmation: {output:?}");
+                child.wait().unwrap();
+                panic!(
+                    "sync waited for input with CI={ci}: {}",
+                    String::from_utf8_lossy(&stderr)
+                );
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        child.wait_with_output().unwrap()
+        drain_terminal();
+        Output {
+            stderr,
+            ..child.wait_with_output().unwrap()
+        }
     };
-    let ci_sync = run_in_ci(&["--lang", "en", "skills", "sync"]);
+    let sync_args = ["--lang", "en", "skills", "sync"];
+    let ci_sync = run_in_terminal("woodpecker", &sync_args, None);
     assert_eq!(ci_sync.status.code(), Some(1), "{ci_sync:?}");
     let stderr = String::from_utf8_lossy(&ci_sync.stderr);
     for expected in ["confirmation required", "--yes", "move"] {
@@ -520,7 +546,14 @@ fn skills_sync_preserves_unlocked_executable_scripts_without_confirmation() {
     }
     assert_preserved();
 
-    let confirmed = run_in_ci(&["--yes", "skills", "sync"]);
+    let cancelled = run_in_terminal("false", &sync_args, Some(b"n\n"));
+    assert!(cancelled.status.success(), "{cancelled:?}");
+    assert!(String::from_utf8_lossy(&cancelled.stderr)
+        .contains("Replace existing unlocked skill files?"));
+    assert!(String::from_utf8_lossy(&cancelled.stdout).contains("Installation cancelled."));
+    assert_preserved();
+
+    let confirmed = run_in_terminal("woodpecker", &["--yes", "skills", "sync"], None);
     assert!(confirmed.status.success(), "{confirmed:?}");
     assert_demo_installed(&project, &read_lock(&lock));
 }

@@ -28,4 +28,8 @@ CLI boolean flags enable a behavior for that invocation; the same flag cannot
 turn a configured `true` back to `false`. For example, disable signature
 verification with `OSDK_VERIFY_SIGNATURES=false` or configuration.
 
+CLI confirmation and selection prompts require an interactive terminal. A nonempty
+`CI` value disables these prompts, except `false` (case-insensitive) and `0`. Pass
+`--yes` to approve confirmations or accept recommended choices.
+
 `--download-cache-max-size BYTES|2GiB|unlimited` (`OSDK_DOWNLOAD_CACHE_MAX_SIZE`) overrides retained download-copy capacity for this invocation. `0` removes copies after success and never limits downloadable file size. See [Caches and Cleanup](../maintenance/cache).

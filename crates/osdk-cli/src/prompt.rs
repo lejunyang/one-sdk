@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{anyhow, Result};
@@ -43,6 +44,16 @@ impl TerminalPrompt {
     pub fn new(assume_yes: bool) -> Self {
         Self { assume_yes }
     }
+
+    fn ensure_interactive(&self, question: &str) -> Result<()> {
+        if self.is_interactive() {
+            return Ok(());
+        }
+        Err(anyhow!(t!(
+            "err.confirmation_non_interactive",
+            question = question
+        )))
+    }
 }
 
 impl Prompt for TerminalPrompt {
@@ -51,7 +62,7 @@ impl Prompt for TerminalPrompt {
             return Ok(true);
         }
 
-        ensure_interactive(question)?;
+        self.ensure_interactive(question)?;
         eprint!("{question} {}", i18n::tr("prompt.yes_no"));
         io::stderr().flush()?;
         let mut answer = String::new();
@@ -60,7 +71,7 @@ impl Prompt for TerminalPrompt {
     }
 
     fn is_interactive(&self) -> bool {
-        io::stdin().is_terminal()
+        io::stdin().is_terminal() && !is_ci(std::env::var_os("CI").as_deref())
     }
 
     fn assume_yes(&self) -> bool {
@@ -78,7 +89,7 @@ impl Prompt for TerminalPrompt {
         options: &[String],
         defaults: &[bool],
     ) -> Result<Vec<usize>> {
-        ensure_interactive(question)?;
+        self.ensure_interactive(question)?;
         if options.is_empty() {
             return Err(anyhow!("cannot select from an empty option list"));
         }
@@ -110,7 +121,7 @@ impl Prompt for TerminalPrompt {
         if self.assume_yes {
             return Ok(default);
         }
-        ensure_interactive(question)?;
+        self.ensure_interactive(question)?;
         loop {
             print_options(question, options)?;
             match parse_single_selection(&read_answer()?, options.len(), default) {
@@ -121,24 +132,11 @@ impl Prompt for TerminalPrompt {
     }
 }
 
-pub(crate) fn confirm_outside_ci(prompt: &dyn Prompt, question: &str) -> Result<bool> {
-    if !prompt.assume_yes()
-        && std::env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
-    {
-        return Err(non_interactive_confirmation(question));
-    }
-    prompt.confirm(question)
-}
-
-fn ensure_interactive(question: &str) -> Result<()> {
-    if io::stdin().is_terminal() {
-        return Ok(());
-    }
-    Err(non_interactive_confirmation(question))
-}
-
-fn non_interactive_confirmation(question: &str) -> anyhow::Error {
-    anyhow!(t!("err.confirmation_non_interactive", question = question))
+fn is_ci(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.as_encoded_bytes();
+        !value.is_empty() && value != b"0" && !value.eq_ignore_ascii_case(b"false")
+    })
 }
 
 fn print_options(question: &str, options: &[String]) -> Result<()> {
@@ -188,7 +186,21 @@ fn is_affirmative(answer: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_affirmative, parse_single_selection};
+    use super::{is_affirmative, is_ci, parse_single_selection, OsStr};
+
+    #[test]
+    fn recognizes_ci_provider_names_and_truthy_values() {
+        for value in ["woodpecker", "TRUE", "1"] {
+            assert!(is_ci(Some(OsStr::new(value))), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn allows_interaction_when_ci_is_unset_or_disabled() {
+        for value in [None, Some(""), Some("false"), Some("FALSE"), Some("0")] {
+            assert!(!is_ci(value.map(OsStr::new)), "{value:?}");
+        }
+    }
 
     #[test]
     fn accepts_explicit_affirmative_answers_only() {
