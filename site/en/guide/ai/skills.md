@@ -49,7 +49,7 @@ repository commit advances but the selected skill's content hash does not, only 
 lock commit advances; changed skill content is reinstalled. A bare 40-hex commit
 left by an older project is migrated to default-branch intent; spell an intentional
 permanent pin as `ref = "rev:<commit>"`. To switch to a different pinned commit,
-edit `ref` and run `skills update`. `update` also makes the install follow the
+edit `ref` and run `skills update` with network access. `update` also makes the install follow the
 project's `[skills.<name>].agents` (or `[skills].default_agents` when empty): an agent
 removed there is unlinked, keeping a directory a still-declared agent shares, an added
 one gets the copy the lock pins, and the lock's `agents` is rewritten. `use` installs nothing and writes no
@@ -122,6 +122,8 @@ copy, and when that copy is gone it **re-downloads a GitHub source at the record
 `resolved_commit`** and recomputes `content_hash`. A mismatch fails closed — a
 moved tag or a substituted mirror cannot install — and placement reuses
 `install_mode`. A local source whose staged copy is gone cannot be reproduced and is reported.
+With `--offline`, GitHub lock replay requires the staged copy. An operation that
+needs to download the archive reports a cache miss even when commit metadata is cached.
 
 ## How skills land
 

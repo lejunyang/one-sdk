@@ -40,7 +40,7 @@ osdk skills agents
 `update` 重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
 前进但目标 skill 内容哈希未变时只推进 lock，不重装；内容变化才重新落地。已有项目保存的裸
 40 位 commit 只视为安装快照，迁移为默认分支意图；需要永久固定时明确写
-`ref = "rev:<commit>"`。要改用另一个固定 commit，修改 `ref` 后运行 `skills update`。
+`ref = "rev:<commit>"`。要改用另一个固定 commit，修改 `ref` 后联网运行 `skills update`。
 `update` 还会让安装位置跟随项目声明：`[skills.<名>].agents`（为空时用
 `[skills].default_agents`）删掉的 Agent 会被取消链接（与仍在用的 Agent 共享的目录保留），新增的
 Agent 装入 lock 已固定的那份内容，lock 的 `agents` 随之改写。
@@ -104,6 +104,8 @@ agents = ["claude-code"]
 对锁里已有的技能，`osdk skills sync` 据此复现：优先用已落地的内容寻址副本，副本不在时对 GitHub 源**按记录的
 `resolved_commit` 重新下载**并重算 `content_hash`，与 lock 不符就 fail-closed 拒绝——移动过的
 tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`。本地源丢了副本无法复现，会如实报告。
+使用 `--offline` 时，GitHub 技能的锁回放需要已落地的副本。需要下载归档时，即使提交元数据
+已缓存，也会直接报离线缓存缺失。
 
 ## 落地方式
 

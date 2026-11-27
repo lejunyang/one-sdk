@@ -1,10 +1,19 @@
+use std::io::ErrorKind;
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::mpsc;
+use std::time::Duration;
 
 fn osdk(root: &Path, project: &Path, args: &[&str]) -> Output {
+    osdk_command(root, project, args).output().unwrap()
+}
+
+fn osdk_command(root: &Path, project: &Path, args: &[&str]) -> Command {
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_osdk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_osdk"));
+    command
         .args(args)
         .current_dir(project)
         .env("HOME", &home)
@@ -16,9 +25,8 @@ fn osdk(root: &Path, project: &Path, args: &[&str]) -> Output {
         .env("OSDK_CACHE_DIR", root.join("state/cache"))
         .env("OSDK_STORE_DIR", root.join("state/store"))
         .env("OSDK_INSTALL_DIR", root.join("state/installs"))
-        .env("OSDK_TRUSTED_CONFIG_PATHS", project.join("osdk.toml"))
-        .output()
-        .unwrap()
+        .env("OSDK_TRUSTED_CONFIG_PATHS", project.join("osdk.toml"));
+    command
 }
 
 fn declare(project: &Path, agents: &str) {
@@ -545,10 +553,70 @@ fn skills_update_resolves_a_changed_pin_before_writing_the_lock() {
     let stderr = String::from_utf8_lossy(&changed.stderr);
     assert!(stderr.contains("offline metadata cache miss"), "{stderr}");
     assert!(stderr.contains(new), "{stderr}");
-    assert_eq!(std::fs::read_to_string(lock).unwrap(), locked);
-    for path in &installed {
-        assert_eq!(std::fs::read(path).unwrap(), DEMO_SKILL.as_bytes());
-    }
+    let assert_original_installation = || {
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), locked);
+        for path in &installed {
+            assert_eq!(std::fs::read(path).unwrap(), DEMO_SKILL.as_bytes());
+        }
+    };
+    assert_original_installation();
+
+    // Warm only the commit lookup, leaving the new archive and staged tree absent.
+    let url = root.join("commit-url");
+    std::fs::write(
+        &url,
+        format!("https://api.github.com/repos/acme/demo/commits/{new}"),
+    )
+    .unwrap();
+    let cache_key = osdk_core::store::hash_file(&url).unwrap();
+    let metadata_cache = root.join("state/cache/remote/http");
+    std::fs::create_dir_all(&metadata_cache).unwrap();
+    std::fs::write(
+        metadata_cache.join(cache_key),
+        format!(r#"{{"sha":"{new}"}}"#),
+    )
+    .unwrap();
+
+    // An archive request would open a connection to this proxy. Close any
+    // connection immediately so the regression test never reaches GitHub.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let (done, running) = mpsc::channel::<()>();
+    let proxy = std::thread::spawn(move || {
+        let mut connections = 0;
+        loop {
+            match listener.accept() {
+                Ok(_) => connections += 1,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if running.recv_timeout(Duration::from_millis(10))
+                        != Err(mpsc::RecvTimeoutError::Timeout)
+                    {
+                        return connections;
+                    }
+                }
+                Err(error) => panic!("accepting proxy connection: {error}"),
+            }
+        }
+    });
+    let cached_update = osdk_command(root, &project, &args)
+        .env_remove("https_proxy")
+        .env_remove("no_proxy")
+        .env_remove("NO_PROXY")
+        .env("HTTPS_PROXY", proxy_url)
+        .output()
+        .unwrap();
+    drop(done);
+    let connections = proxy.join().unwrap();
+    assert_original_installation();
+    assert_eq!(connections, 0, "offline update contacted the proxy");
+    assert!(!cached_update.status.success(), "{cached_update:?}");
+    let stderr = String::from_utf8_lossy(&cached_update.stderr);
+    assert!(
+        stderr.contains("offline skill archive cache miss"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&format!("acme/demo@{new}")), "{stderr}");
 }
 
 #[test]

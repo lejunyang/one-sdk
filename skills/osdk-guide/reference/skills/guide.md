@@ -32,5 +32,8 @@ osdk skills update name
 
 `update` 先为同一技能准备所有 Agent 目标。任何目标激活失败时，保留原安装内容和锁条目。
 
+`--offline` 下，GitHub 技能按锁回放需要已落地的副本。需要下载归档时，即使提交元数据
+已缓存，也会报离线缓存缺失。切换到另一个固定 commit 需要联网。
+
 GitHub tarball 必须成功下载并安全解包后才算候选成功；HTTP 200 错页或损坏归档会被清理，
 随后尝试下一个 GitHub 下载入口。

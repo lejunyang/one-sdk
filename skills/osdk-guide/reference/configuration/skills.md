@@ -26,7 +26,7 @@ when = { os = ["linux", "macos"] }
   一个来源有多个技能时，`skill` 按目录选取，缺省取声明名。
 - `ref` 只用于 GitHub。用 `osdk skills update <名>` 应用 ref 或 Agent 列表变更。更新时只有
   `ref = "rev:<commit>"` 会保持固定。要切换到另一个固定 commit，修改 `ref` 后运行
-  `skills update`。旧配置的裸 40 位 commit 仍按安装快照处理。
+  `skills update`，需要联网获取新提交的归档。旧配置的裸 40 位 commit 仍按安装快照处理。
   换来源或技能时，用 `osdk skills remove <名>` 后重新同步，或显式调用 `skills add`。
 - `agents` 为空时回退到 `[skills].default_agents`，再为空时检测已安装的 Agent。仅检测到
   一个时自动选中，多个或零个时使用交互选择或传 `--yes`。在 CI 中也可以明确配置 Agent。
