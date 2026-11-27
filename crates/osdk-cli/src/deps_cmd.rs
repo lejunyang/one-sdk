@@ -70,6 +70,7 @@ struct Resolved {
     declared_env: BTreeMap<String, String>,
     decision: state::Decision,
     unit: Option<deps::workspace::WorkspaceUnit>,
+    native_inputs: Vec<PathBuf>,
     lock_path: PathBuf,
     /// Lockfiles of other installers inside the shared workspace's members,
     /// which the shared installation ignores. Shown under `--explain`.
@@ -260,12 +261,44 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         if let Some(version) = config.project_tools.get(&*project.provider) {
             choice.version = Some(version.clone());
         }
+        let mut native_inputs = Vec::new();
+        let mut lock_reason = None;
+        if let Some(schema) = schema.filter(|_| config.run.is_none()) {
+            let owner = deps::workspace::native_lock_owner(
+                &project,
+                &CargoLockProbe {
+                    app,
+                    schema,
+                    choice: &choice,
+                    config: &config,
+                    explain: options.explain,
+                },
+            )?;
+            if options.explain {
+                if !owner.inputs.is_empty() {
+                    println!("    Cargo workspace root: {}", owner.root.display());
+                    if let Some(lock) = &owner.lock {
+                        println!("    native lock: {}", lock.display());
+                    }
+                }
+                if let Some(reason) = &owner.reason {
+                    println!("    native lock: {reason}");
+                }
+            }
+            project.native_lock = owner.lock;
+            native_inputs = owner.inputs;
+            lock_reason = owner.reason;
+        }
         let mut plan = deps::plan(
             &project,
             &choice,
             &config,
             &resolved_tool_versions(app, &config),
         )?;
+        if let Some(reason) = lock_reason {
+            plan.downgraded_reason =
+                Some(format!("{reason}; running `cargo fetch` without --locked"));
+        }
         if unit.as_ref().is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
             plan.args.push("--all-packages".into());
         }
@@ -351,7 +384,15 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 "system tool policy: host execution is revalidated on every run".into(),
             )
         } else {
-            decide(app, schema, &project, &config, &plan, unit.as_ref())?
+            decide(
+                app,
+                schema,
+                &project,
+                &config,
+                &plan,
+                unit.as_ref(),
+                &native_inputs,
+            )?
         };
         let lock_path = external_lock
             .clone()
@@ -366,6 +407,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             declared_env,
             decision,
             unit,
+            native_inputs,
             lock_path,
             notes,
         });
@@ -477,6 +519,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 &item.config,
                 &item.plan,
                 item.unit.as_ref(),
+                &item.native_inputs,
             )?
             .is_fresh()
             && !system_policy
@@ -965,6 +1008,67 @@ fn ready_managed_tool(
     })
 }
 
+/// Use the same managed Rust toolchain as a locked fetch. The metadata query
+/// can also run during preview, before execution is authorized.
+struct CargoLockProbe<'a> {
+    app: &'a App,
+    schema: &'static DepsProviderSchema,
+    choice: &'a InstallerChoice,
+    config: &'a ProviderConfig,
+    explain: bool,
+}
+
+impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
+    fn query(
+        &self,
+        program_candidates: &[String],
+        args: &[&str],
+        cwd: &Path,
+    ) -> std::io::Result<Option<std::process::Output>> {
+        (|| -> anyhow::Result<_> {
+            let project_app;
+            let app = if let Some(path) = self.config.project_config.as_deref() {
+                project_app = self.app.with_config(self.app.config_for_project(path)?)?;
+                &project_app
+            } else {
+                self.app
+            };
+            let required = &self.schema.required_tools[0];
+            let ToolSelection::Managed {
+                backend,
+                installed: Some(version),
+                ..
+            } = select_tool(app, required, self.choice, self.config, cwd, true)?
+            else {
+                return Ok(None);
+            };
+            let mut tool = ready_managed_tool(app, backend.as_ref(), required, &version)?;
+            // Cargo must come directly from the toolchain. A rustup proxy in
+            // Cargo's shared bin directory can acquire a toolchain before it
+            // even sees the offline metadata arguments.
+            tool.bin_dirs.truncate(1);
+            let tools = [tool];
+            let Some(program) = find_tool_program(required.id, program_candidates, &tools) else {
+                return Ok(None);
+            };
+            if self.explain {
+                println!("    Cargo workspace query: {}", program.display());
+            }
+            Ok(Some(
+                std::process::Command::new(program)
+                    .args(args)
+                    .current_dir(cwd)
+                    .env("PATH", tool_path(app, &tools)?)
+                    // Dependency config can contain executable environment
+                    // hooks. Only the actual fetch uses this project's env.
+                    .envs(child_env(&BTreeMap::new(), &tools))
+                    .output()?,
+            ))
+        })()
+        .map_err(std::io::Error::other)
+    }
+}
+
 /// Run the provider's command with the resolved tools on PATH.
 ///
 /// The program is resolved out of the install's own bin directory rather than
@@ -1183,7 +1287,12 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
         &item.config,
         &resolved_tool_versions(app, &item.config),
     )?;
-    let sources = tracked_sources(item.schema, &item.config, item.unit.as_ref());
+    let sources = tracked_sources(
+        item.schema,
+        &item.config,
+        item.unit.as_ref(),
+        &item.native_inputs,
+    );
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| item.project.root.join(source))
@@ -1389,8 +1498,9 @@ fn decide(
     config: &ProviderConfig,
     plan: &RunPlan,
     unit: Option<&deps::workspace::WorkspaceUnit>,
+    native_inputs: &[PathBuf],
 ) -> anyhow::Result<state::Decision> {
-    let sources = tracked_sources(schema, config, unit);
+    let sources = tracked_sources(schema, config, unit, native_inputs);
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| project.root.join(source))
@@ -1419,8 +1529,16 @@ fn tracked_sources(
     schema: Option<&'static DepsProviderSchema>,
     config: &ProviderConfig,
     unit: Option<&deps::workspace::WorkspaceUnit>,
+    native_inputs: &[PathBuf],
 ) -> Vec<String> {
     let mut sources = effective_sources(schema, config);
+    if !sources.is_empty() {
+        sources.extend(
+            native_inputs
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+    }
     if let Some(unit) = unit {
         sources.extend(
             unit.sources()
@@ -1644,6 +1762,7 @@ mod tests {
                 plan,
                 decision: osdk_core::deps::state::Decision::Fresh,
                 unit: None,
+                native_inputs: Vec::new(),
                 lock_path: std::env::temp_dir().join("test-osdk.lock"),
                 notes: Vec::new(),
             }

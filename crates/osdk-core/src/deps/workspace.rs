@@ -1,6 +1,128 @@
-//! Native workspace membership is bounded by explicitly declared roots.
+//! Native workspace membership, shared installations and lockfile ownership.
+use super::DetectedProject;
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
+
+pub(super) const CARGO_PROGRAM_CANDIDATES: [&str; 2] = ["cargo.exe", "cargo"];
+const CARGO_WORKSPACE_QUERY: &[&str] = &[
+    "metadata",
+    "--no-deps",
+    "--format-version",
+    "1",
+    "--offline",
+];
+
+pub struct NativeLockOwner {
+    pub root: PathBuf,
+    pub lock: Option<PathBuf>,
+    /// Absolute paths relevant to freshness when a lock belongs to a workspace.
+    pub inputs: Vec<PathBuf>,
+    pub reason: Option<String>,
+}
+
+/// A read-only native query using a tool that is already available.
+pub trait NativeLockProbe {
+    fn query(
+        &self,
+        program_candidates: &[String],
+        args: &[&str],
+        cwd: &Path,
+    ) -> std::io::Result<Option<std::process::Output>>;
+}
+
+#[derive(serde::Deserialize)]
+struct CargoMetadata {
+    workspace_root: PathBuf,
+    packages: Vec<CargoPackage>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoPackage {
+    manifest_path: PathBuf,
+}
+
+pub fn native_lock_owner(
+    project: &DetectedProject,
+    probe: &dyn NativeLockProbe,
+) -> Result<NativeLockOwner> {
+    let mut owner = NativeLockOwner {
+        root: project.root.clone(),
+        lock: project.native_lock.clone(),
+        inputs: Vec::new(),
+        reason: None,
+    };
+    if project.provider != "cargo" || owner.lock.is_some() {
+        return Ok(owner);
+    }
+
+    let candidates = CARGO_PROGRAM_CANDIDATES.map(str::to_owned);
+    let metadata = match probe.query(&candidates, CARGO_WORKSPACE_QUERY, &project.root) {
+        Ok(Some(output)) if output.status.success() => serde_json::from_slice(&output.stdout)
+            .map_err(|_| "Cargo returned invalid workspace metadata".to_string()),
+        Ok(Some(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let first_line = stderr.lines().find(|line| !line.trim().is_empty());
+            Err(match first_line {
+                Some(line) => format!("Cargo could not determine workspace membership: {}", crate::package_sources::display_value(line.trim())),
+                None => format!("Cargo could not determine workspace membership ({})", output.status),
+            })
+        }
+        Ok(None) => Err("cannot determine Cargo workspace membership without an installed or linked Cargo; run `osdk install rust`".into()),
+        Err(error) => Err(format!("cannot query Cargo workspace membership: {error}")),
+    };
+    let result = metadata.and_then(|metadata| {
+        owner
+            .apply_cargo_metadata(project, metadata)
+            .map_err(|error| format!("cannot use Cargo workspace metadata: {error}"))
+    });
+    if let Err(reason) = result {
+        owner.reason = Some(reason);
+    }
+    Ok(owner)
+}
+
+impl NativeLockOwner {
+    fn apply_cargo_metadata(
+        &mut self,
+        project: &DetectedProject,
+        metadata: CargoMetadata,
+    ) -> Result<()> {
+        let canonicalize = |path: &Path| dunce::canonicalize(path).map_err(|e| Error::io(path, e));
+        let root = canonicalize(&metadata.workspace_root)?;
+        if root == canonicalize(&project.root)? {
+            self.reason = Some(format!(
+                "no Cargo.lock in {}; Cargo uses this directory as its workspace root",
+                project.root.display()
+            ));
+            return Ok(());
+        }
+        let manifests = metadata
+            .packages
+            .iter()
+            .map(|package| canonicalize(&package.manifest_path))
+            .collect::<Result<Vec<_>>>()?;
+        if !manifests.contains(&canonicalize(&project.manifest)?) {
+            self.reason = Some(
+                "Cargo metadata does not list the selected manifest as a workspace member".into(),
+            );
+            return Ok(());
+        }
+
+        let lock = root.join("Cargo.lock");
+        self.inputs = manifests;
+        self.inputs.extend([root.join("Cargo.toml"), lock.clone()]);
+        if lock.is_file() {
+            self.lock = Some(lock);
+        } else {
+            self.reason = Some(format!(
+                "no Cargo.lock in Cargo workspace root {}",
+                root.display()
+            ));
+        }
+        self.root = root;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceUnit {
@@ -241,11 +363,93 @@ fn check_boundary(root: &Path, directory: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CargoProbe(serde_json::Value);
+
+    impl NativeLockProbe for CargoProbe {
+        fn query(
+            &self,
+            candidates: &[String],
+            args: &[&str],
+            cwd: &Path,
+        ) -> std::io::Result<Option<std::process::Output>> {
+            assert!(candidates.iter().any(|name| name == "cargo"));
+            assert_eq!(
+                args,
+                [
+                    "metadata",
+                    "--no-deps",
+                    "--format-version",
+                    "1",
+                    "--offline"
+                ]
+            );
+            assert!(cwd.join("Cargo.toml").is_file());
+            Ok(Some(std::process::Output {
+                status: std::process::ExitStatus::default(),
+                stdout: serde_json::to_vec(&self.0).unwrap(),
+                stderr: Vec::new(),
+            }))
+        }
+    }
+
     fn write(root: &Path, path: &str, text: &str) {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
+
+    #[test]
+    fn cargo_metadata_binds_the_root_lock_to_listed_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        for file in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "demo/Cargo.toml",
+            "other/Cargo.toml",
+        ] {
+            write(&root, file, "");
+        }
+        let member = DetectedProject {
+            provider: "cargo".into(),
+            ecosystem: super::super::Ecosystem::Rust,
+            root: root.join("demo"),
+            manifest: root.join("demo/Cargo.toml"),
+            native_lock: None,
+            declared_manager: None,
+        };
+        let other = root.join("other/Cargo.toml");
+        let probe = |manifests: &[&Path]| {
+            CargoProbe(serde_json::json!({
+                "workspace_root": root,
+                "packages": manifests.iter().map(|path| serde_json::json!({"manifest_path": path})).collect::<Vec<_>>(),
+            }))
+        };
+        let owner = native_lock_owner(&member, &probe(&[&member.manifest, &other])).unwrap();
+        let lock = root.join("Cargo.lock");
+        assert_eq!(owner.root, root);
+        assert_eq!(owner.lock.as_ref(), Some(&lock));
+        assert_eq!(
+            owner.inputs,
+            [
+                member.manifest.clone(),
+                other.clone(),
+                root.join("Cargo.toml"),
+                lock
+            ]
+        );
+        assert!(owner.reason.is_none());
+
+        let owner = native_lock_owner(&member, &probe(&[&other])).unwrap();
+        assert!(owner.lock.is_none());
+        assert!(owner.inputs.is_empty());
+        assert!(owner
+            .reason
+            .unwrap()
+            .contains("does not list the selected manifest"));
+    }
+
     #[test]
     fn native_members_exclusions_and_changes_are_freshness_inputs() {
         let tmp = tempfile::tempdir().unwrap();

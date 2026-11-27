@@ -459,9 +459,9 @@ auto = false
 
 
 声明之后不必每次手动调用：裸跑 `osdk install`、`osdk run <任务>`、`osdk exec`
-之前，osdk 会先比对清单哈希，过期才兑现。命中时只花零点几毫秒、不启动包管理器，
-也不做 `--verify` 那种深度扫描。带具体工具的 `osdk install node@22` 不会触发，
-单次跳过用 `--no-deps`，永久关闭某个 provider 用 `auto = false`：
+之前，osdk 会先比对清单哈希，过期才兑现。命中时跳过安装。
+深度校验可用 `osdk deps --verify`。安装指定工具（如 `osdk install node@22`）不会触发依赖安装。
+单次跳过用 `--no-deps`，关闭某个 provider 的自动安装用 `auto = false`：
 
 ```bash
 osdk run dev                # 依赖过期就先兑现，再跑任务
@@ -478,6 +478,9 @@ osdk 不把「是否冻结」交给包管理器判断，而是自己先看 lockf
 ```bash
 osdk deps --frozen
 ```
+
+在 Cargo 工作区中，`osdk deps //crates/demo:cargo --frozen --no-install-tools`
+为声明的成员沿用工作区根目录的 `Cargo.lock`。选择成员前先安装或链接项目指定的 Rust 工具链。
 
 默认不运行任何依赖的构建或生命周期脚本。需要时按 provider 显式打开，这一项需要你
 批准配置：

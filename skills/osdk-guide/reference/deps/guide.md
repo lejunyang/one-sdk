@@ -33,6 +33,11 @@ osdk deps //apps/api:uv
 无操作数会处理全部声明 root。声明、provider 字段与信任规则见
 `reference/configuration/deps.md`。
 
+Cargo 成员可单独选择，例如 `osdk deps //crates/demo:cargo --frozen --no-install-tools`。
+osdk 用已安装或已链接的 Cargo 离线确认工作区归属，在成员目录使用根 `Cargo.lock`
+执行 `cargo fetch --locked`。`--dry-run` 展示同一计划，`--list --all --explain` 展示根和锁。
+被排除或未列入的 crate 无法借用上级锁。根锁缺失时冻结计划失败，过期时由 Cargo 拒绝拉取。
+
 成功安装后写入 `osdk.lock` 的 `run` 使用跨平台规范命令名（如 `bun`、`cargo`），
 不会记录仅供 Windows 查找可执行文件使用的 `.exe` / `.cmd` 后缀。
 

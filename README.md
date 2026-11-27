@@ -525,9 +525,9 @@ Command overrides accept argv arrays, such as `run = ["pnpm", "install", "--offl
 
 You don't have to call it every time. A bare `osdk install`, `osdk run <task>` or
 `osdk exec` compares manifest hashes first and materializes only when stale. On a
-hit that costs a fraction of a millisecond, starts no package manager, and does not
-run the deep `--verify` scan. Naming a tool (`osdk install node@22`) never triggers
-it; skip once with `--no-deps`, or turn it off per provider with `auto = false`:
+hit it skips the install. Use `osdk deps --verify` for a deep scan. Naming a tool
+(`osdk install node@22`) never triggers a deps install. Skip once with `--no-deps`,
+or turn it off per provider with `auto = false`:
 
 ```bash
 osdk run dev                # materialize if stale, then run the task
@@ -547,6 +547,10 @@ error:
 ```bash
 osdk deps --frozen
 ```
+
+In a Cargo workspace, `osdk deps //crates/demo:cargo --frozen --no-install-tools`
+uses the workspace's root `Cargo.lock` for the declared member. Have the
+project's Rust toolchain installed or linked before selecting a member.
 
 Build and lifecycle scripts are off by default. Turn them on per provider, which
 requires approving the config:

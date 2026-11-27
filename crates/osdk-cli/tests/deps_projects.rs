@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 fn run(root: &Path, cwd: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_osdk"))
@@ -16,6 +16,233 @@ fn write(root: &Path, path: &str, text: &str) {
     let path = root.join(path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
+}
+
+struct CargoWorkspace {
+    temp: tempfile::TempDir,
+    cargo: PathBuf,
+}
+
+impl CargoWorkspace {
+    fn new(cargo: PathBuf) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[workspace]\nmembers = ['crates/demo', 'crates/other']\nresolver = '3'\n",
+        );
+        write(
+            root,
+            "osdk.toml",
+            "[tools]\nrust = '=trial-rust'\n[deps]\nroots = ['crates/demo']\n[deps.cargo]\n",
+        );
+        write(root, "crates/demo/src/lib.rs", "");
+        write(root, "crates/other/src/lib.rs", "");
+        write(
+            root,
+            "crates/demo/Cargo.toml",
+            "[package]\nname = 'demo'\nversion = '0.1.0'\nedition = '2024'\n",
+        );
+        write(
+            root,
+            "crates/other/Cargo.toml",
+            "[package]\nname = 'other'\nversion = '0.1.0'\nedition = '2024'\n",
+        );
+        Self { temp, cargo }
+    }
+
+    fn command(&self, program: &Path) -> Command {
+        let root = self.temp.path();
+        let mut command = Command::new(program);
+        command
+            .current_dir(root)
+            .env("HOME", root.join("state/home"))
+            .env("CARGO_HOME", root.join("state/cargo"))
+            .env("RUSTUP_HOME", root.join("state/rustup"))
+            .env("CARGO_TARGET_DIR", root.join("state/target"))
+            .env("CARGO_NET_OFFLINE", "true");
+        command
+    }
+
+    fn link_rust(&self) {
+        let root = self.temp.path();
+        let toolchain = self.cargo.parent().unwrap().parent().unwrap();
+        write(root, "state/installs/rust/trial-rust/.osdk-complete", "");
+        write(
+            root,
+            "state/installs/rust/trial-rust/.osdk-linked",
+            toolchain.to_str().unwrap(),
+        );
+    }
+
+    fn native(&self, args: &[&str]) -> Output {
+        let rustc = self
+            .cargo
+            .with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+        self.command(&self.cargo)
+            .env("RUSTC", rustc)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn run(&self, provider: &str, extra: &[&str]) -> Output {
+        let root = self.temp.path();
+        self.command(Path::new(env!("CARGO_BIN_EXE_osdk")))
+            .env("OSDK_OFFLINE", "true")
+            .env("OSDK_CONFIG_DIR", root.join("state/config"))
+            .env("OSDK_DATA_DIR", root.join("state/data"))
+            .env("OSDK_CACHE_DIR", root.join("state/cache"))
+            .env("OSDK_INSTALL_DIR", root.join("state/installs"))
+            .env("OSDK_STORE_DIR", root.join("state/store"))
+            .args(["deps", provider, "--frozen", "--no-install-tools"])
+            .args(extra)
+            .output()
+            .unwrap()
+    }
+
+    fn member(&self, extra: &[&str]) -> Output {
+        self.run("//crates/demo:cargo", extra)
+    }
+
+    fn generate_lock(&self) -> Vec<u8> {
+        let output = self.native(&["generate-lockfile", "--offline"]);
+        assert!(output.status.success(), "{output:?}");
+        std::fs::read(self.temp.path().join("Cargo.lock")).unwrap()
+    }
+
+    fn assert_locks(&self, expected: Option<&[u8]>) {
+        let root = self.temp.path();
+        match expected {
+            Some(bytes) => assert_eq!(std::fs::read(root.join("Cargo.lock")).unwrap(), bytes),
+            None => assert!(!root.join("Cargo.lock").exists()),
+        }
+        assert!(!root.join("crates/demo/Cargo.lock").exists());
+    }
+}
+
+#[test]
+fn cargo_metadata_unavailable_explains_why_a_member_cannot_freeze() {
+    let fixture = CargoWorkspace::new(PathBuf::from(env!("CARGO")));
+    let output = fixture.member(&["--dry-run"]);
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("without an installed or linked Cargo"),
+        "{error}"
+    );
+    assert!(error.contains("osdk install rust"), "{error}");
+    fixture.assert_locks(None);
+}
+
+#[test]
+fn cargo_workspace_member_frozen_uses_the_native_root_lock() {
+    let cargo = PathBuf::from(env!("CARGO"));
+    if cfg!(windows) && cargo.extension().is_none() {
+        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
+        return;
+    }
+    for scenario in ["valid", "missing", "stale", "excluded", "unlisted"] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        fixture.link_rust();
+        let root = fixture.temp.path();
+        if scenario == "excluded" || scenario == "unlisted" {
+            let exclude = if scenario == "excluded" {
+                "exclude = ['crates/demo']\n"
+            } else {
+                ""
+            };
+            write(
+                root,
+                "Cargo.toml",
+                &format!("[workspace]\nmembers = ['crates/other']\nresolver = '3'\n{exclude}"),
+            );
+        }
+        let lock = (scenario != "missing").then(|| fixture.generate_lock());
+        if scenario == "stale" {
+            let first = fixture.member(&[]);
+            assert!(first.status.success(), "{first:?}");
+            let unchanged = fixture.member(&[]);
+            assert!(unchanged.status.success(), "{unchanged:?}");
+            assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+            write(
+                root,
+                "crates/other/Cargo.toml",
+                "[package]\nname = 'other'\nversion = '0.2.0'\nedition = '2024'\n",
+            );
+            let native = fixture.native(&[
+                "fetch",
+                "--locked",
+                "--offline",
+                "--manifest-path",
+                "crates/demo/Cargo.toml",
+            ]);
+            assert!(!native.status.success(), "{native:?}");
+            let stderr = String::from_utf8_lossy(&native.stderr);
+            assert!(
+                stderr.contains("lock file") && stderr.contains("--locked"),
+                "{stderr}"
+            );
+        }
+
+        let preview = fixture.member(&["--dry-run"]);
+        fixture.assert_locks(lock.as_deref());
+        let actual = fixture.member(&[]);
+        fixture.assert_locks(lock.as_deref());
+        if scenario == "valid" || scenario == "stale" {
+            let expected = "cargo fetch --locked --offline";
+            assert!(preview.status.success(), "{scenario}: {preview:?}");
+            let stdout = String::from_utf8_lossy(&preview.stdout);
+            assert!(
+                stdout.contains("would run in") && stdout.contains(expected),
+                "{stdout}"
+            );
+            assert!(
+                String::from_utf8_lossy(&actual.stdout).contains(expected),
+                "{actual:?}"
+            );
+            if scenario == "valid" {
+                assert!(actual.status.success(), "{actual:?}");
+                let explain = fixture.member(&["--list", "--explain"]);
+                assert!(explain.status.success(), "{explain:?}");
+                let text = String::from_utf8_lossy(&explain.stdout);
+                assert!(text.contains("Cargo workspace query: "), "{text}");
+                assert!(text.contains("Cargo workspace root: "), "{text}");
+                assert!(
+                    text.contains("native lock: ") && text.contains("Cargo.lock"),
+                    "{text}"
+                );
+                assert!(text.contains(expected), "{text}");
+                let root_plan = fixture.run("//:cargo", &["--dry-run"]);
+                assert!(root_plan.status.success(), "{root_plan:?}");
+                assert!(
+                    String::from_utf8_lossy(&root_plan.stdout).contains(expected),
+                    "{root_plan:?}"
+                );
+            } else {
+                assert!(!actual.status.success(), "{actual:?}");
+                let stderr = String::from_utf8_lossy(&actual.stderr);
+                assert!(
+                    stderr.contains("lock file") && stderr.contains("--locked"),
+                    "{stderr}"
+                );
+            }
+        } else {
+            let reason = match scenario {
+                "missing" => "no Cargo.lock in Cargo workspace root ",
+                "excluded" => "Cargo uses this directory as its workspace root",
+                "unlisted" => "current package believes it's in a workspace when it's not",
+                _ => unreachable!(),
+            };
+            for output in [preview, actual] {
+                assert!(!output.status.success(), "{scenario}: {output:?}");
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains(reason), "{scenario}: {stderr}");
+                assert!(!String::from_utf8_lossy(&output.stdout).contains("cargo fetch"));
+            }
+        }
+    }
 }
 
 #[test]

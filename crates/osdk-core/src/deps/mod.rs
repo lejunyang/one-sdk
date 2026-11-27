@@ -266,7 +266,7 @@ pub struct DetectedProject {
     /// Directory holding the primary manifest.
     pub root: PathBuf,
     pub manifest: PathBuf,
-    /// Native lock found next to the manifest, if any.
+    /// Native lock found next to the manifest or at its native workspace root.
     pub native_lock: Option<PathBuf>,
     /// `packageManager`-style declaration read out of the manifest.
     pub declared_manager: Option<DeclaredManager>,

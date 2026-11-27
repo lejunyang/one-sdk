@@ -164,7 +164,9 @@ pub fn plan(
         }
         "cargo" => {
             tool = "rust";
-            program_candidates = vec!["cargo.exe".to_string(), "cargo".to_string()];
+            program_candidates = super::workspace::CARGO_PROGRAM_CANDIDATES
+                .map(str::to_owned)
+                .to_vec();
             args.push("fetch".into());
             if has_lock {
                 // Stricter than every other provider here: measured to fail
