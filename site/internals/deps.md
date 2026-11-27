@@ -509,8 +509,8 @@ provider 都匹配它的清单时，选 workspace 的安装器。这不会改变
 定位该目录下的 `.cargo`。锁路径覆盖按 Cargo 的规则，从拉取环境中查找大小写完全匹配的
 `CARGO_RESOLVER_LOCKFILE_PATH`。
 
-Cargo 返回工作区根和成员清单。osdk 按规范化路径确认成员资格，给确认的成员使用根锁。
-Cargo 确认项目自成工作区时，才使用项目目录的锁。
+Cargo 返回工作区根和成员清单。osdk 按规范化路径确认成员资格。默认锁在工作区根的
+`Cargo.lock`，独立 crate 的目录本身就是工作区根。
 计划的执行目录与 `osdk.lock` 归属都在原项目。工作区根可以不单独声明 osdk deps。
 查询失败时，冻结错误会说明探测失败。Cargo 不可用时，本地锁可以产生暂定的冻结计划。
 实际运行会在安装互斥锁内准备 Rust，用准备好的 Cargo 重新规划后再拉取。暂定计划不会
@@ -521,8 +521,10 @@ Cargo 确认项目自成工作区时，才使用项目目录的锁。
 已有本地锁的项目仍执行 `cargo fetch --locked`，此次不使用新鲜度缓存。
 
 osdk 按 Cargo 配置的优先级解析锁路径，包含工作目录的祖先配置、`CARGO_HOME`
-和引入的配置。Cargo 1.97 起允许用 `resolver.lockfile-path` 覆盖根锁。Cargo 在配置路径的
-父目录打开 `Cargo.lock`，因此带尾分隔符的配置也会跟踪同一锁文件。实际生效的锁、
+和引入的配置。Cargo 1.97 起可通过 `resolver.lockfile-path` 或
+`CARGO_RESOLVER_LOCKFILE_PATH` 显式指定工作区的锁，成员目录也可以作为锁的位置。
+指定的文件名必须是 `Cargo.lock`。Cargo 在配置路径的父目录打开该文件，
+因此带尾分隔符的配置也会跟踪同一锁文件。实际生效的锁、
 Cargo 配置、根清单和成员清单同时参与规划、安装锁内复查和成功记录的新鲜度判定。
 如果 metadata 给出的路径依赖超出成员清单覆盖范围，或 Cargo 配置使用了可能引入本地
 依赖的覆盖项，osdk 会执行 `fetch --locked`，由 Cargo 校验。Cargo 已确认工作区归属，

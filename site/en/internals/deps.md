@@ -631,8 +631,8 @@ An empty `CARGO_HOME` falls back to `.cargo` under the effective `HOME`
 `CARGO_RESOLVER_LOCKFILE_PATH` in the fetch environment.
 
 Cargo reports the workspace root and member manifests. osdk compares canonical
-paths and uses the root lock for a confirmed member. A lock next to the selected
-manifest is used only if Cargo identifies that directory as the workspace root.
+paths to confirm membership. The default lock is `Cargo.lock` at the workspace
+root. A standalone crate is its own workspace root.
 The plan keeps the member's
 working directory and `osdk.lock` ownership. The workspace root does not need a
 separate osdk deps declaration. If the native query fails, the frozen diagnostic
@@ -649,9 +649,11 @@ query, a project with a detected local lock still runs `cargo fetch --locked`
 and bypasses the freshness cache.
 
 osdk resolves the lock path using Cargo's configuration precedence, including
-ancestor and included files and `CARGO_HOME`. Cargo 1.97 and later support
-`resolver.lockfile-path` as an override. Cargo opens `Cargo.lock` in the configured
-path's parent directory, so a trailing separator still tracks the same lock.
+ancestor and included files and `CARGO_HOME`. In Cargo 1.97 and later,
+`resolver.lockfile-path` or `CARGO_RESOLVER_LOCKFILE_PATH` can explicitly put
+the workspace lock in another location, including a member directory. The
+configured filename must be `Cargo.lock`. Cargo opens it in the configured path's
+parent directory, so a trailing separator still tracks the same lock.
 The effective lock, Cargo configuration,
 root manifest and member manifests feed the plan, the check under the install
 lock and the success record. If metadata lists a local dependency outside the
