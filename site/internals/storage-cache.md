@@ -10,6 +10,7 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 - `<installs>/<dynamic-tool>/<version>/b3-v2-<digest>`：osdk 自有隔离动态工具的指纹化安装根。
 - `<installs>/npm-global/<package>/<version>/b3-v2-<digest>`：`use --global npm:<package>` 的指纹化安装根。包含 `.osdk-tool.json` 的旧版纯版本根只用于遗留识别，绝不会被复用或执行。
 - `<data>/models/<name>/snapshots/<snapshot>`：已物化的模型快照。
+- `<data>/model-refs/<root-id>.json`：各项目的精确模型快照引用。
 - `<data>/store/<aa>/<bb>/<blake3>`：SDK 与模型文件共享的 CAS。
 - `<data>/shims`：命令 shim。
 - `<cache>/downloads`：下载的工具归档及其 checksum/source/attestation sidecar。

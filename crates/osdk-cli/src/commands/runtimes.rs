@@ -1,6 +1,9 @@
 //! `runtimes` command handlers (split from commands.rs).
 
 use super::*;
+use osdk_core::model::refs::{ModelRefs, ProjectModelRefs};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 pub fn node(app: &App, command: NodeCommand) -> Result<()> {
     match command {
@@ -443,6 +446,7 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             map,
             json,
         } => {
+            let _guard = ModelRefs::new(&app.ctx.dirs).lock()?;
             if app.ctx.config.models.contains_key(&name) {
                 anyhow::bail!(
                     "model `{name}` is declared by the project; use another name or `osdk model unuse {name}` before importing local bytes"
@@ -757,25 +761,35 @@ pub(crate) fn persist_model_pull(
     app: &App,
     name: &str,
     installed: &osdk_core::model::InstalledModel,
-    quiet: bool,
-) -> Result<std::path::PathBuf> {
+) -> Result<(
+    PathBuf,
+    std::collections::BTreeMap<String, crate::lockfile::LockedModelView>,
+)> {
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     crate::lockfile::merge_model(&path, &installed.manifest)?;
-    if let Some(declaration) = applicable_model_declaration(app, name) {
+    let views = if let Some(declaration) = applicable_model_declaration(app, name) {
         crate::lockfile::set_model_selection(
             &path,
             name,
             declaration.include.clone(),
             declaration.exclude.clone(),
         )?;
-    }
-    if let Some(declaration) = applicable_model_declaration(app, name) {
         let views = crate::lockfile::locked_views_from_declaration(&declaration.views);
         crate::lockfile::set_model_views(&path, name, views.clone())?;
-        crate::model_view::reconcile_declared_views(app, name, &views, quiet)?;
+        views
+    } else {
+        Default::default()
+    };
+    Ok((path, views))
+}
+
+fn model_project_root(app: &App, lock: &Path) -> Result<PathBuf> {
+    if let Some(project) = &app.ctx.config.project {
+        return Ok(project.root.clone());
     }
-    Ok(path)
+    let directory = lock.parent().expect("absolute project lock has a parent");
+    dunce::canonicalize(directory).with_context(|| format!("resolving {}", directory.display()))
 }
 
 /// Whether a `[models.<name>]` declaration is already faithfully described by the
@@ -852,8 +866,24 @@ pub(crate) async fn model_sync(
     jsonl: bool,
 ) -> Result<()> {
     let emitter = crate::model_output::ModelSyncEmitter::new(jsonl);
+    let registry = ModelRefs::new(&app.ctx.dirs);
+    let _guard = if dry_run {
+        None
+    } else {
+        Some(registry.lock()?)
+    };
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
+    let mut refs = if dry_run {
+        None
+    } else {
+        let root = model_project_root(app, &path)?;
+        let mut refs = registry
+            .load(&root)?
+            .unwrap_or_else(|| ProjectModelRefs::new(root, path.clone()));
+        refs.lock = path.clone();
+        Some(refs)
+    };
     let mut locked = crate::lockfile::locked_models(&path)?;
     if let Some(target) = target {
         locked.retain(|(name, _)| name == target);
@@ -982,7 +1012,18 @@ pub(crate) async fn model_sync(
                 .unwrap_or(ModelLockState::Missing);
             match result {
                 Ok(installed) => {
-                    let lock_path = persist_model_pull(app, &name, &installed, emitter.jsonl())?;
+                    let (lock_path, views) = persist_model_pull(app, &name, &installed)?;
+                    if let Some(refs) = &mut refs {
+                        if refs.record(&name, installed.snapshot_key()) {
+                            registry.put_project(refs)?;
+                        }
+                    }
+                    crate::model_view::reconcile_declared_views(
+                        app,
+                        &name,
+                        &views,
+                        emitter.jsonl(),
+                    )?;
                     let verb = if matches!(change, ModelLockState::Changed) {
                         "re-locked declared model"
                     } else {
@@ -1028,21 +1069,6 @@ pub(crate) async fn model_sync(
             locked.retain(|(name, _)| name == target);
         }
     }
-    if locked.is_empty() && configured.is_empty() && !prune {
-        emitter.emit(
-            &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
-                .action("sync")
-                .path(&path)
-                .changed(0),
-            || {
-                println!(
-                    "no models declared in {} or project configuration",
-                    path.display()
-                )
-            },
-        )?;
-        return Ok(());
-    }
     // First decide, serially, which locked models actually need fetching: an
     // intact snapshot is left alone (and only its views reconciled), a dry run
     // just reports. Verifying is local IO, so it stays out of the concurrent
@@ -1054,11 +1080,16 @@ pub(crate) async fn model_sync(
         }
         // Verify before deciding, so an intact snapshot is left alone and a
         // corrupted one is not mistaken for a present one.
-        let present = store
-            .verify(name)
-            .map(|manifest| manifest.revision == entry.revision)
-            .unwrap_or(false);
-        if present {
+        let present = store.current(name).ok().filter(|installed| {
+            verify_restored_against_lock(name, entry, &installed.manifest).is_ok()
+                && installed.verify().is_ok()
+        });
+        if let Some(installed) = present {
+            if let Some(refs) = &mut refs {
+                if refs.record(name, installed.snapshot_key()) {
+                    registry.put_project(refs)?;
+                }
+            }
             emitter.emit(
                 &crate::model_output::ModelSyncEvent::new("model", "unchanged", false)
                     .model(name)
@@ -1168,6 +1199,11 @@ pub(crate) async fn model_sync(
                 }
                 continue;
             }
+            if let Some(refs) = &mut refs {
+                if refs.record(&name, installed.snapshot_key()) {
+                    registry.put_project(refs)?;
+                }
+            }
             crate::model_view::reconcile_declared_views(app, &name, &entry.views, emitter.jsonl())?;
             emitter.emit(
                 &crate::model_output::ModelSyncEvent::new("model", "completed", false)
@@ -1188,6 +1224,30 @@ pub(crate) async fn model_sync(
         if let Some(error) = first_error {
             return Err(error);
         }
+    }
+
+    if let Some(refs) = &mut refs {
+        let locked_names = locked
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<BTreeSet<_>>();
+        if refs.retire_unlocked(&locked_names, target) {
+            registry.put_project(refs)?;
+        }
+    }
+    if locked.is_empty() && configured.is_empty() && !prune {
+        return emitter.emit(
+            &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
+                .action("sync")
+                .path(&path)
+                .changed(0),
+            || {
+                println!(
+                    "no models declared in {} or project configuration",
+                    path.display()
+                )
+            },
+        );
     }
 
     if prune && target.is_none() {
@@ -1262,6 +1322,16 @@ pub(crate) fn verify_restored_against_lock(
             manifest.revision,
             entry.revision
         );
+    }
+    if manifest.provider != entry.provider
+        || manifest.repository != entry.repository
+        || manifest.variant != entry.variant
+        || manifest.kind != entry.kind
+        || manifest.family != entry.family
+        || manifest.derived_from != entry.derived_from
+        || manifest.files.len() != entry.files.len()
+    {
+        anyhow::bail!("model {name} snapshot identity or file selection does not match the lock");
     }
     for locked in &entry.files {
         let actual = manifest

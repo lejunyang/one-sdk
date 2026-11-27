@@ -17,6 +17,7 @@ pub mod env;
 pub mod local;
 pub mod provider;
 pub mod pull;
+pub mod refs;
 pub mod source;
 pub mod view;
 
@@ -265,6 +266,31 @@ impl InstalledModel {
             .file_name()
             .and_then(|key| key.to_str())
             .expect("snapshot directory has a UTF-8 key")
+    }
+
+    pub fn verify(&self) -> Result<()> {
+        for file in &self.manifest.files {
+            let path = self.path.join(safe_relative_path(&file.path)?);
+            let actual = crate::store::hash_file(&path)?;
+            if actual != file.cas_hash {
+                return Err(Error::ChecksumMismatch {
+                    name: file.path.clone(),
+                    expected: file.cas_hash.clone(),
+                    actual,
+                });
+            }
+            if let Some(expected) = file.sha256.as_deref() {
+                let actual = hash_file(&path, HashAlgo::Sha256)?;
+                if !actual.eq_ignore_ascii_case(expected) {
+                    return Err(Error::ChecksumMismatch {
+                        name: file.path.clone(),
+                        expected: expected.to_string(),
+                        actual,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -639,27 +665,7 @@ impl ModelStore {
 
     pub fn verify(&self, name: &str) -> Result<SnapshotManifest> {
         let installed = self.current(name)?;
-        for file in &installed.manifest.files {
-            let path = installed.path.join(safe_relative_path(&file.path)?);
-            let actual = crate::store::hash_file(&path)?;
-            if actual != file.cas_hash {
-                return Err(Error::ChecksumMismatch {
-                    name: file.path.clone(),
-                    expected: file.cas_hash.clone(),
-                    actual,
-                });
-            }
-            if let Some(expected) = file.sha256.as_deref() {
-                let actual = hash_file(&path, HashAlgo::Sha256)?;
-                if !actual.eq_ignore_ascii_case(expected) {
-                    return Err(Error::ChecksumMismatch {
-                        name: file.path.clone(),
-                        expected: expected.to_string(),
-                        actual,
-                    });
-                }
-            }
-        }
+        installed.verify()?;
         Ok(installed.manifest)
     }
 

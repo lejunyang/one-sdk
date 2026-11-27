@@ -141,7 +141,12 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 
 本地 snapshot 的 manifest 不保存输入绝对路径；lock 读写两端都拒绝 `provider=local`，因为另一台机器无法按任意本地路径复现。CLI 在发布前拒绝同名声明/lock 和 `hf-cache` view；成功后可渲染 ComfyUI view，重复导入会按持久化 view state 重渲染既有视图。`--json` 复用 schema 1 `ModelShowOutput`，stdout 不混入人类报告。
 
-`model list/show/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 sync 仍需已有 provider metadata cache 和逐文件 download cache，之后可重新物化已删除的 snapshot。
+`model list/show/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 sync 可以用已有快照的 manifest 和经校验的 CAS 对象重放。没有匹配的快照记录时，才需要缓存的 provider metadata 与所选下载文件。
+
+同步成功后，以规范化项目根为身份，把选中的锁路径及实际物化的快照键登记到
+`<data>/model-refs/<root-id>.json`。新拉取、按锁还原和校验后复用都登记。
+单模型同步只更新指定名称，在锁中但还原失败的模型保留原登记。被替换的键从
+有效引用移到单独的记录，供之后的清理使用。
 
 机器协议集中在 [`model_output.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/model_output.rs)，与快照、lock 和 view state 的磁盘 schema 分离。`import --json`、`list/show/path/verify` 及只读 view 命令输出单个 schema 1 JSON，`sync --jsonl` 通过统一 emitter 输出逐行事件；人类模式仍使用原文案。所有机器 stdout 写入都经过同一序列化入口，view reconcile 在 JSONL 模式下仍执行但不打印普通报告，错误继续由顶层写 stderr 并返回非零。协议中的绝对路径是本机位置，保留原生分隔符；manifest 相对路径来自跨平台产物，保持 `/`。
 

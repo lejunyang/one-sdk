@@ -10,6 +10,7 @@ The default layout is below. The data and cache roots are overridable, while sto
 - `<installs>/<dynamic-tool>/<version>/b3-v2-<digest>`: fingerprinted roots for osdk-owned isolated dynamic tools.
 - `<installs>/npm-global/<package>/<version>/b3-v2-<digest>`: fingerprinted roots for `use --global npm:<package>`. Older version-only roots containing `.osdk-tool.json` are detected as legacy state but never reused or executed.
 - `<data>/models/<name>/snapshots/<snapshot>`: materialized model snapshots.
+- `<data>/model-refs/<root-id>.json`: exact model snapshot references by project.
 - `<data>/store/<aa>/<bb>/<blake3>`: CAS shared by SDK and model files.
 - `<data>/shims`: command shims.
 - `<cache>/downloads`: downloaded tool archives and checksum/source/attestation sidecars.
