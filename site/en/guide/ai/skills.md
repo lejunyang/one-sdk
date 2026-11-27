@@ -231,7 +231,8 @@ for you to check.
    ancestor `osdk.lock` files manually, including in projects without Git.
 2. Copy the entire `[skills.<name>]` table into the `osdk.lock` beside the
    subproject's `osdk.toml`. Keep every field, including the content hash, agents,
-   install mode, and any recorded commit. Start a new lock with `schema = 4`.
+   install mode, and any recorded commit. If the subproject has no lockfile yet,
+   create one with `schema = 4`.
 3. Verify that both tables match, then delete the old table from the ancestor lock.
    Keep the other entries in both locks. To uninstall the skill, run
    `osdk skills remove <name>` again from the subproject.
