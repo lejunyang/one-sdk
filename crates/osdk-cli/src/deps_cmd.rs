@@ -1539,6 +1539,12 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
         .find(|tool| tool.role == ToolRole::Runtime)
         .map(|tool| format!("{}@{}", tool.id, tool.version));
 
+    // Cargo may have planned a locked fetch from a local lock without
+    // confirming which lock the command consumed.
+    let native_lock = match &item.native_lock {
+        Some(owner) => owner.lock.as_deref(),
+        None => item.project.native_lock.as_deref(),
+    };
     let lock_path = &item.lock_path;
     crate::lockfile::merge_deps(
         lock_path,
@@ -1549,7 +1555,7 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
             runtime,
             project_root: &item.project.root,
             manifest: &item.project.manifest,
-            native_lock: item.project.native_lock.as_deref(),
+            native_lock,
             run: display_command(item),
             index: None,
             allow_build_from_source: item.config.allow_build_from_source,

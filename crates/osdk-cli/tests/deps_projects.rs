@@ -292,6 +292,60 @@ fn cargo_standalone_preserves_lock_when_config_cannot_be_parsed() {
     all(windows, target_env = "gnu"),
     ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
 )]
+fn cargo_standalone_does_not_record_an_unconfirmed_lock() {
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let local_lock = fixture.generate_lock();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    write(root, "Cargo.toml", &manifest.replace("0.1.0", "0.2.0"));
+    let alternate = root.join("alternate/Cargo.lock");
+    std::fs::create_dir(alternate.parent().unwrap()).unwrap();
+    let generated = fixture
+        .command(&fixture.cargo)
+        .env("CARGO_RESOLVER_LOCKFILE_PATH", &alternate)
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{generated:?}");
+    let alternate_lock = std::fs::read(&alternate).unwrap();
+    assert_ne!(local_lock, alternate_lock);
+    write(
+        root,
+        ".cargo/config.toml",
+        "term = {\n    progress.when = 'never',\n}\n[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+    );
+
+    let actual = fixture
+        .osdk()
+        .args(["deps", "cargo", "--no-install-tools"])
+        .output()
+        .unwrap();
+    assert!(actual.status.success(), "{actual:?}");
+    assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    fixture.assert_locks(Some(&local_lock));
+    assert_eq!(std::fs::read(&alternate).unwrap(), alternate_lock);
+
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("osdk.lock")).unwrap()).unwrap();
+    let cargo = saved["deps"]["cargo"].as_table().unwrap();
+    assert!(!cargo.contains_key("native_lock"), "{cargo:?}");
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    let verified = fixture
+        .osdk()
+        .args(["deps", "cargo", "--verify"])
+        .output()
+        .unwrap();
+    assert!(verified.status.success(), "{verified:?}");
+    fixture.assert_locks(None);
+    assert_eq!(std::fs::read(alternate).unwrap(), alternate_lock);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
 fn cargo_frozen_prepares_rust_before_accepting_a_local_lock() {
     let cargo = native_test_cargo();
     for workspace_member in [false, true] {
