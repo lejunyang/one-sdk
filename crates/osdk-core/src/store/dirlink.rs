@@ -190,17 +190,15 @@ mod platform {
     }
 
     pub(super) fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
         };
         use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
         use windows_sys::Win32::System::IO::DeviceIoControl;
 
         use super::IO_REPARSE_TAG_MOUNT_POINT;
-        const GENERIC_WRITE: u32 = 0x4000_0000;
 
         // A junction target must be fully qualified in the NT namespace
         // (`\??\C:\...`); a plain path or a `\\?\` prefix is not accepted.
@@ -234,34 +232,24 @@ mod platform {
             buffer.extend_from_slice(&unit.to_le_bytes());
         }
 
-        let wide: Vec<u16> = link
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        // SAFETY: `wide` is NUL-terminated and outlives the call; the handle is
-        // closed on every path below.
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                std::ptr::null_mut(),
-            )
+        // Use std's Windows path conversion for directories past MAX_PATH.
+        let file = match std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(link)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = std::fs::remove_dir(link);
+                return Err(error);
+            }
         };
-        if handle == INVALID_HANDLE_VALUE {
-            let error = std::io::Error::last_os_error();
-            let _ = std::fs::remove_dir(link);
-            return Err(error);
-        }
-        // SAFETY: `handle` is a valid directory handle opened for write above,
-        // and `buffer` describes exactly `buffer.len()` initialised bytes.
+        // SAFETY: file owns the directory handle, and buffer is initialized
+        // for its full length.
         let ok = unsafe {
             DeviceIoControl(
-                handle,
+                file.as_raw_handle(),
                 FSCTL_SET_REPARSE_POINT,
                 buffer.as_ptr().cast(),
                 buffer.len() as u32,
@@ -276,10 +264,7 @@ mod platform {
         } else {
             Ok(())
         };
-        // SAFETY: closing a handle we opened and no longer use.
-        unsafe {
-            CloseHandle(handle);
-        }
+        drop(file);
         if result.is_err() {
             let _ = std::fs::remove_dir(link);
         }

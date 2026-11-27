@@ -488,7 +488,73 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn node_package_migration_backs_up_junction_past_max_path() {
+        use std::os::windows::ffi::OsStrExt;
+        use std::path::{Component, Prefix};
+        use windows_sys::Win32::Foundation::MAX_PATH;
+
+        const ORIGINAL_LINK_LEN: usize = 245;
+        let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let wide_len = |path: &Path| path.as_os_str().encode_wide().count();
+        let package = "linked";
+        // The backup inserts a directory component, taking this 245-unit
+        // package path past MAX_PATH without a verbatim drive prefix.
+        let padding = ORIGINAL_LINK_LEN - (wide_len(&modules(&root).join(package)) + 1);
+        let prefix = root.join("x".repeat(padding));
+        let tools = ManagedNodeTools {
+            npm: prefix.join("unused"),
+            bin: prefix.clone(),
+            prefix,
+        };
+        let project = root.join("project");
+        fs::create_dir(&project).unwrap();
+        let link = modules(&tools.prefix).join(package);
+        assert_eq!(wide_len(&link), ORIGINAL_LINK_LEN);
+        assert!(wide_len(&link) < MAX_PATH as usize);
+        assert!(matches!(
+            link.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+        ));
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        dirlink::create(&project, &link).unwrap();
+        let target = fs::read_link(&link).unwrap();
+        assert_eq!(
+            dirlink::reparse_tag(&link).unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
+
+        let snapshot = Snapshot::capture(&tools).unwrap();
+        let backup_link = snapshot.backup.path().join("node_modules").join(package);
+        assert!(wide_len(&backup_link) > MAX_PATH as usize);
+        assert!(matches!(
+            backup_link.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+        ));
+        assert_eq!(fs::read_link(&backup_link).unwrap(), target);
+        assert_eq!(
+            dirlink::reparse_tag(&backup_link).unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
+
+        fs::remove_dir(&link).unwrap();
+        snapshot.restore(&tools, []).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), target);
+        assert_eq!(
+            dirlink::reparse_tag(&link).unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
+        assert_eq!(
+            fs::canonicalize(link).unwrap(),
+            fs::canonicalize(project).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn node_package_migration_restores_junction_over_symlink_to_same_target() {
+        use windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD;
+
         let tmp = tempfile::tempdir().unwrap();
         let prefix = tmp.path().join("target");
         let tools = ManagedNodeTools {
@@ -510,7 +576,14 @@ mod tests {
         let snapshot = Snapshot::capture(&tools).unwrap();
 
         fs::remove_dir(&link).unwrap();
-        std::os::windows::fs::symlink_dir(&original_target, &link).unwrap();
+        match std::os::windows::fs::symlink_dir(&original_target, &link) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD as i32) => {
+                eprintln!("skipping symlink replacement: {error}");
+                return;
+            }
+            Err(error) => panic!("creating directory symlink: {error}"),
+        }
         assert_eq!(fs::read_link(&link).unwrap(), original_target);
         assert_eq!(
             dirlink::reparse_tag(&link).unwrap(),
