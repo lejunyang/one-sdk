@@ -168,6 +168,21 @@ jobs:
           # Only the generic github: backend needs this. Current tests use local
           # fixture servers and do not require network access.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: real npm rollback for Node migration
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/node-migration-home
+          OSDK_CONFIG_DIR: ${{ runner.temp }}/node-migration-config
+          OSDK_DATA_DIR: ${{ runner.temp }}/node-migration-data
+          OSDK_CACHE_DIR: ${{ runner.temp }}/node-migration-cache
+          OSDK_STORE_DIR: ${{ runner.temp }}/node-migration-store
+          OSDK_INSTALL_DIR: ${{ runner.temp }}/node-migration-installs
+          OSDK_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+        run: |
+          mkdir -p "$HOME"
+          ./target/debug/osdk run node-migration-rollback --osdk ./target/debug/osdk
       - name: Linux PowerShell Go env/exec and hook restoration
         if: runner.os == 'Linux'
         shell: pwsh

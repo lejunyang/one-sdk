@@ -429,9 +429,29 @@ links resolving outside the prefix are withheld from staged npm. After npm exits
 and migrated artifacts pass verification, their original link text is restored
 before publication. Occupied link paths or symlinked parent directories abort
 publication. External projects are never copied or written; relative links resolve
-to their original targets once published at the original location. The existing
-Node-to-Node migration also pins prefixes explicitly, independent of activation
-variables and builtin defaults.
+to their original targets once published at the original location.
+
+Node-to-Node migration (`--to`) also pins prefixes explicitly, independent of
+activation variables and builtin defaults. Before installing, it resolves the
+target prefix and backs up global `node_modules` and launchers inside that
+directory, on the target volume. On Unix it also backs up man pages from the
+resolved `share/man/manN` section directories. Before restoring, it verifies
+that the managed prefix still resolves to that directory.
+The backup preserves link text and the original junction or symlink type on
+Windows. Junction backups use Rust's Windows path conversion when the backup
+path exceeds `MAX_PATH`. On install failure, Windows tries an offline npm
+uninstall of newly added planned packages. On Unix, osdk records successful
+man-page symlink writes by the target npm process via callback-based `fs.symlink`
+(including npm 8's `promisify(fs.symlink)`) and `fs.promises.symlink` before npm
+can roll back its package tree. The rollback compares those records with the
+snapshot and checks the actual section directory and the link's device, inode,
+change time and target. It restores overwritten entries and removes added links
+whose writes it can verify. An unexplained change to an original entry stops
+the rollback.
+The rollback then uses the backup to clean up leftover packages and launchers,
+including packages with incomplete manifests. It restores original files and
+links where they changed and reports the original install error. Failed rollback
+keeps the backup and reports its path.
 
 `--allow-scripts` requires shared migration and explicit `--package` selection.
 It passes `--ignore-scripts=false` to override inherited ignore-scripts settings,

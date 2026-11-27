@@ -322,8 +322,21 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 本地链接与别名包仍参与 bin 归属检查，但不会自动迁移。绝对链接或解析到 prefix 外的链接
 不交给暂存 npm；npm 退出且迁移产物校验通过后，按原始链接文本恢复，再发布目录。恢复前
 检查位置未被 npm 占用、父目录未被换成链接，冲突则中止发布。因此不会复制或写入外部项目，
-相对链接在发布回原位置后仍指向原目标。Node 间旧迁移也显式指定 prefix，
-不受激活变量或 builtin 默认值影响。
+相对链接在发布回原位置后仍指向原目标。
+
+Node 版本间迁移（`--to`）也显式指定 prefix，不受激活变量或 builtin 默认值影响。
+执行前解析目标 prefix，在实际目录内备份全局 `node_modules` 和命令入口。Unix 上也按
+`share/man/manN` 章节目录的实际指向备份手册入口。
+回滚前检查受管 prefix 是否仍指向原目录。
+备份保留原链接文本，Windows 上也保留 junction 和符号链接各自的类型。
+打开 junction 备份目录时使用 Rust 的 Windows 长路径转换，覆盖备份路径超过 `MAX_PATH` 的情况。
+安装失败后，Windows 先尝试离线卸载已落盘的计划内新增包。Unix 记录目标 npm 通过回调式
+`fs.symlink`（包括 npm 8 使用的 `promisify(fs.symlink)`）或 `fs.promises.symlink` 成功写入的
+手册链接，避免 npm 自行回退包目录后丢失依据。回滚将记录与快照对照，复核章节实际目录
+及链接的设备、inode、状态变更时间和目标，只还原或移除能核实为本次 npm 写入的链接。
+原有入口发生无法归因的变化时停止回滚。
+随后按快照清理残留包和命令入口，无需 npm 重新枚举包或读取残缺的 manifest。
+原有文件和链接只在发生变化时从备份还原，命令保留安装失败的错误。回滚失败时保留备份并报告路径。
 
 `--allow-scripts` 要求共享迁移且显式 `--package`，将安装参数改为 `--ignore-scripts=false`，
 覆盖继承的 ignore-scripts 配置，允许选中包及其依赖执行 npm 生命周期脚本。预览仍不调用 npm；
