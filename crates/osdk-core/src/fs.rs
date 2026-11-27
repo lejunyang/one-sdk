@@ -9,7 +9,7 @@
 //! truth for that pair; callers keep their own error wrapping, temp-file naming
 //! and fsync policy on top.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// Read a UTF-8 text file that another tool or an editor wrote, dropping a
 /// leading byte-order mark.
@@ -24,6 +24,30 @@ pub fn read_text_without_bom(path: &Path) -> std::io::Result<String> {
         Some(rest) => rest.to_string(),
         None => text,
     })
+}
+
+/// Collapse dot segments in a native path without following symlinks.
+pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized
+                    .file_name()
+                    .is_some_and(|name| name != std::ffi::OsStr::new(".."))
+                {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 /// Atomically replace `destination` with `source` (a rename that overwrites).

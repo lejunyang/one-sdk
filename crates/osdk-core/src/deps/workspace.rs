@@ -258,9 +258,12 @@ impl CargoConfigInputs {
                 // Later includes take precedence over earlier ones, below
                 // the file that includes them.
                 pending.extend(includes.into_iter().map(|include| {
-                    directory.join(match include {
+                    let include = match include {
                         CargoConfigInclude::Path(path) | CargoConfigInclude::Table { path } => path,
-                    })
+                    };
+                    // Cargo normalizes the include before interpreting any
+                    // relative paths defined by that file.
+                    crate::fs::normalize_lexically(&directory.join(include))
                 }));
             }
             result.files.push(path);

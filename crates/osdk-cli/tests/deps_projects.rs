@@ -364,7 +364,7 @@ fn cargo_requires_native_membership_even_with_a_local_lock() {
 )]
 fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
     let cargo = native_test_cargo();
-    for source in ["provider environment", "included Cargo config"] {
+    for source in ["provider environment", "nested Cargo config"] {
         let fixture = CargoWorkspace::new(cargo.clone());
         fixture.link_rust();
         let root = fixture.temp.path();
@@ -380,12 +380,29 @@ fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
             );
             std::fs::write(config, text).unwrap();
         } else {
-            write(root, ".cargo/config.toml", "include = ['resolver.toml']\n");
+            write(
+                root,
+                ".cargo/config.toml",
+                "include = ['rules/lock.toml']\n",
+            );
+            write(
+                root,
+                ".cargo/rules/lock.toml",
+                "include = ['../resolver.toml']\n",
+            );
             write(
                 root,
                 ".cargo/resolver.toml",
                 "[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
             );
+            let native = fixture.native(&[
+                "fetch",
+                "--locked",
+                "--offline",
+                "--manifest-path",
+                "crates/demo/Cargo.toml",
+            ]);
+            assert!(native.status.success(), "{native:?}");
         }
 
         let first = fixture.member(&[]);
