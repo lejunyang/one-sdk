@@ -15,7 +15,7 @@ osdk prune [--dry-run]
 | --- | --- |
 | `cache status [--json]` | Inspect download usage, policy, retries and eligible entries |
 | `cache trim [--dry-run] [--json]` | Reclaim registered downloads by policy; exclude CAS/native stores |
-| `cache prune` | Delegate unused-cache pruning to uv; no preview |
+| `cache prune` | Delegate unused uv cache cleanup to managed uv, with no preview |
 | `cache dir` | Print cache root, downloads, CAS, and downstream-cache root |
 | `cache env` | Print all supported downstream native-cache environment mappings |
 | `cache clean` | Remove download copies and uv/pip native caches; preserve CAS and installs |
@@ -26,6 +26,10 @@ osdk prune [--dry-run]
 Cleanup checks its targets before deletion and rejects links, invalid directories and targets that overlap persistent data.
 If a later stage fails, `cache clean` reports which earlier stages completed.
 GC refuses to continue when it encounters a corrupt manifest, protecting objects that may still be referenced.
+
+For uv cache cleanup, managed uv 0.13.1 or later waits for uv installs using the same cache.
+If managed uv is unavailable or is between 0.8.19 and 0.13.0, `cache clean` tries to acquire uv's cache lock first.
+A busy cache causes a nonzero exit. Retry after installation finishes. `cache prune` requires managed uv 0.8.19 or later.
 
 `osdk container cache status` is separate: it queries storage owned by Docker
 Engine or a Buildx builder through supported native aggregate interfaces. See

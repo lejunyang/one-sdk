@@ -547,6 +547,52 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.uv_cache_native",
+        (
+            "running managed uv cache {operation} for {path}. uv may wait for active installs.",
+            "正在用受管 uv 对 {path} 执行 cache {operation}，uv 可能等待正在进行的安装。",
+        ),
+    );
+    m.insert(
+        "msg.uv_cache_empty",
+        ("no managed uv cache to prune", "没有可回收的受管 uv 缓存"),
+    );
+    m.insert(
+        "msg.uv_cache_prune_unavailable",
+        (
+            "managed uv is unavailable. To prune the cache, run `osdk install pypi:uv`.",
+            "受管 uv 不可用。要回收缓存，请先运行 `osdk install pypi:uv`。",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_version",
+        (
+            "uv {version} installs without the shared cache lock. Upgrade to uv {minimum} or later to maintain this cache.",
+            "uv {version} 安装时不持有共享缓存锁。请升级到 uv {minimum} 或更高版本后再维护缓存。",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_unknown_version",
+        (
+            "could not determine the managed uv version from `{path} --version`",
+            "无法通过 `{path} --version` 识别受管 uv 的版本",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_probe",
+        (
+            "could not check the managed uv version at {path} ({cause})",
+            "无法检查 {path} 中受管 uv 的版本（{cause}）",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_command",
+        (
+            "`uv cache {operation}` failed for {path} ({cause})",
+            "`uv cache {operation}` 对 {path} 执行失败（{cause}）",
+        ),
+    );
+    m.insert(
         "prompt.uninstall",
         (
             "Uninstall {tool} and reclaim its unreferenced store objects?",

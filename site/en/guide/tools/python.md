@@ -262,22 +262,18 @@ interpreter behind osdk's back.
 
 ## Cache
 
-uv's cache is osdk-managed (`<cache>/pkg/uv`), so there are two ways to reclaim
-it, differing in whether what the environments still use is kept:
+osdk puts uv's shared cache in `<cache>/pkg/uv`. You can use uv's pruning rules
+to reclaim unused entries or clear the cache contents.
 
 ```bash
-osdk cache prune   # drop only entries uv considers unreferenced
-osdk cache clean   # delete the uv and pip caches outright
+osdk cache prune        # reclaim unused entries according to uv's rules
+osdk --yes cache clean  # clear the download, uv, and pip caches
 ```
 
-uv hardlinks each unpacked wheel into every venv, so those objects are live even
-though they sit in the cache. Measured on a populated cache, `prune` reported "no
-unused entries" and left `archive-v0` byte-for-byte intact, while `clean` deletes
-it and forces every environment to download again.
-
-`prune` has no preview mode: `uv cache prune` has none, and osdk will not fake
-one by guessing. With uv absent it says there is nothing to do rather than
-reporting a successful no-op.
+`cache clean` may require downloads on the next install. Managed uv 0.13.1 or later waits
+for installs using the same cache. With managed uv unavailable or between 0.8.19 and 0.13.0,
+a busy cache causes cleanup to exit nonzero. `cache prune` requires managed uv 0.8.19
+or later and has no preview. See [Caches and Cleanup](../maintenance/cache).
 
 ::: warning The uv cache directory belongs to uv alone
 Measured: `uv cache prune` removes anything it does not recognise under its own

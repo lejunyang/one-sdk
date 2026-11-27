@@ -70,7 +70,11 @@ Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 S
 
 离线模型重建扫描规范快照路径中的两个 manifest，核对 identity、文件路径、hash、size，再验证 CAS 的 BLAKE3 和可用 SHA-256；源是 CAS，不登记为下载缓存。旧快照缺少文件时先拒绝额外/已修改数据，再构建完整 sibling stage；旧树保留在唯一 rollback 位置直到替换与 `current` 提交都成功，失败恢复旧树（若恢复本身失败则报告保留位置）。不会删除原安装中的唯一内容或 blob。只有实际记录的文件集可重放，卸载/GC 不会为离线重建永久保留孤儿内容。
 
-`cache clean` 保留原先显式清理下载和 uv/pip 的范围；下载部分改为受 lease 保护的逐文件删除，链接和锁文件保留。`cache prune` 仍只调用 uv 自有 prune。
+`cache clean` 先校验下载、uv、pip 的目标路径，然后依次清理。下载阶段持有 osdk 自己的独占 lease。若 osdk 的安装正在使用该 lease，命令立即退出。
+
+uv 0.8.19 起在安装时持有 `<cache>/pkg/uv/.lock` 的共享锁。原生 `cache clean` 到 0.13.1 才保留缓存根和锁文件，因此 osdk 从 0.13.1 起委托 clean。可执行文件缺失、无法启动，或版本在 0.8.19 至 0.13.0 之间时，osdk 尝试非阻塞独占同一文件，清理条目并保留目录和锁。已知低于 0.8.19 的版本会收到升级提示。 [0.8.18 初始化](https://github.com/astral-sh/uv/blob/0.8.18/crates/uv-cache/src/lib.rs#L314-L352) · [0.8.19 共享锁](https://github.com/astral-sh/uv/blob/0.8.19/crates/uv-cache/src/lib.rs#L397-L413) · [0.13.1 清理](https://github.com/astral-sh/uv/blob/0.13.1/crates/uv-cache/src/lib.rs#L544-L589)
+
+`cache prune` 由受管 uv 0.8.19 或更新版本决定回收哪些条目。两个委托命令都固定使用 osdk 的 uv 缓存目录，忽略 uv 配置文件和 `UV_NO_CACHE`。原生清理失败时会显示 uv 的诊断并退出。协调要求其他进程使用共享缓存锁且文件系统支持该锁。
 
 ## GC、卸载与并发 caveat
 

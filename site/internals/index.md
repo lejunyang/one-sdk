@@ -48,7 +48,7 @@ CLI 与分层配置
 - osdk 的 BLAKE3 CAS 去重 SDK 与模型的已验证文件；原生 package cache 仍归各 manager
   管理。Cargo 工具在私有 staged Cargo home/target 中构建，Go 工具使用 osdk 控制的共享
   module/build cache；两者都在 CAS 外发布 binary。当前没有跨 manager 的 package tarball CAS。
-- `osdk cache clean` 只清理 osdk 的下载缓存，不会删除原生 package cache、安装目录、模型或 CAS。
+- `osdk cache clean` 清理下载、uv 和 pip 缓存，保留安装目录、模型、CAS 与其他原生包管理器缓存。
 - `osdk container cache status` 查询运行时自有的聚合接口。原生镜像拉取仍由所选 Docker
   或 containerd 控制面所有；限定范围的清理只支持 Docker 与 BuildKit。这些路径都不会读取
   或创建 osdk OCI 存储，也不会扫描实现私有的原生存储。

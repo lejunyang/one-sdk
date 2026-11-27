@@ -6,6 +6,7 @@ certificate are generated locally; every install has fresh HOME and OSDK state.
 """
 import argparse
 import base64
+import fcntl
 import hashlib
 import http.server
 import io
@@ -17,15 +18,18 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 
 
 TOP = "osdk-source-fixture"
 DEP = "osdk-source-dep"
+PAUSED = "osdk-cache-control-fixture"
+WHEEL_PREFIX = 256 * 1024
 
 
-def wheel(name, version, origin, dependency=False, uv_binary=None):
+def wheel(name, version, origin, dependency=False, uv_binary=None, payload=None):
     module = name.replace("-", "_")
     dist = f"{module}-{version}.dist-info"
     files = {
@@ -42,6 +46,8 @@ def wheel(name, version, origin, dependency=False, uv_binary=None):
         ).encode()
     else:
         files[f"{module}/__init__.py"] = f"ORIGIN = {origin!r}\n".encode()
+        if payload is not None:
+            files[f"{module}/payload.bin"] = payload
         if name == TOP:
             files[f"{module}/cli.py"] = (
                 "import json\nfrom . import ORIGIN\n"
@@ -59,11 +65,12 @@ def wheel(name, version, origin, dependency=False, uv_binary=None):
     record.append(f"{dist}/RECORD,,\n")
     files[f"{dist}/RECORD"] = "".join(record).encode()
     result = io.BytesIO()
-    with zipfile.ZipFile(result, "w", zipfile.ZIP_DEFLATED) as archive:
+    compression = zipfile.ZIP_STORED if payload is not None else zipfile.ZIP_DEFLATED
+    with zipfile.ZipFile(result, "w", compression) as archive:
         for path, data in files.items():
             info = zipfile.ZipInfo(path)
             info.external_attr = 0o755 << 16
-            info.compress_type = zipfile.ZIP_DEFLATED
+            info.compress_type = compression
             archive.writestr(info, data)
     return f"{module}-{version}-py3-none-any.whl", result.getvalue()
 
@@ -110,6 +117,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
 
+class PausedWheelHandler(Handler):
+    def do_GET(self):
+        self.server.requests.append(self.path)
+        filename, wheel_data = self.server.packages[PAUSED][0]
+        wheel_path = f"/files/{filename}"
+        dist_info = f"{PAUSED.replace('-', '_')}-1.0.0.dist-info"
+        with zipfile.ZipFile(io.BytesIO(wheel_data)) as archive:
+            metadata = archive.read(f"{dist_info}/METADATA")
+        if self.path == f"/simple/{PAUSED}/":
+            body = (f'<a href="{wheel_path}" data-core-metadata="true">'
+                    f"{filename}</a>").encode()
+            content_type = "text/html"
+        elif self.path == wheel_path + ".metadata":
+            body, content_type = metadata, "application/octet-stream"
+        elif self.path == wheel_path:
+            body, content_type = wheel_data, "application/octet-stream"
+        else:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        if self.path == wheel_path:
+            self.wfile.write(body[:WHEEL_PREFIX])
+            self.wfile.flush()
+            self.server.wheel_paused.set()
+            if not self.server.release_wheel.wait(timeout=30):
+                return
+            self.wfile.write(body[WHEEL_PREFIX:])
+        else:
+            self.wfile.write(body)
+
+
 class SourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -132,8 +175,8 @@ class SourceTests(unittest.TestCase):
         if cls.report:
             Path(cls.report).write_text(json.dumps(cls.evidence, ensure_ascii=False, indent=2))
 
-    def server(self, packages, auth=False):
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    def server(self, packages, auth=False, handler=Handler):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         server.packages, server.auth, server.requests = packages, auth, []
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(self.cert, self.root / "loopback.key")
@@ -186,6 +229,98 @@ class SourceTests(unittest.TestCase):
         check = subprocess.run([str(candidates[0]), "--version"], env=env, capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stderr)
         self.assertIn("uv 0.13.1", check.stdout)
+
+    def test_cache_clean_waits_for_uv_download(self):
+        root, env = self.state()
+        self.bootstrap_uv(root, env)
+        module = PAUSED.replace("-", "_")
+        payload = hashlib.shake_256(b"osdk-cache-control-20261127").digest(4 * 1024 * 1024)
+        fixture = wheel(PAUSED, "1.0.0", "paused-wheel", payload=payload)
+        server, index = self.server({PAUSED: [fixture]}, handler=PausedWheelHandler)
+        server.wheel_paused = threading.Event()
+        server.release_wheel = threading.Event()
+
+        cache_env = self.run_osdk(root, env, "cache", "env")
+        self.assertEqual(cache_env.returncode, 0, cache_env.stderr)
+        cache = Path(dict(line.split("=", 1) for line in cache_env.stdout.splitlines())["UV_CACHE_DIR"])
+        self.assertFalse(cache.exists(), "the fixture must reach a fresh uv cache")
+        lock = cache / ".lock"
+        venv = root / "venv"
+        subprocess.run([self.python, "-m", "venv", "--without-pip", str(venv)], env=env, check=True, timeout=15)
+        venv_python = venv / "bin/python"
+        custom_cache = root / "user-cache"
+        custom_cache.mkdir()
+        marker = custom_cache / "keep"
+        marker.touch()
+        with subprocess.Popen(
+            [self.uv, "--no-config", "pip", "install", "--default-index", index, "--python",
+             str(venv_python), "--link-mode", "copy", f"{PAUSED}==1.0.0"],
+            cwd=root, env={**env, "UV_CACHE_DIR": str(cache)},
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        ) as installer:
+            cleaner = None
+            try:
+                self.assertTrue(server.wheel_paused.wait(timeout=12), "wheel request did not reach the pause")
+                self.assertIn(f"/files/{fixture[0]}.metadata", server.requests)
+                deadline = time.monotonic() + 6
+                while True:
+                    self.assertIsNone(installer.poll(), "uv exited before the download was released")
+                    self.assertLess(time.monotonic(), deadline, "uv never opened the cache's partial payload")
+                    fds = (Path("/proc") / str(installer.pid) / "fd").iterdir()
+                    if any(fd.is_symlink() and str(fd.resolve()).endswith(f"/{module}/payload.bin") for fd in fds):
+                        break
+                    time.sleep(0.02)
+                with lock.open("rb") as lock_file, self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                inode = lock.stat().st_ino
+                cleaner = subprocess.Popen(
+                    [self.osdk, "--yes", "cache", "clean"], cwd=root,
+                    env={**env, "UV_CACHE_DIR": str(custom_cache), "UV_NO_CACHE": "true",
+                         "UV_CONFIG_FILE": str(root / "absent-uv.toml")},
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
+                deadline = time.monotonic() + 6
+                while not any(
+                    fields[1:5] == ["->", "FLOCK", "ADVISORY", "WRITE"]
+                    and fields[-3].endswith(f":{inode}")
+                    for fields in map(str.split, Path("/proc/locks").read_text().splitlines())
+                ):
+                    self.assertIsNone(cleaner.poll(), "cache clean exited before the download was released")
+                    self.assertLess(time.monotonic(), deadline, "cache clean did not wait for the same uv lock")
+                    time.sleep(0.02)
+                server.release_wheel.set()
+                install_output, _ = installer.communicate(timeout=20)
+                clean_output, _ = cleaner.communicate(timeout=20)
+                self.assertEqual(installer.returncode, 0, install_output)
+                self.assertEqual(cleaner.returncode, 0, clean_output)
+                self.assertIn("running managed uv cache clean", clean_output)
+            finally:
+                server.release_wheel.set()
+                for child in (installer, cleaner):
+                    if child is not None and child.poll() is None:
+                        child.kill()
+                        child.communicate(timeout=5)
+                if cleaner is not None:
+                    cleaner.stdout.close()
+
+        imported = subprocess.check_output(
+            [str(venv_python), "-IB", "-c", f"import {module}; print({module}.__file__)"],
+            cwd=root, env=env, text=True, timeout=10,
+        )
+        site_packages = Path(imported.strip()).parent.parent
+        with zipfile.ZipFile(io.BytesIO(fixture[1])) as archive:
+            for member in archive.namelist():
+                if not member.endswith("/RECORD"):  # The installer rewrites RECORD.
+                    self.assertEqual(
+                        hashlib.sha256((site_packages / member).read_bytes()).hexdigest(),
+                        hashlib.sha256(archive.read(member)).hexdigest(),
+                        member,
+                    )
+        self.assertEqual(lock.stat().st_ino, inode)
+        self.assertLessEqual({entry.name for entry in cache.iterdir()}, {".lock", ".gitignore", "CACHEDIR.TAG"})
+        self.assertTrue(marker.is_file())
+        self.evidence.append({"test": self.id(), "install_stdout": install_output,
+                              "clean_stdout": clean_output, "payload_sha256": hashlib.sha256(payload).hexdigest()})
 
     def installed_origin(self, root):
         bins = list((root / "installs/pypi" / TOP).glob("*/b3-v2-*/bin/source-fixture"))

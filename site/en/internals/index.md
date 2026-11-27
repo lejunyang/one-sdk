@@ -46,7 +46,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 - Lockfiles and installation receipts are reproducibility inputs and audit records, not trust anchors; floating Rust channels remain rustup channel names rather than immutable versions. Reinstallation from cached or locked artifacts still applies the active checksum/attestation policy. The normal CLI reuses an already complete installation before entering the pipeline and does not rehash its checksum; only an invocation that actually reaches the pipeline can reverify requested attestation on that fast path.
 - GitHub Artifact Attestation policy defaults to `off` and applies only to GitHub artifact flows that can supply the required bundle and identity constraints.
 - osdk's BLAKE3 CAS deduplicates verified SDK and model files. Native package caches remain manager-owned; Cargo tools build in a private staged Cargo home/target, while Go tools use osdk-controlled shared module/build caches. Both publish binaries outside CAS. There is currently no cross-manager package tarball CAS.
-- `osdk cache clean` clears only osdk's download cache. It does not remove native package caches, installations, models, or the CAS.
+- `osdk cache clean` clears the download, uv, and pip caches and preserves installations, models, the CAS, and other native package caches.
 - `osdk container cache status` queries runtime-owned aggregate interfaces.
   Native image pulls remain owned by the selected Docker or containerd control
   plane; scoped pruning is supported only for Docker and BuildKit. None of these

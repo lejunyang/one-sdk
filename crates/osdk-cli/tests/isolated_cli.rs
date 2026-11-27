@@ -11236,7 +11236,8 @@ fn cache_clean_preflights_pip_and_uv_lock_before_removing_downloads() {
 
     let output = run_isolated(root, &["--yes", "cache", "clean"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains(&*pip.to_string_lossy()));
+    let stderr = String::from_utf8_lossy(&output.stderr).replace('\\', "/");
+    assert!(stderr.contains("/cache/pkg/pip"), "{stderr}");
     assert!(archive.is_file());
     assert!(uv.join("wheel").is_file());
 

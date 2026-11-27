@@ -1018,6 +1018,7 @@ pub fn task(app: &mut App, command: crate::cli::TaskCommand) -> Result<()> {
 
 pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
     use crate::cli::CacheCommand;
+    use osdk_core::backend::pypi::{self, UvCacheAction, UvCacheOutcome};
     match command {
         CacheCommand::Status { json } => {
             let mut report = osdk_core::cache::downloads::collect(
@@ -1067,7 +1068,7 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             }
         }
         CacheCommand::Clean => {
-            use osdk_core::{backend::pypi, cache::downloads};
+            use osdk_core::cache::downloads;
 
             let dirs = &app.ctx.dirs;
             let pip = osdk_core::cache::downstream_root(&dirs.cache).join("pip");
@@ -1080,27 +1081,20 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             }
             downloads::clean(dirs)
                 .map_err(|error| cache_clean_error("err.cache_clean_downloads", error))?;
-            pypi::clean_cache_contents(&app.ctx)
+            pypi::maintain_cache(&app.ctx, UvCacheAction::Clean)
                 .map_err(|error| cache_clean_error("err.cache_clean_uv", error))?;
             downloads::validate_disposable_directory(dirs, &pip)
                 .map_err(|error| cache_clean_error("err.cache_clean_pip", error))?;
             remove_cache_directory(&pip).context(t!("err.cache_clean_pip"))?;
             println!("{}", t!("msg.cache_cleared"));
         }
-        CacheCommand::Prune => {
-            let outcome = osdk_core::backend::pypi::prune_cache(&app.ctx)?;
-            if !outcome.uv_available {
-                // Said plainly rather than reported as a successful no-op: uv is
-                // what decides which entries are dangling, so without it this
-                // command has nothing to do at all.
-                println!("uv is not installed, so there is nothing to prune; run `osdk install pypi:uv` first");
-            } else {
-                match &outcome.uv_output {
-                    Some(reported) => println!("{reported}"),
-                    None => println!("nothing to prune"),
-                }
+        CacheCommand::Prune => match pypi::maintain_cache(&app.ctx, UvCacheAction::Prune)? {
+            UvCacheOutcome::Empty => println!("{}", t!("msg.uv_cache_empty")),
+            UvCacheOutcome::PruneUnavailable => {
+                println!("{}", t!("msg.uv_cache_prune_unavailable"));
             }
-        }
+            UvCacheOutcome::Native | UvCacheOutcome::LockedFallback => {}
+        },
     }
     Ok(())
 }

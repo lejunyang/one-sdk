@@ -76,7 +76,11 @@ Policy never invokes CAS GC or removes store blobs, installations, native manage
 
 Offline model replay scans canonical snapshot paths, cross-checks both manifests and identity/path/hash/size, then verifies CAS BLAKE3 and available SHA-256. CAS sources are never registered as downloads. Missing materialization is rebuilt in a sibling stage after rejecting extra/edited data. The old tree stays in a unique rollback location until replacement and the current record commit; failure restores it (or reports the retained location if rollback itself fails). Original unique content and blobs are preserved. Only recorded file sets can be replayed; removal/GC does not permanently pin orphan content for offline reinstall.
 
-Explicit `cache clean` keeps its existing download + uv/pip scope. Its download portion now performs coordinated per-file unlink and preserves links/lock files. `cache prune` still delegates only to uv.
+`cache clean` validates the download, uv, and pip paths before cleaning them in that order. The downloads stage takes osdk's own exclusive lease and exits immediately if an osdk install holds it.
+
+uv 0.8.19 introduced a shared lock on `<cache>/pkg/uv/.lock` during installation. Native clean preserves the cache root and lock file starting in uv 0.13.1, so osdk delegates clean from that version onward. If managed uv cannot launch or is between 0.8.19 and 0.13.0, osdk tries an exclusive lock on the same file without waiting, then removes the entries while preserving the root and lock. A detected version older than 0.8.19 produces an upgrade message. [0.8.18 initialization](https://github.com/astral-sh/uv/blob/0.8.18/crates/uv-cache/src/lib.rs#L314-L352) · [0.8.19 shared lock](https://github.com/astral-sh/uv/blob/0.8.19/crates/uv-cache/src/lib.rs#L397-L413) · [0.13.1 clean](https://github.com/astral-sh/uv/blob/0.13.1/crates/uv-cache/src/lib.rs#L544-L589)
+
+`cache prune` leaves entry selection to managed uv 0.8.19 or later. Both delegated commands target osdk's uv cache explicitly and ignore uv configuration files and `UV_NO_CACHE`. Native failures surface uv's diagnostics and stop cleanup. Coordination depends on other processes participating in the cache lock and on filesystem support for that lock.
 
 ## GC, removal, and the concurrency caveat
 
