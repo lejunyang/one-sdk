@@ -232,10 +232,15 @@ fn cargo_standalone_frozen_selects_linked_rust_for_the_real_proxy() {
 
     let shared_bin = root.join("state/data/cargo/bin");
     std::fs::create_dir_all(&shared_bin).unwrap();
-    let rustup = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+    let cargo_bin = std::env::var_os("CARGO_HOME").map(|home| PathBuf::from(home).join("bin"));
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    // In an activated osdk environment, PATH may put dispatch shims first.
+    let rustup = cargo_bin
+        .into_iter()
+        .chain(std::env::split_paths(&path))
         .map(|dir| dir.join("rustup"))
         .find(|program| program.is_file())
-        .expect("the real Cargo proxy test requires rustup on PATH");
+        .expect("the real Cargo proxy test requires rustup in CARGO_HOME/bin or on PATH");
     let isolated_rustup = shared_bin.join("rustup");
     std::fs::copy(rustup, &isolated_rustup).unwrap();
     let proxy = shared_bin.join("cargo");
