@@ -182,7 +182,7 @@ jobs:
           OSDK_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
         run: |
           mkdir -p "$HOME"
-          ./target/debug/osdk run node-migration-rollback
+          ./target/debug/osdk run node-migration-rollback --osdk ./target/debug/osdk
       - name: Linux PowerShell Go env/exec and hook restoration
         if: runner.os == 'Linux'
         shell: pwsh

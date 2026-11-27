@@ -241,9 +241,25 @@ class MigrationRollback(unittest.TestCase):
         }
 
 
+def build_osdk():
+    repo = Path(__file__).resolve().parent.parent
+    build = subprocess.run(
+        ["cargo", "build", "--locked", "-p", "osdk-cli", "--bin", "osdk",
+         "--message-format=json-render-diagnostics"],
+        cwd=repo, stdout=subprocess.PIPE, text=True, check=True,
+    )
+    for line in build.stdout.splitlines():
+        message = json.loads(line)
+        if (message["reason"] == "compiler-artifact"
+                and message["target"]["name"] == "osdk"
+                and message["executable"]):
+            return Path(message["executable"]).resolve(strict=True)
+    raise RuntimeError("cargo did not report the built osdk executable")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--osdk", type=Path, required=True)
+    parser.add_argument("--osdk", help="test this CLI binary instead of building the current checkout")
     args = parser.parse_args()
-    MigrationRollback.osdk = args.osdk.resolve(strict=True)
+    MigrationRollback.osdk = Path(args.osdk).resolve(strict=True) if args.osdk else build_osdk()
     unittest.main(argv=[__file__], verbosity=2)
