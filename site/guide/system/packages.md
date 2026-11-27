@@ -176,10 +176,13 @@ osdk pkg apply --dry-run
 osdk pkg apply --yes               # 唯一会装东西的命令
 ```
 
-`pkg plan` 和 `pkg apply`（含 `--dry-run`）遇到无效包键时返回 `1`，并在查询包管理器前停止。
-`--json` 会输出 `refused.reason: "invalid-package-keys"` 和
-`refused.detail.invalid_keys`，`pkg apply` 还会输出 `applied: false`。
-项目有适用于本机的包声明时，`pkg apply` 会先检查项目是否受信任。
+`pkg plan` 在查询包管理器前校验包键。`pkg apply`（含 `--dry-run`）通过启动检查后
+做同样的校验。发现无效键时，两者都退出 `1`。`--json` 在 stdout 输出
+`refused.reason: "invalid-package-keys"` 和 `refused.detail.invalid_keys`，
+`pkg apply` 还会输出 `applied: false`。
+
+项目有适用于本机的包声明时，`pkg apply` 会先检查信任。信任检查失败时退出 `1`，
+stdout 为空，stderr 报告信任错误。要在批准项目前查看无效键，用 `osdk pkg plan --json`。
 
 合法请求会进入计划，列出要安装的包和其余包被跳过的原因。
 

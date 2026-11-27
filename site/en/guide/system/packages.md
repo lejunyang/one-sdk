@@ -202,11 +202,16 @@ osdk pkg apply --dry-run
 osdk pkg apply --yes               # the only command that installs anything
 ```
 
-`pkg plan` and `pkg apply` (including `--dry-run`) exit `1` on invalid package
-keys before querying the package manager. With `--json` they return
-`refused.reason: "invalid-package-keys"` and `refused.detail.invalid_keys`.
-`pkg apply` also returns `applied: false`. If the project has packages that
-apply on this host, `pkg apply` checks project trust first.
+`pkg plan` validates package keys before querying the package manager.
+`pkg apply` (including `--dry-run`) performs the same validation after startup
+checks. Both exit `1` when validation finds invalid keys. With `--json`, stdout
+contains `refused.reason: "invalid-package-keys"` and
+`refused.detail.invalid_keys`. The `pkg apply` response also contains `applied: false`.
+
+If the project declares packages that apply on this host, `pkg apply` checks
+project trust first. If that check fails, the command exits `1` with empty stdout
+and reports the trust error on stderr. Run `osdk pkg plan --json` to inspect
+invalid keys before approving the project.
 
 For valid requests, the plan lists the packages to install and gives a reason
 for each package it skips.

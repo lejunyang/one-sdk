@@ -19,10 +19,13 @@ osdk pkg apply --yes
 osdk pkg mirrors test --manager winget
 ```
 
-`status` 的 JSON 保留 `invalid_keys` 字符串数组。`plan` 和 `apply`（含 `--dry-run`）在
-查询包管理器之前校验包键，发现无效键即返回 `1`。拒绝时的 JSON 包含
-`refused.reason: "invalid-package-keys"` 和 `refused.detail.invalid_keys`。`apply` 另有
-`applied: false`。项目有本机适用的包声明时，`apply` 会先检查信任。
+`status` 的 JSON 保留 `invalid_keys` 字符串数组。`plan` 和通过启动检查的 `apply`
+（含 `--dry-run`）在查询包管理器之前校验包键。发现无效键时，命令退出 `1`。
+`--json` 在 stdout 输出 `refused.reason: "invalid-package-keys"` 和
+`refused.detail.invalid_keys`。`apply` 还会输出 `applied: false`。
+
+项目有本机适用的包声明时，`apply` 会先检查信任。信任检查失败时退出 `1`，
+stdout 为空，stderr 报告信任错误。批准项目前用 `osdk pkg plan --json` 查看无效键。
 
 首次无人值守镜像 apply 要传刚生成的 plan fingerprint；fingerprint 绑定当时的源状态。
 声明格式与平台过滤见 `reference/configuration/sys.md`。容器运行时不放进 `sys.pkg`。

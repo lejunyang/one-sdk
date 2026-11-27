@@ -248,8 +248,12 @@ winget 不支持把一个源原子地重新指向别处，只能 `remove` 再 `a
 把「什么都没做」读成成功，而这正是最难发现的一类缺陷。
 
 系统包入口共用 `[sys.pkg]` 包键解析。`pkg status` 查询合法条目并输出状态，再因无效键
-退出 `1`。`pkg plan` 和 `pkg apply` 在查询宿主之前校验全部包键。发现无效键时，JSON
-输出拒绝原因和诊断。通过校验的空计划才会在 `pkg plan --detailed-exitcode` 下返回 `0`。
+退出 `1`。`pkg plan` 和通过启动检查的 `pkg apply` 在查询宿主之前校验全部包键。发现无效键时，
+`--json` 在 stdout 输出拒绝原因和诊断。通过校验的空计划才会在
+`pkg plan --detailed-exitcode` 下返回 `0`。
+
+`pkg apply` 的信任检查发生在子命令分发之前。适用的项目声明未获批准时，命令退出 `1`，
+stdout 为空，stderr 报告信任错误。批准前可用只读的 `pkg plan --json` 查看包键诊断。
 
 ## Linux 检测为什么是只读的，以及怎么验证它
 
