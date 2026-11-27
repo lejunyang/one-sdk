@@ -121,15 +121,24 @@ impl Prompt for TerminalPrompt {
     }
 }
 
+pub(crate) fn confirm_outside_ci(prompt: &dyn Prompt, question: &str) -> Result<bool> {
+    if !prompt.assume_yes()
+        && std::env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
+    {
+        return Err(non_interactive_confirmation(question));
+    }
+    prompt.confirm(question)
+}
+
 fn ensure_interactive(question: &str) -> Result<()> {
     if io::stdin().is_terminal() {
-        Ok(())
-    } else {
-        Err(anyhow!(t!(
-            "err.confirmation_non_interactive",
-            question = question
-        )))
+        return Ok(());
     }
+    Err(non_interactive_confirmation(question))
+}
+
+fn non_interactive_confirmation(question: &str) -> anyhow::Error {
+    anyhow!(t!("err.confirmation_non_interactive", question = question))
 }
 
 fn print_options(question: &str, options: &[String]) -> Result<()> {

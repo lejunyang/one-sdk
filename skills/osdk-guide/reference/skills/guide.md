@@ -30,6 +30,9 @@ osdk skills update name
 技能时，移除锁条目再同步，或显式调用 `add`。配置见
 `reference/configuration/skills.md`。
 
+在 CI（`CI=true` 或 `CI=1`）或没有终端时，可以传 `--yes` 确认替换未锁定目录，
+也可以先移走旧目录再同步。
+
 升级后若 `list` 或 `remove` 提示子项目技能登记在上级锁里，先核对归属，再把提示所列的
 完整技能表原样复制到子项目锁。新建锁先写 `schema = 4`。仅当条目只归该子项目时才从
 上级锁移走。回到子项目运行 `osdk skills list` 核对，再重试原命令。

@@ -886,8 +886,8 @@ to install applicable declarations and record their resolutions alongside existi
 entries in `osdk.lock`. Use `skills update` to refresh a locked GitHub ref or apply
 changes to the Agent list. `sync` and bulk `update` skip skills excluded by `when`.
 Updating an excluded skill by name reports the platform requirement and exits with status 1.
-`sync` asks before replacing an existing unlocked skill directory. In non-interactive
-sessions, pass `--yes` to replace it or move it aside first.
+`sync` asks before replacing an existing unlocked skill directory. In CI or without a terminal,
+pass `--yes` to replace it or move it aside first.
 Pin a GitHub skill with `ref = "rev:<commit>"` to keep it
 at that commit across updates. To change the pin, edit `ref` and run `skills update`
 with network access.

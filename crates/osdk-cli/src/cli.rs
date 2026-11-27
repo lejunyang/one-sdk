@@ -1206,7 +1206,8 @@ pub enum SkillsCommand {
     ///
     /// New installs are recorded in the lock. A declaration's `when` filter
     /// also applies to locked skills, whose entries stay available to other platforms.
-    /// Confirm before replacing an existing unlocked skill directory.
+    /// Confirm before replacing an existing unlocked skill directory. In CI
+    /// or without a terminal, pass `--yes` to approve the replacement.
     Sync {
         /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
