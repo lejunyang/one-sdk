@@ -141,38 +141,47 @@ fn legacy_skill_recovery(
     if global || project.is_external() {
         return None;
     }
-    let ancestor = lockfile::find(project.root.parent()?)?;
-    // A diagnostic about an unrelated lock should never block this project's commands.
-    let lock = lockfile::load(&ancestor).ok()?;
-    let matches = lock.skills.iter().filter(|(name, entry)| {
-        wanted.is_none_or(|wanted| wanted == *name)
-            && !recorded.contains_key(*name)
-            && skills::validate_skill_name(name).is_ok()
-            && entry
-                .agents
-                .iter()
-                .filter_map(|id| agent_target(id))
-                .any(|agent| {
-                    agent
-                        .project_dir(&project.root)
-                        .join(name)
-                        .join(install::SKILL_MANIFEST)
-                        .is_file()
-                })
-    });
+    let ancestors = project
+        .root
+        .ancestors()
+        .skip(1)
+        .map(|directory| directory.join(lockfile::LOCKFILE_NAME))
+        .filter(|path| path.is_file());
     let mut hints = Vec::new();
-    for (name, _) in matches {
-        let table = format!("[skills.{name:?}]");
-        hints.push(format!(
-            "Skill `{name}` is installed here and {table} is recorded in ancestor lock `{}`.\n\
-             Verify that the entry belongs to this project. Copy the full {table} table verbatim \
-             into `{}` (start it with `schema = {}` if absent). \
-             Remove the ancestor entry only if it belongs exclusively to this project. \
-             Run `osdk skills list` here to verify, then rerun your original command.",
-            ancestor.display(),
-            project.lock_path.display(),
-            lockfile::schema_version(),
-        ));
+    for ancestor in ancestors {
+        // A closer lock may have been created later or may be unreadable.
+        let Ok(lock) = lockfile::load(&ancestor) else {
+            continue;
+        };
+        let candidates = lock.skills.iter().filter(|(name, entry)| {
+            wanted.is_none_or(|wanted| wanted == *name)
+                && !recorded.contains_key(*name)
+                && skills::validate_skill_name(name).is_ok()
+                && entry
+                    .agents
+                    .iter()
+                    .filter_map(|id| agent_target(id))
+                    .any(|agent| {
+                        agent
+                            .project_dir(&project.root)
+                            .join(name)
+                            .join(install::SKILL_MANIFEST)
+                            .is_file()
+                    })
+        });
+        for (name, _) in candidates {
+            let table = format!("[skills.{name:?}]");
+            hints.push(format!(
+                "Skill `{name}` is installed here and {table} is recorded in ancestor lock `{}`.\n\
+                 Verify that the entry belongs to this project. Copy the full {table} table verbatim \
+                 into `{}` (start it with `schema = {}` if absent). \
+                 Remove the ancestor entry only if it belongs exclusively to this project. \
+                 Run `osdk skills list` here to verify, then rerun your original command.",
+                ancestor.display(),
+                project.lock_path.display(),
+                lockfile::schema_version(),
+            ));
+        }
     }
     (!hints.is_empty()).then(|| hints.join("\n"))
 }

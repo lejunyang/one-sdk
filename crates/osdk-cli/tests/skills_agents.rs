@@ -171,8 +171,10 @@ fn skills_list_and_remove_report_an_installation_in_the_legacy_parent_lock() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let parent = local_project(root, "[skills]\n");
-    let child = local_project(&parent, "[skills]\n");
+    let middle = local_project(&parent, "[skills]\n");
+    let child = local_project(&middle, "[skills]\n");
     let parent_lock = parent.join("osdk.lock");
+    let middle_lock = middle.join("osdk.lock");
     let child_lock = child.join("osdk.lock");
     let add = osdk(
         root,
@@ -198,21 +200,42 @@ fn skills_list_and_remove_report_an_installation_in_the_legacy_parent_lock() {
     assert_eq!(unrelated.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&unrelated.stderr).contains("ancestor lock"));
 
-    let list = osdk(root, &child, &["skills", "list"]);
-    let remove = osdk(root, &child, &["--yes", "skills", "remove", "demo"]);
-    assert!(list.status.success(), "{list:?}");
-    assert_eq!(remove.status.code(), Some(1), "{remove:?}");
-    for output in [list, remove] {
-        let hint = String::from_utf8_lossy(&output.stderr);
-        assert!(hint.contains("ancestor lock"), "{hint}");
-        assert!(hint.contains("[skills.\"demo\"]"), "{hint}");
-        assert!(hint.contains(&parent_lock.display().to_string()), "{hint}");
-        assert!(hint.contains(&child_lock.display().to_string()), "{hint}");
-        assert!(hint.contains("osdk skills list"), "{hint}");
-    }
-    assert!(!child_lock.exists());
-    assert_eq!(std::fs::read_to_string(&parent_lock).unwrap(), generated);
-    assert_eq!(std::fs::read(&installed).unwrap(), DEMO_SKILL.as_bytes());
+    let check_recovery = || {
+        let list = osdk(root, &child, &["skills", "list"]);
+        let remove = osdk(root, &child, &["--yes", "skills", "remove", "demo"]);
+        assert!(list.status.success(), "{list:?}");
+        assert_eq!(remove.status.code(), Some(1), "{remove:?}");
+        for output in [list, remove] {
+            let hint = String::from_utf8_lossy(&output.stderr);
+            assert!(hint.contains("ancestor lock"), "{hint}");
+            assert!(hint.contains("[skills.\"demo\"]"), "{hint}");
+            assert!(hint.contains(&parent_lock.display().to_string()), "{hint}");
+            assert!(!hint.contains(&middle_lock.display().to_string()), "{hint}");
+            assert!(hint.contains(&child_lock.display().to_string()), "{hint}");
+            assert!(hint.contains("osdk skills list"), "{hint}");
+        }
+        assert!(!child_lock.exists());
+        assert_eq!(std::fs::read_to_string(&parent_lock).unwrap(), generated);
+        assert_eq!(std::fs::read(&installed).unwrap(), DEMO_SKILL.as_bytes());
+    };
+    check_recovery();
+
+    // A newer release can create a closer lock unrelated to the old skill.
+    std::fs::write(
+        middle.join("fixture/demo/SKILL.md"),
+        DEMO_SKILL.replace("name: demo", "name: middle"),
+    )
+    .unwrap();
+    let add = osdk(
+        root,
+        &middle,
+        &["--yes", "skills", "add", "./fixture/demo", "-a", "codex"],
+    );
+    assert!(add.status.success(), "{add:?}");
+    let middle_before = std::fs::read(&middle_lock).unwrap();
+    assert!(read_lock(&middle_lock)["skills"].get("middle").is_some());
+    check_recovery();
+    assert_eq!(std::fs::read(&middle_lock).unwrap(), middle_before);
 
     std::fs::write(&child_lock, format!("{schema}\n")).unwrap();
     let remove = osdk(root, &child, &["skills", "remove", "demo"]);
