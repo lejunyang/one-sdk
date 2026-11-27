@@ -278,12 +278,14 @@ impl<'a> SkillTargetChanges<'a> {
     }
 
     pub fn remove(&mut self, agent_skills_dir: &Path) -> Result<bool> {
+        use std::io::ErrorKind::{NotADirectory, NotFound};
+
         let dest = agent_skills_dir.join(self.name);
         match dest.symlink_metadata() {
             Ok(_) => self
                 .targets
                 .push(PreparedTarget::new(agent_skills_dir, dest)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if matches!(error.kind(), NotFound | NotADirectory) => return Ok(false),
             Err(error) => return Err(Error::io(&dest, error)),
         }
         Ok(true)

@@ -606,6 +606,46 @@ fn skills_update_leaves_existing_contents_and_lock_when_a_target_is_blocked() {
     assert_eq!(std::fs::read(&lock).unwrap(), before);
 }
 
+#[test]
+fn skills_update_drops_an_agent_whose_skills_directory_is_now_a_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(
+        root,
+        &DEMO_DECLARATION.replace("\"codex\"", "\"codex\", \"claude-code\""),
+    );
+    let sync = osdk(root, &project, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+    assert_eq!(locked_agents(&project), ["codex", "claude-code"]);
+
+    let codex = project.join(".agents/skills/demo/SKILL.md");
+    let claude = project.join(".claude/skills");
+    assert_eq!(std::fs::read(&codex).unwrap(), DEMO_SKILL.as_bytes());
+    assert_eq!(
+        std::fs::read(claude.join("demo/SKILL.md")).unwrap(),
+        DEMO_SKILL.as_bytes()
+    );
+    std::fs::remove_dir_all(&claude).unwrap();
+    std::fs::write(&claude, b"replacement file\n").unwrap();
+    std::fs::write(project.join("osdk.toml"), DEMO_DECLARATION).unwrap();
+
+    let update = osdk(root, &project, &["--offline", "skills", "update", "demo"]);
+    assert!(
+        update.status.success(),
+        "{}: {}",
+        update.status,
+        String::from_utf8_lossy(&update.stderr)
+    );
+    assert_eq!(locked_agents(&project), ["codex"]);
+    assert_eq!(std::fs::read(&codex).unwrap(), DEMO_SKILL.as_bytes());
+    assert_eq!(std::fs::read(&claude).unwrap(), b"replacement file\n");
+
+    let replay = osdk(root, &project, &["--offline", "skills", "sync"]);
+    assert!(replay.status.success(), "{replay:?}");
+    assert_eq!(std::fs::read(codex).unwrap(), DEMO_SKILL.as_bytes());
+    assert_eq!(std::fs::read(claude).unwrap(), b"replacement file\n");
+}
+
 /// Editing a skill's `agents` in osdk.toml must reach the lock and the disk on
 /// `skills update`. It used to re-resolve only the source, so an agent removed
 /// from the declaration stayed installed and recorded.
