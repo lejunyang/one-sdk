@@ -279,16 +279,94 @@ fn skills_list_and_remove_find_legacy_entries_within_the_repository() {
 }
 
 #[test]
+fn skills_list_and_remove_guide_migration_for_a_matching_legacy_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let parent = local_project(root, "[skills]\n");
+    std::fs::create_dir(parent.join(".git")).unwrap();
+    let child = local_project(&parent, "[skills]\n");
+    let parent_lock = parent.join("osdk.lock");
+    let child_lock = child.join("osdk.lock");
+    let add = osdk(
+        root,
+        &child,
+        &[
+            "--yes",
+            "skills",
+            "add",
+            "./fixture/demo",
+            "-a",
+            "codex",
+            "--copy",
+        ],
+    );
+    assert!(add.status.success(), "{add:?}");
+    let generated = std::fs::read_to_string(&child_lock).unwrap();
+    let (schema, skill_fields) = generated.split_once("\n\n[skills.demo]").unwrap();
+    let parent_tools = format!(
+        "{schema}\n\n[platforms.linux-x64.tools.rust]\nrequest = \"1.98.0\"\nversion = \"1.98.0\"\n"
+    );
+    let legacy_lock = format!("{parent_tools}\n[skills.demo]{skill_fields}");
+    std::fs::write(&parent_lock, &legacy_lock).unwrap();
+    std::fs::remove_file(&child_lock).unwrap();
+    let installed = child.join(".agents").join("skills").join("demo");
+
+    let list = osdk(root, &child, &["skills", "list"]);
+    let remove = osdk(root, &child, &["--yes", "skills", "remove", "demo"]);
+    assert!(list.status.success(), "{list:?}");
+    assert_eq!(remove.status.code(), Some(1), "{remove:?}");
+    for output in [&list.stderr, &remove.stderr] {
+        let hint = String::from_utf8_lossy(output);
+        assert!(
+            hint.contains(&format!(
+                "[skills.\"demo\"] in ancestor lock `{}`",
+                parent_lock.display()
+            )),
+            "{hint}"
+        );
+        assert!(hint.contains(&installed.display().to_string()), "{hint}");
+        assert!(
+            hint.contains("Verify which project owns this entry"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains(&format!(
+                "move the complete skill table to `{}`",
+                child_lock.display()
+            )),
+            "{hint}"
+        );
+        assert!(hint.contains("osdk skills remove demo"), "{hint}");
+    }
+    assert!(!String::from_utf8_lossy(&list.stdout).contains("found in project agent directories"));
+    assert_eq!(
+        std::fs::read(installed.join("SKILL.md")).unwrap(),
+        DEMO_SKILL.as_bytes()
+    );
+    assert_eq!(std::fs::read_to_string(&parent_lock).unwrap(), legacy_lock);
+    assert!(!child_lock.exists());
+
+    // Follow the hint: move the full table and preserve unrelated lock entries.
+    std::fs::write(&child_lock, &generated).unwrap();
+    assert_eq!(
+        read_lock(&child_lock)["skills"]["demo"],
+        read_lock(&parent_lock)["skills"]["demo"]
+    );
+    std::fs::write(&parent_lock, &parent_tools).unwrap();
+    let remove = osdk(root, &child, &["skills", "remove", "demo"]);
+    assert!(remove.status.success(), "{remove:?}");
+    assert!(!installed.exists());
+    assert!(read_lock(&child_lock).get("skills").is_none());
+    assert_eq!(std::fs::read_to_string(&parent_lock).unwrap(), parent_tools);
+}
+
+#[test]
 fn skills_list_and_remove_report_local_unlocked_skills_before_ancestor_entries() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let parent = local_project(root, "[skills]\n");
     std::fs::create_dir(parent.join(".git")).unwrap();
-    std::fs::write(
-        parent.join("fixture/demo/SKILL.md"),
-        format!("{DEMO_SKILL}\nParent content\n"),
-    )
-    .unwrap();
+    std::fs::write(parent.join("fixture/demo/notes.md"), "Parent content").unwrap();
     let add_args = [
         "--yes",
         "skills",

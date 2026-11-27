@@ -218,10 +218,24 @@ reference.
 
 ### Recovering skills installed by an older version in a subproject
 
-Older releases could record a subproject's skill in an ancestor's `osdk.lock`.
-When the subproject has neither a lock entry nor an installation for that name,
-`osdk skills list` and `osdk skills remove <name>` show candidate entries and
-their lock paths within the current Git repository. Check which project owns each
-candidate. If the subproject has an unlocked installation with the same name,
-both commands report its project Agent paths. `remove` requires a lock entry in
-the current project to remove the skill.
+Older releases could install a skill in a subproject and record it in an
+ancestor's `osdk.lock`. When the current project has no lock entry for that name,
+`osdk skills list` and `osdk skills remove <name>` look for entries in ancestor
+locks within the same Git repository. When the installed content matches an
+ancestor entry's content hash, both commands report the installation paths and
+how to migrate the entry. If the local directories are gone, they show candidates
+for you to check.
+
+1. From the subproject, run `osdk skills list` or `osdk skills remove <name>`.
+   Verify that the ancestor entry belongs to this subproject. You can also inspect
+   ancestor `osdk.lock` files manually, including in projects without Git.
+2. Copy the entire `[skills.<name>]` table into the `osdk.lock` beside the
+   subproject's `osdk.toml`. Keep every field, including the content hash, agents,
+   install mode, and any recorded commit. Start a new lock with `schema = 4`.
+3. Verify that both tables match, then delete the old table from the ancestor lock.
+   Keep the other entries in both locks. To uninstall the skill, run
+   `osdk skills remove <name>` again from the subproject.
+
+If the installation matches none of the ancestor entries, both commands report
+the unlocked paths. Once you confirm it is a standalone installation, you can
+remove it manually from those agent paths.

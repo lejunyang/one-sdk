@@ -20,6 +20,7 @@ use crate::dirs::{sanitize_tool_id, sanitize_version_component, Dirs};
 use crate::error::{Error, Result};
 use crate::store::dirlink;
 use crate::store::link::LinkMode;
+use crate::store::manifest::MANIFEST_FILE;
 use crate::store::Cas;
 
 use super::{content_hash, safe_relative_path, SkillFile};
@@ -94,6 +95,15 @@ impl SkillPackage {
 /// skipped (a skill is content, not a link farm) and paths that would escape the
 /// root are rejected via [`safe_relative_path`].
 pub fn read_skill_dir(root: &Path) -> Result<SkillPackage> {
+    read_skill_package(root, None)
+}
+
+/// Hash the installed skill's files, excluding the metadata added by staging.
+pub fn installed_content_hash(root: &Path) -> Result<String> {
+    Ok(read_skill_package(root, Some(MANIFEST_FILE))?.content_hash())
+}
+
+fn read_skill_package(root: &Path, excluded_file: Option<&str>) -> Result<SkillPackage> {
     let manifest_path = root.join(SKILL_MANIFEST);
     if !manifest_path.is_file() {
         return Err(Error::config(format!(
@@ -119,6 +129,9 @@ pub fn read_skill_dir(root: &Path) -> Result<SkillPackage> {
             .strip_prefix(root)
             .map_err(|_| Error::other("skill file escaped its root"))?;
         let rel_str = safe_relative_path(&rel.to_string_lossy())?;
+        if excluded_file == Some(rel_str.as_str()) {
+            continue;
+        }
         let bytes = std::fs::read(entry.path()).map_err(|e| Error::io(entry.path(), e))?;
         total += bytes.len() as u64;
         if total > MAX_SKILL_BYTES {

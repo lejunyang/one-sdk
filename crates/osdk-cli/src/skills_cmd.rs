@@ -127,7 +127,7 @@ fn list(app: &App, global: bool) -> Result<()> {
         }
     }
     let recovery = legacy_skill_recovery(app, global, None, &skills, &agent_dirs);
-    if skills.is_empty() && unlocked.is_empty() && recovery.is_none() {
+    if skills.is_empty() && unlocked.is_empty() && recovery.is_empty() {
         println!("No skills installed.");
     }
     for (name, entry) in &skills {
@@ -139,9 +139,11 @@ fn list(app: &App, global: bool) -> Result<()> {
         println!("{name}  <- {}  [{}]", entry.source, agents);
     }
     for (name, paths) in unlocked {
-        println!("{}", unlocked_skill_message(&name, &paths));
+        if !recovery.contains_key(&name) {
+            println!("{}", unlocked_skill_message(&name, &paths));
+        }
     }
-    if let Some(hint) = recovery {
+    for hint in recovery.into_values().flatten() {
         eprintln!("{hint}");
     }
     Ok(())
@@ -158,32 +160,52 @@ fn project_agent_dirs(app: &App, global: bool) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
-fn unlocked_skill_message(name: &str, paths: &[PathBuf]) -> String {
-    let locations = paths
+fn installed_skill_paths(agent_dirs: &[PathBuf], name: &str) -> Vec<PathBuf> {
+    agent_dirs
+        .iter()
+        .map(|dir| dir.join(name))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+fn skill_locations(paths: &[PathBuf]) -> String {
+    paths
         .iter()
         .map(|path| format!("`{}`", path.display()))
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(", ")
+}
+
+fn unlocked_skill_message(name: &str, paths: &[PathBuf]) -> String {
+    let locations = skill_locations(paths);
     format!("skill `{name}` is not recorded in the lock; found in project agent directories: {locations}")
 }
 
 /// Older releases could record a child's installation in an ancestor lock.
-/// Report candidate entries for names absent from the current project.
+/// Report candidates for names with no local install, or verify the installed bytes.
 fn legacy_skill_recovery(
     app: &App,
     global: bool,
     wanted: Option<&str>,
     recorded: &BTreeMap<String, LockedSkill>,
     agent_dirs: &[PathBuf],
-) -> Option<String> {
-    let project = app.ctx.config.project.as_ref()?;
-    if global || project.is_external() {
-        return None;
-    }
-    let repository = project
+) -> BTreeMap<String, Vec<String>> {
+    let Some(project) = app
+        .ctx
+        .config
+        .project
+        .as_ref()
+        .filter(|project| !global && !project.is_external())
+    else {
+        return BTreeMap::new();
+    };
+    let Some(repository) = project
         .root
         .ancestors()
-        .find(|directory| directory.join(".git").exists())?;
+        .find(|directory| directory.join(".git").exists())
+    else {
+        return BTreeMap::new();
+    };
     let ancestors = project
         .root
         .ancestors()
@@ -191,26 +213,42 @@ fn legacy_skill_recovery(
         .take_while(|directory| directory.starts_with(repository))
         .map(|directory| directory.join(lockfile::LOCKFILE_NAME))
         .filter(|path| path.is_file());
-    let mut hints = Vec::new();
+    let mut hints = BTreeMap::<String, Vec<String>>::new();
     for ancestor in ancestors {
         // A closer lock may have been created later or may be unreadable.
         let Ok(lock) = lockfile::load(&ancestor) else {
             continue;
         };
-        let candidates = lock.skills.keys().filter(|name| {
-            wanted.is_none_or(|wanted| wanted == *name)
-                && !recorded.contains_key(*name)
+        let candidates = lock.skills.into_iter().filter(|(name, _)| {
+            wanted.is_none_or(|wanted| wanted == name)
+                && !recorded.contains_key(name)
+                && !matches!(name.as_str(), "." | "..")
                 && skills::validate_skill_name(name).is_ok()
-                && !agent_dirs.iter().any(|dir| dir.join(name).is_dir())
         });
-        for name in candidates {
-            hints.push(format!(
-                "Found [skills.{name:?}] in ancestor lock `{}`. Verify which project owns this entry.",
-                ancestor.display()
-            ));
+        for (name, entry) in candidates {
+            let paths = installed_skill_paths(agent_dirs, &name);
+            let hint = if paths.is_empty() {
+                format!(
+                    "Found [skills.{name:?}] in ancestor lock `{}`. Verify which project owns this entry.",
+                    ancestor.display()
+                )
+            } else if paths.iter().all(|path| {
+                install::installed_content_hash(path).is_ok_and(|hash| hash == entry.content_hash)
+            }) {
+                format!(
+                    "Skill `{name}` in project agent directories {} matches [skills.{name:?}] in ancestor lock `{}`. \
+                     Verify which project owns this entry, then move the complete skill table to `{}` and run `osdk skills remove {name}` to remove it.",
+                    skill_locations(&paths),
+                    ancestor.display(),
+                    project.lock_path.display()
+                )
+            } else {
+                continue;
+            };
+            hints.entry(name).or_default().push(hint);
         }
     }
-    (!hints.is_empty()).then(|| hints.join("\n"))
+    hints
 }
 
 /// Print the staged store path of an installed skill.
@@ -474,18 +512,14 @@ fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Re
     };
     let Some(entry) = lock.skills.get(name).cloned() else {
         let agent_dirs = project_agent_dirs(app, global)?;
-        let installed_paths: Vec<_> = agent_dirs
-            .iter()
-            .map(|dir| dir.join(name))
-            .filter(|path| path.is_dir())
-            .collect();
+        let mut recovery =
+            legacy_skill_recovery(app, global, Some(name), &lock.skills, &agent_dirs);
+        if let Some(hints) = recovery.remove(name) {
+            anyhow::bail!("{}", hints.join("\n"));
+        }
+        let installed_paths = installed_skill_paths(&agent_dirs, name);
         if !installed_paths.is_empty() {
             anyhow::bail!("{}", unlocked_skill_message(name, &installed_paths));
-        }
-        if let Some(hint) =
-            legacy_skill_recovery(app, global, Some(name), &lock.skills, &agent_dirs)
-        {
-            anyhow::bail!("{hint}");
         }
         if has_lock {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
