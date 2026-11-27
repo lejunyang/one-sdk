@@ -80,6 +80,7 @@ impl CargoWorkspace {
             .env("HOME", root.join("state/home"))
             .env("USERPROFILE", root.join("state/home"))
             .env("CARGO_HOME", root.join("state/cargo"))
+            .env_remove("CARGO_RESOLVER_LOCKFILE_PATH")
             .env("RUSTUP_HOME", root.join("state/rustup"))
             .env("RUSTC", matching_rustc(&self.cargo))
             .env("CARGO_TARGET_DIR", root.join("state/target"))
