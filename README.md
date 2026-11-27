@@ -885,6 +885,8 @@ Declare team skills under `[skills.<name>]` in `osdk.toml`. Run `osdk skills syn
 to install applicable declarations and record their resolutions alongside existing
 entries in `osdk.lock`. Use `skills update` to refresh a locked GitHub ref or apply
 changes to the Agent list. Both commands honor the declaration's `when` filter.
+`sync` asks before replacing an existing unlocked skill directory. In non-interactive
+sessions, pass `--yes` to replace it or move it aside first.
 Pin a GitHub skill with `ref = "rev:<commit>"` to keep it
 at that commit across updates. To change the pin, edit `ref` and run `skills update`
 with network access.

@@ -185,8 +185,9 @@ For an external project config, they are relative to the actual project root.
 `ref` applies to GitHub sources. An empty `agents` list falls back to
 `[skills].default_agents` and then to agent detection. In CI, set agents in the
 config or pass `--yes` to accept detection. `sync` prints a summary for first-time
-installs and asks for confirmation before replacing an unlocked skill with
-different contents. Pass `--yes` to confirm in a non-interactive session. It copies
+installs and asks before replacing any existing unlocked skill directory, even when
+the file contents match. In a non-interactive session, pass `--yes` to replace it
+or move the existing directory aside first. It copies
 to a single destination and uses automatic linking
 for multiple destinations unless `[skills].link_mode` is set. Custom `endpoint`
 support is pending. Setting it on a declaration with no lock entry produces an error.

@@ -8,7 +8,6 @@ use osdk_core::config::SkillDeclaration;
 use osdk_core::skills;
 use osdk_core::skills::{agent_target, install, AgentTarget, SkillSource, AGENT_TARGETS};
 use osdk_core::store::link::LinkMode;
-use osdk_core::store::manifest::{Manifest, MANIFEST_FILE};
 
 use crate::app::App;
 use crate::cli::SkillsCommand;
@@ -375,13 +374,11 @@ impl SkillInstallation {
         }
     }
 
-    fn replaces_existing_contents(&self) -> bool {
+    fn replaces_existing_skill(&self) -> bool {
         self.skills.iter().any(|skill| {
-            self.target_dirs.keys().any(|agent_dir| {
-                let destination = agent_dir.join(&skill.name);
-                destination.symlink_metadata().is_ok()
-                    && !destination_matches_package(&destination, &skill.package)
-            })
+            self.target_dirs
+                .keys()
+                .any(|agent_dir| agent_dir.join(&skill.name).symlink_metadata().is_ok())
         })
     }
 
@@ -421,43 +418,6 @@ impl SkillInstallation {
         }
         Ok(entries)
     }
-}
-
-fn destination_matches_package(destination: &Path, package: &install::SkillPackage) -> bool {
-    let mut files: BTreeMap<_, _> = package
-        .files
-        .iter()
-        .map(|file| (Path::new(&file.path), file.bytes.as_slice()))
-        .collect();
-    for entry in walkdir::WalkDir::new(destination).min_depth(1) {
-        let Ok(entry) = entry else { return false };
-        let relative = entry.path().strip_prefix(destination).expect("walk root");
-        if entry.file_type().is_dir() && files.keys().any(|path| path.starts_with(relative)) {
-            continue;
-        }
-        if relative == Path::new(MANIFEST_FILE)
-            && !files.contains_key(relative)
-            && entry.file_type().is_file()
-            && Manifest::load(destination)
-                .is_ok_and(|manifest| manifest.version == package.content_hash())
-        {
-            continue;
-        }
-        // Treat untracked entries, including links and empty directories, as
-        // differences: replacing the directory would discard them.
-        let Some(expected) = files.remove(relative) else {
-            return false;
-        };
-        if !entry.file_type().is_file()
-            || !entry
-                .metadata()
-                .is_ok_and(|meta| meta.len() == expected.len() as u64)
-            || !std::fs::read(entry.path()).is_ok_and(|actual| actual == expected)
-        {
-            return false;
-        }
-    }
-    files.is_empty()
 }
 
 fn target_ids<'a>(targets: &'a [&AgentTarget]) -> impl Iterator<Item = &'static str> + 'a {
@@ -777,8 +737,11 @@ async fn sync(app: &App, global: bool) -> Result<()> {
     }
     if installations
         .iter()
-        .any(SkillInstallation::replaces_existing_contents)
-        && !app.prompt.confirm("Replace existing skill files?")?
+        .any(SkillInstallation::replaces_existing_skill)
+        && !app
+            .prompt
+            .confirm("Replace existing unlocked skill files?")
+            .context("move the existing skill directories aside before syncing to keep them")?
     {
         println!("Installation cancelled.");
         return Ok(());

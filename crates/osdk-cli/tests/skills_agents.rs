@@ -287,8 +287,11 @@ fn skills_sync_confirms_before_replacing_unlocked_contents() {
     std::fs::write(&notes, "Keep my notes").unwrap();
 
     let sync = osdk(root, &project, &["--lang", "en", "skills", "sync"]);
-    assert!(!sync.status.success(), "{sync:?}");
-    assert!(String::from_utf8_lossy(&sync.stderr).contains("confirmation required"));
+    assert_eq!(sync.status.code(), Some(1), "{sync:?}");
+    let stderr = String::from_utf8_lossy(&sync.stderr);
+    for expected in ["confirmation required", "--yes", "move"] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), old_manifest);
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "Keep my notes");
     let lock = project.join("osdk.lock");
@@ -308,16 +311,22 @@ fn skills_sync_confirms_before_replacing_unlocked_contents() {
 
     std::fs::remove_file(&notes).unwrap();
     let identical = osdk(root, &project, &["skills", "sync"]);
-    assert!(identical.status.success(), "{identical:?}");
-    assert_demo_installed(&project, &read_lock(&lock));
+    assert_eq!(identical.status.code(), Some(1), "{identical:?}");
+    assert_eq!(std::fs::read(&manifest).unwrap(), DEMO_SKILL.as_bytes());
+    assert!(!lock.exists());
 }
 
+#[cfg(unix)]
 #[test]
-fn skills_sync_adopts_an_identical_unlocked_skill_added_by_absolute_path() {
+fn skills_sync_preserves_unlocked_executable_scripts_without_confirmation() {
+    use std::os::unix::fs::PermissionsExt;
+
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let project = local_project(root, DEMO_DECLARATION);
-    let absolute = project.join("fixture/demo");
+    let source = project.join("fixture/demo/run.sh");
+    std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
     let add = osdk(
         root,
         &project,
@@ -325,21 +334,42 @@ fn skills_sync_adopts_an_identical_unlocked_skill_added_by_absolute_path() {
             "--yes",
             "skills",
             "add",
-            absolute.to_str().unwrap(),
+            "./fixture/demo",
             "-a",
             "codex",
+            "--copy",
             "--no-lock",
         ],
     );
     assert!(add.status.success(), "{add:?}");
     let lock = project.join("osdk.lock");
     assert!(!lock.exists());
-    let manifest =
-        osdk_core::store::manifest::Manifest::load(&project.join(".agents/skills/demo")).unwrap();
-    assert_ne!(manifest.tool, "local:./fixture/demo");
+    let installed = project.join(".agents/skills/demo");
+    let script = installed.join("run.sh");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        std::fs::read(&script).unwrap(),
+        std::fs::read(&source).unwrap()
+    );
 
     let sync = osdk(root, &project, &["skills", "sync"]);
-    assert!(sync.status.success(), "{sync:?}");
+    assert_eq!(sync.status.code(), Some(1), "{sync:?}");
+    assert_eq!(
+        std::fs::read(&script).unwrap(),
+        std::fs::read(&source).unwrap()
+    );
+    assert_eq!(
+        script.metadata().unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        std::fs::read(installed.join("SKILL.md")).unwrap(),
+        DEMO_SKILL.as_bytes()
+    );
+    assert!(!lock.exists());
+
+    let confirmed = osdk(root, &project, &["--yes", "skills", "sync"]);
+    assert!(confirmed.status.success(), "{confirmed:?}");
     assert_demo_installed(&project, &read_lock(&lock));
 }
 
