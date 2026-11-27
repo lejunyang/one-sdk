@@ -550,8 +550,9 @@ osdk deps --frozen
 
 In a Cargo workspace, `osdk deps //crates/demo:cargo --frozen --no-install-tools`
 uses the workspace lock selected by Cargo, usually the root `Cargo.lock`, even
-if the member directory still has its own lockfile. Install or link the project's
-Rust toolchain before selecting a member.
+if the member directory still has its own lockfile. Install or link Rust first
+when using `--no-install-tools`. For a standalone crate with a committed
+`Cargo.lock`, `osdk deps --frozen` can prepare Rust on the first run.
 
 Build and lifecycle scripts are off by default. Turn them on per provider, which
 requires approving the config:

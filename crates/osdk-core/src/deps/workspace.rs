@@ -21,9 +21,15 @@ pub struct NativeLockOwner {
     pub inputs: Vec<PathBuf>,
     /// Cargo can validate a locked fetch even when metadata cannot prove freshness.
     pub inputs_complete: bool,
-    /// Cargo confirmed membership, but the effective lock path is unresolved.
-    pub defer_to_cargo: bool,
+    pub status: NativeLockStatus,
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NativeLockStatus {
+    Checked,
+    CargoUnavailable,
+    CargoLockPathUnknown,
 }
 
 pub struct NativeLockQuery {
@@ -69,7 +75,7 @@ pub fn native_lock_owner(
         lock: project.native_lock.clone(),
         inputs: Vec::new(),
         inputs_complete: true,
-        defer_to_cargo: false,
+        status: NativeLockStatus::Checked,
         reason: None,
     };
     if project.provider != "cargo" {
@@ -86,11 +92,20 @@ pub fn native_lock_owner(
             let stderr = String::from_utf8_lossy(&query.output.stderr);
             let first_line = stderr.lines().find(|line| !line.trim().is_empty());
             Err(match first_line {
-                Some(line) => format!("Cargo could not determine workspace membership: {}", crate::package_sources::display_value(line.trim())),
-                None => format!("Cargo could not determine workspace membership ({})", query.output.status),
+                Some(line) => format!(
+                    "Cargo could not determine workspace membership: {}",
+                    crate::package_sources::display_value(line.trim())
+                ),
+                None => format!(
+                    "Cargo could not determine workspace membership ({})",
+                    query.output.status
+                ),
             })
         }
-        Ok(None) => Err("cannot determine Cargo workspace membership without an installed or linked Cargo; run `osdk install rust`".into()),
+        Ok(None) => {
+            owner.status = NativeLockStatus::CargoUnavailable;
+            Err("cannot determine Cargo workspace membership without an installed or linked Cargo; run `osdk install rust`".into())
+        }
         Err(error) => Err(format!("cannot query Cargo workspace membership: {error}")),
     };
     let result = query.and_then(|query| {
@@ -136,7 +151,7 @@ impl NativeLockOwner {
         let (config, configured) = match cargo_lock_configuration(cwd, &query, probe) {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.defer_to_cargo = true;
+                self.status = NativeLockStatus::CargoLockPathUnknown;
                 self.reason = Some(format!(
                     "cannot establish the effective Cargo lockfile: {error}"
                 ));

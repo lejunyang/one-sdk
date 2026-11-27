@@ -102,15 +102,21 @@ impl CargoWorkspace {
         self.command(&self.cargo).args(args).output().unwrap()
     }
 
-    fn run(&self, provider: &str, extra: &[&str]) -> Output {
+    fn osdk(&self) -> Command {
         let root = self.temp.path();
-        self.command(Path::new(env!("CARGO_BIN_EXE_osdk")))
+        let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_osdk")));
+        command
             .env("OSDK_OFFLINE", "true")
             .env("OSDK_CONFIG_DIR", root.join("state/config"))
             .env("OSDK_DATA_DIR", root.join("state/data"))
             .env("OSDK_CACHE_DIR", root.join("state/cache"))
             .env("OSDK_INSTALL_DIR", root.join("state/installs"))
-            .env("OSDK_STORE_DIR", root.join("state/store"))
+            .env("OSDK_STORE_DIR", root.join("state/store"));
+        command
+    }
+
+    fn run(&self, provider: &str, extra: &[&str]) -> Output {
+        self.osdk()
             .args(["deps", provider, "--frozen", "--no-install-tools"])
             .args(extra)
             .output()
@@ -149,6 +155,91 @@ fn cargo_metadata_unavailable_explains_why_a_member_cannot_freeze() {
     );
     assert!(error.contains("osdk install rust"), "{error}");
     fixture.assert_locks(None);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_frozen_prepares_rust_before_accepting_a_local_lock() {
+    let cargo = native_test_cargo();
+    for workspace_member in [false, true] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        let root = fixture.temp.path();
+        let config = root.join("osdk.toml");
+        let mut config_text = std::fs::read_to_string(&config).unwrap();
+        let provider = if workspace_member {
+            let lock = fixture.generate_lock();
+            std::fs::write(root.join("crates/demo/Cargo.lock"), lock).unwrap();
+            std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+            "//crates/demo:cargo"
+        } else {
+            write(
+                root,
+                "Cargo.toml",
+                "[package]\nname = 'standalone'\nversion = '0.1.0'\nedition = '2024'\n",
+            );
+            write(root, "src/lib.rs", "");
+            fixture.generate_lock();
+            config_text = config_text.replace("[deps]\nroots = ['crates/demo']\n", "");
+            "cargo"
+        };
+        // Cached native binaries, without the marker used by osdk to select Rust.
+        // Preseed the rustup bootstrap as well so tool preparation stays offline.
+        write(
+            root,
+            &format!(
+                "state/data/cargo/bin/rustup{}",
+                std::env::consts::EXE_SUFFIX
+            ),
+            "",
+        );
+        let bin = root.join("state/data/rustup/toolchains/trial-rust/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for binary in [&cargo, &matching_rustc(&cargo)] {
+            std::fs::copy(binary, bin.join(binary.file_name().unwrap())).unwrap();
+        }
+        std::fs::write(config, config_text).unwrap();
+        let marker = root.join("state/installs/rust/trial-rust/.osdk-complete");
+        let local_lock = root.join(if workspace_member {
+            "crates/demo/Cargo.lock"
+        } else {
+            "Cargo.lock"
+        });
+        let bytes = std::fs::read(&local_lock).unwrap();
+
+        let preview = fixture.run(provider, &["--dry-run"]);
+        assert!(preview.status.success(), "{preview:?}");
+        assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+        assert!(!marker.exists());
+
+        let forbidden = fixture.run(provider, &[]);
+        assert!(!forbidden.status.success(), "{forbidden:?}");
+        assert!(String::from_utf8_lossy(&forbidden.stderr).contains("--no-install-tools"));
+        assert!(!marker.exists());
+
+        let actual = fixture
+            .osdk()
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root.join("osdk.toml"))
+            .args(["deps", provider, "--frozen"])
+            .output()
+            .unwrap();
+        assert!(marker.is_file(), "{actual:?}");
+        if workspace_member {
+            assert!(!actual.status.success(), "{actual:?}");
+            assert!(
+                String::from_utf8_lossy(&actual.stderr)
+                    .contains("no Cargo.lock in Cargo workspace root"),
+                "{actual:?}"
+            );
+            assert!(!root.join("Cargo.lock").exists());
+        } else {
+            assert!(actual.status.success(), "{actual:?}");
+            assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+        }
+        assert_eq!(std::fs::read(local_lock).unwrap(), bytes);
+    }
 }
 
 #[test]

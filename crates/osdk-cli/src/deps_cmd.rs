@@ -12,7 +12,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use osdk_core::deps::workspace::{NativeLockOwner, NativeLockQuery, CARGO_LOCKFILE_ENV};
+use osdk_core::deps::workspace::{
+    NativeLockOwner, NativeLockQuery, NativeLockStatus, CARGO_LOCKFILE_ENV,
+};
 use osdk_core::deps::{
     self, state, DepsProviderSchema, DetectedProject, InstallerChoice, ProviderConfig, RunPlan,
     ToolRole,
@@ -262,74 +264,17 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         if let Some(version) = config.project_tools.get(&*project.provider) {
             choice.version = Some(version.clone());
         }
-        let native_lock = if let Some(schema) = schema.filter(|_| config.run.is_none()) {
-            let owner = deps::workspace::native_lock_owner(
-                &project,
-                &deps::effective_cwd(&project.root, config.dir.as_deref()),
-                &CargoLockProbe {
-                    app,
-                    schema,
-                    choice: &choice,
-                    config: &config,
-                    explain: options.explain,
-                },
-            )?;
-            if options.explain {
-                if !owner.inputs.is_empty() {
-                    println!("    Cargo workspace root: {}", owner.root.display());
-                    if let Some(lock) = &owner.lock {
-                        println!("    native lock: {}", lock.display());
-                    }
-                }
-                if let Some(reason) = &owner.reason {
-                    println!("    native lock: {reason}");
-                }
-            }
-            project.native_lock.clone_from(&owner.lock);
-            Some(owner)
-        } else {
-            None
-        };
-        let mut plan = deps::plan(
-            &project,
+        let (mut plan, native_lock) = plan_project(
+            app,
+            &mut project,
             &choice,
             &config,
-            &resolved_tool_versions(app, &config),
+            unit.as_ref(),
+            &options,
+            None,
         )?;
-        if let Some(owner) = &native_lock {
-            if options.frozen && owner.defer_to_cargo {
-                plan.args.push("--locked".into());
-                plan.frozen = true;
-                plan.downgraded_reason = None;
-            } else if let Some(reason) = &owner.reason {
-                plan.downgraded_reason =
-                    Some(format!("{reason}; running `cargo fetch` without --locked"));
-            }
-        }
-        if unit.as_ref().is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
-            plan.args.push("--all-packages".into());
-        }
-        if config.offline {
-            if config.run.is_some() {
-                return Err(anyhow!(
-                    "offline mode cannot be guaranteed for a custom deps command"
-                ));
-            }
-            match &*project.provider {
-                "npm" | "pnpm" | "uv" | "pip-requirements" | "cargo" => {
-                    plan.args.push("--offline".into())
-                }
-                other => return Err(anyhow!("offline deps is not supported for `{other}`")),
-            }
-        }
-        if options.frozen && !plan.frozen {
-            return Err(anyhow!(
-                "`--frozen` requires a native lockfile and native frozen guarantees for `{}`: {}",
-                entry.id(),
-                plan.downgraded_reason
-                    .as_deref()
-                    .unwrap_or("no native lockfile")
-            ));
+        if options.frozen {
+            require_frozen(&plan, &entry.id())?;
         }
         // A custom `run` goes through the same adapter as a built-in plan: it
         // decides from the program and this command's own arguments, so a
@@ -538,6 +483,29 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             continue;
         }
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
+        if item.plan.frozen
+            && item
+                .native_lock
+                .as_ref()
+                .is_some_and(|owner| owner.status == NativeLockStatus::CargoUnavailable)
+        {
+            (item.plan, item.native_lock) = plan_project(
+                app,
+                &mut item.project,
+                &item.choice,
+                &item.config,
+                item.unit.as_ref(),
+                &options,
+                Some(&tools),
+            )?;
+            if options.frozen {
+                require_frozen(&item.plan, &item.label())?;
+            }
+            if let Some(reason) = &item.plan.downgraded_reason {
+                println!("warning: {reason}");
+            }
+            item.declared_env = item.plan.env.clone();
+        }
         // Same adapter for custom `run` lines as for built-in plans; see planning.
         // Planning was offline, so this decision may probe; it starts from the
         // declared environment (see `Resolved::declared_env`).
@@ -562,6 +530,100 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         // Record the material freshness was decided on.
         item.plan.env = planned_env;
         record(app, item, &tools)?;
+    }
+    Ok(())
+}
+
+fn plan_project(
+    app: &App,
+    project: &mut DetectedProject,
+    choice: &InstallerChoice,
+    config: &ProviderConfig,
+    unit: Option<&deps::workspace::WorkspaceUnit>,
+    options: &DepsOptions,
+    prepared_tools: Option<&[ReadyTool]>,
+) -> anyhow::Result<(RunPlan, Option<NativeLockOwner>)> {
+    let native_lock = if project.provider == "cargo" && config.run.is_none() {
+        let cwd = deps::effective_cwd(&project.root, config.dir.as_deref());
+        let owner = deps::workspace::native_lock_owner(
+            project,
+            &cwd,
+            &CargoLockProbe {
+                app,
+                project_root: &project.root,
+                choice,
+                config,
+                prepared_tools,
+                explain: options.explain,
+            },
+        )?;
+        if options.explain {
+            if !owner.inputs.is_empty() {
+                println!("    Cargo workspace root: {}", owner.root.display());
+                if let Some(lock) = &owner.lock {
+                    println!("    native lock: {}", lock.display());
+                }
+            }
+            if let Some(reason) = &owner.reason {
+                println!("    native lock: {reason}");
+            }
+        }
+        // A discovered lock is enough to preview a locked fetch and to
+        // prepare Rust. The prepared Cargo must confirm ownership before
+        // we can reuse freshness or actually fetch.
+        if owner.status != NativeLockStatus::CargoUnavailable
+            || prepared_tools.is_some()
+            || cwd != project.root
+        {
+            project.native_lock.clone_from(&owner.lock);
+        }
+        Some(owner)
+    } else {
+        None
+    };
+    let mut plan = deps::plan(
+        project,
+        choice,
+        config,
+        &resolved_tool_versions(app, config),
+    )?;
+    if let Some(owner) = &native_lock {
+        if options.frozen && owner.status == NativeLockStatus::CargoLockPathUnknown {
+            plan.args.push("--locked".into());
+            plan.frozen = true;
+            plan.downgraded_reason = None;
+        } else if let Some(reason) = owner.reason.as_ref().filter(|_| !plan.frozen) {
+            plan.downgraded_reason =
+                Some(format!("{reason}; running `cargo fetch` without --locked"));
+        }
+    }
+    if unit.is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
+        plan.args.push("--all-packages".into());
+    }
+    if config.offline {
+        if config.run.is_some() {
+            return Err(anyhow!(
+                "offline mode cannot be guaranteed for a custom deps command"
+            ));
+        }
+        match &*project.provider {
+            "npm" | "pnpm" | "uv" | "pip-requirements" | "cargo" => {
+                plan.args.push("--offline".into())
+            }
+            other => return Err(anyhow!("offline deps is not supported for `{other}`")),
+        }
+    }
+    Ok((plan, native_lock))
+}
+
+fn require_frozen(plan: &RunPlan, label: &str) -> anyhow::Result<()> {
+    if !plan.frozen {
+        return Err(anyhow!(
+            "`--frozen` requires a native lockfile and native frozen guarantees for `{label}`: {}",
+            plan.downgraded_reason
+                .as_deref()
+                .unwrap_or("no native lockfile")
+        ));
     }
     Ok(())
 }
@@ -1019,9 +1081,10 @@ fn ready_managed_tool(
 /// can also run during preview, before execution is authorized.
 struct CargoLockProbe<'a> {
     app: &'a App,
-    schema: &'static DepsProviderSchema,
+    project_root: &'a Path,
     choice: &'a InstallerChoice,
     config: &'a ProviderConfig,
+    prepared_tools: Option<&'a [ReadyTool]>,
     explain: bool,
 }
 
@@ -1040,22 +1103,39 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             } else {
                 self.app
             };
-            let required = &self.schema.required_tools[0];
-            let ToolSelection::Managed {
-                backend,
-                installed: Some(version),
-                ..
-            } = select_tool(app, required, self.choice, self.config, cwd, true)?
-            else {
-                return Ok(None);
+            let installed;
+            let tools = if let Some(tools) = self.prepared_tools {
+                tools
+            } else {
+                let required = &deps::provider_schema("cargo").unwrap().required_tools[0];
+                let ToolSelection::Managed {
+                    backend,
+                    installed: Some(version),
+                    ..
+                } = select_tool(
+                    app,
+                    required,
+                    self.choice,
+                    self.config,
+                    self.project_root,
+                    true,
+                )?
+                else {
+                    return Ok(None);
+                };
+                installed = [ready_managed_tool(
+                    app,
+                    backend.as_ref(),
+                    required,
+                    &version,
+                )?];
+                &installed
             };
-            let mut tool = ready_managed_tool(app, backend.as_ref(), required, &version)?;
-            // Cargo must come directly from the toolchain. A rustup proxy in
-            // Cargo's shared bin directory can acquire a toolchain before it
-            // even sees the offline metadata arguments.
-            tool.bin_dirs.truncate(1);
-            let tools = [tool];
-            let Some(program) = find_tool_program(required.id, program_candidates, &tools) else {
+            // Use Cargo from the toolchain bin, without falling through to a
+            // rustup proxy that could install a toolchain during preview.
+            let Some(program) =
+                find_program(program_candidates, tools[0].bin_dirs.first().into_iter())
+            else {
                 return Ok(None);
             };
             if self.explain && args[0] == "metadata" {
@@ -1072,9 +1152,9 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             // Take configuration paths from the same tool/provider overlay
             // as fetch. Keep other provider overrides, including executable
             // hooks, out of the read-only query.
-            let mut probe_env = child_env(&BTreeMap::new(), &tools);
+            let mut probe_env = child_env(&BTreeMap::new(), tools);
             probe_env.extend(
-                child_env(&self.config.env, &tools)
+                child_env(&self.config.env, tools)
                     .into_iter()
                     .filter(|(key, _)| {
                         ["CARGO_HOME", CARGO_LOCKFILE_ENV, home_key]
@@ -1086,7 +1166,7 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             command
                 .args(args)
                 .current_dir(cwd)
-                .env("PATH", tool_path(app, &tools)?)
+                .env("PATH", tool_path(app, tools)?)
                 .envs(probe_env);
             let env_path = |name| {
                 command
@@ -1302,19 +1382,29 @@ fn find_tool_program(
             }
             continue;
         }
-        for candidate in candidates {
-            if !cfg!(windows)
-                && [".exe", ".cmd", ".bat"]
-                    .iter()
-                    .any(|suffix| candidate.ends_with(suffix))
-            {
-                continue;
-            }
-            for dir in &tool.bin_dirs {
-                let path = dir.join(candidate);
-                if path.is_file() {
-                    return Some(path);
-                }
+        if let Some(program) = find_program(candidates, tool.bin_dirs.iter()) {
+            return Some(program);
+        }
+    }
+    None
+}
+
+fn find_program<'a>(
+    candidates: &[String],
+    dirs: impl Iterator<Item = &'a PathBuf> + Clone,
+) -> Option<PathBuf> {
+    for candidate in candidates {
+        if !cfg!(windows)
+            && [".exe", ".cmd", ".bat"]
+                .iter()
+                .any(|suffix| candidate.ends_with(suffix))
+        {
+            continue;
+        }
+        for dir in dirs.clone() {
+            let path = dir.join(candidate);
+            if path.is_file() {
+                return Some(path);
             }
         }
     }

@@ -105,6 +105,9 @@ osdk 用已安装或已链接的 Cargo 确认成员归属，在成员目录运�
 锁过期时，Cargo 会拒绝拉取并保留原锁。存在工作区外的路径依赖时，osdk 会运行
 `cargo fetch --locked` 交给 Cargo 校验。用 `--list --all --explain` 可查看根和锁。
 
+尚未安装 Rust 时，有本地 `Cargo.lock` 仍可预览冻结拉取。实际调用若允许安装工具，
+osdk 会先准备 Rust，再用该工具链的 Cargo 确定生效的锁。
+
 ::: tip go 的工具链被钉住
 `GOTOOLCHAIN` 默认是 `auto`——`go.mod` 要求更新的 Go 时，go 会**自己下载**另一个
 工具链（实测会打印 `go: downloading go1.99.0`）。那样跑起来的就不是 osdk 选定并校验过

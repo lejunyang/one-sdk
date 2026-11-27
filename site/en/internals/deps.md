@@ -636,9 +636,11 @@ manifest is used only if Cargo identifies that directory as the workspace root.
 The plan keeps the member's
 working directory and `osdk.lock` ownership. The workspace root does not need a
 separate osdk deps declaration. If the native query fails, the frozen diagnostic
-reports the failure. If Cargo is unavailable, install or link it before
-planning the frozen member. A non-frozen invocation can still install the tools
-and fall back to an unlocked fetch.
+reports the failure. If Cargo is unavailable, a local lock gives a provisional
+locked plan. Actual execution prepares Rust under the install lock and recomputes
+the plan with the prepared Cargo before fetching. A provisional plan cannot use
+cached freshness. Without Cargo or a local lock, a member's frozen plan requires
+installing or linking Rust first.
 
 osdk resolves the lock path using Cargo's configuration precedence, including
 ancestor and included files and `CARGO_HOME`. Cargo 1.97 and later support

@@ -116,6 +116,10 @@ leaves it unchanged. For path dependencies outside the workspace, osdk runs
 `cargo fetch --locked` so Cargo can validate them. Use `--list --all --explain` to
 see the workspace root and effective lock.
 
+If Rust is missing, a local `Cargo.lock` is enough to preview a locked fetch.
+An actual run without `--no-install-tools` can prepare Rust first, then use that
+Cargo to check which lock applies before fetching.
+
 ::: tip go's toolchain is pinned
 `GOTOOLCHAIN` defaults to `auto`: when `go.mod` asks for a newer Go, go **downloads
 another toolchain itself** (measured: it prints `go: downloading go1.99.0`). The
