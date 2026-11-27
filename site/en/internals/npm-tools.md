@@ -433,10 +433,10 @@ to their original targets once published at the original location.
 
 Node-to-Node migration (`--to`) also pins prefixes explicitly, independent of
 activation variables and builtin defaults. Before installing, it backs up global
-`node_modules` and launchers on the target volume, preserving link text and the
-original junction or symlink type on Windows. On install failure it finds newly
-added planned packages by their directory entries and
-tries an offline npm uninstall. It then removes filesystem entries absent from
+`node_modules`, launchers, and the Unix `share/man` tree on the target volume.
+The backup preserves link text and the original junction or symlink type on
+Windows. On install failure it finds newly added planned packages by their
+directory entries and tries an offline npm uninstall. It then removes filesystem entries absent from
 the backup, including leftovers with incomplete manifests. It restores original
 files and links only where they changed, and the command reports the original
 install error. Failed rollback keeps the backup and reports its path.

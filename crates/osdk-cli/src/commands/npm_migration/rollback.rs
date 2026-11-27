@@ -29,14 +29,12 @@ impl Snapshot {
 
         let modules = modules(&tools.prefix);
         check_modules_parent(tools, &modules)?;
-        if let Some(metadata) = inspect(&modules)? {
-            if !real_directory(&metadata) {
-                return Err(anyhow!(
-                    "npm package directory is not a real directory: {}",
-                    modules.display()
-                ));
-            }
-            snapshot.copy_entry(&modules, &snapshot.backup.path().join("node_modules"))?;
+        snapshot.capture_tree(&modules, "node_modules")?;
+        #[cfg(unix)]
+        {
+            let man = tools.prefix.join("share/man");
+            check_directory_if_present(man.parent().unwrap())?;
+            snapshot.capture_tree(&man, "man")?;
         }
         check_bin(tools)?;
         let backup_bin = snapshot.backup.path().join("bin");
@@ -48,6 +46,19 @@ impl Snapshot {
             }
         }
         Ok(snapshot)
+    }
+
+    fn capture_tree(&mut self, path: &Path, backup_name: &str) -> Result<()> {
+        if let Some(metadata) = inspect(path)? {
+            if !real_directory(&metadata) {
+                return Err(anyhow!(
+                    "npm path is not a real directory: {}",
+                    path.display()
+                ));
+            }
+            self.copy_entry(path, &self.backup.path().join(backup_name))?;
+        }
+        Ok(())
     }
 
     fn copy_entry(&mut self, from: &Path, to: &Path) -> Result<()> {
@@ -100,11 +111,12 @@ impl Snapshot {
             }
         }
         check_modules_parent(tools, &modules)?;
-        if old_modules.exists() {
-            fs::create_dir_all(modules.parent().unwrap())?;
-            self.restore_entry(&old_modules, &modules)?;
-        } else if let Some(metadata) = inspect(&modules)? {
-            remove_entry(&modules, &metadata)?;
+        self.restore_tree(&old_modules, &modules)?;
+        #[cfg(unix)]
+        {
+            let man = tools.prefix.join("share/man");
+            check_directory_if_present(man.parent().unwrap())?;
+            self.restore_tree(&self.backup.path().join("man"), &man)?;
         }
 
         check_bin(tools)?;
@@ -121,6 +133,16 @@ impl Snapshot {
         for entry in fs::read_dir(old_bin)? {
             let entry = entry?;
             self.restore_entry(&entry.path(), &tools.bin.join(entry.file_name()))?;
+        }
+        Ok(())
+    }
+
+    fn restore_tree(&self, backup: &Path, path: &Path) -> Result<()> {
+        if backup.exists() {
+            fs::create_dir_all(path.parent().unwrap())?;
+            self.restore_entry(backup, path)?;
+        } else if let Some(metadata) = inspect(path)? {
+            remove_entry(path, &metadata)?;
         }
         Ok(())
     }
@@ -187,13 +209,16 @@ fn real_directory(metadata: &Metadata) -> bool {
 }
 
 fn check_modules_parent(tools: &ManagedNodeTools, modules: &Path) -> Result<()> {
-    for parent in [tools.prefix.as_path(), modules.parent().unwrap()] {
-        if inspect(parent)?.is_some_and(|metadata| !real_directory(&metadata)) {
-            return Err(anyhow!(
-                "npm package parent is not a real directory: {}",
-                parent.display()
-            ));
-        }
+    check_directory_if_present(&tools.prefix)?;
+    check_directory_if_present(modules.parent().unwrap())
+}
+
+fn check_directory_if_present(path: &Path) -> Result<()> {
+    if inspect(path)?.is_some_and(|metadata| !real_directory(&metadata)) {
+        return Err(anyhow!(
+            "npm path parent is not a real directory: {}",
+            path.display()
+        ));
     }
     Ok(())
 }

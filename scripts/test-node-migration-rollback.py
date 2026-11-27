@@ -2,6 +2,7 @@
 """Exercise real npm rollback on Linux with two pinned, managed Node releases."""
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import http.server
 import json
@@ -36,6 +37,16 @@ def isolated_env(root):
         directory.mkdir(parents=True)
         env[key] = str(directory)
     return env
+
+
+def registry_env(root, url):
+    return isolated_env(root) | {
+        "npm_config_registry": url,
+        "npm_config_fetch_retries": "0",
+        "npm_config_audit": "false",
+        "npm_config_fund": "false",
+        "npm_config_update_notifier": "false",
+    }
 
 
 def run(env, cwd, *command, code=0, timeout=60):
@@ -105,6 +116,21 @@ class Registry(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+@contextmanager
+def loopback_registry(packages):
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry) as server:
+        server.packages = packages
+        server.url = f"http://127.0.0.1:{server.server_port}"
+        server.requests = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            thread.join()
+
+
 class MigrationRollback(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -128,6 +154,70 @@ class MigrationRollback(unittest.TestCase):
     def test_local_tarball(self):
         self.verify_failure("local-tarball", "LOCAL_TARBALL", "REGISTRY_TARBALL")
 
+    def test_manpage_collision(self):
+        self.verify_manpage_collision(force=False)
+
+    def test_forced_manpage_collision(self):
+        self.verify_manpage_collision(force=True)
+
+    def verify_manpage_collision(self, force):
+        root = self.root / f"manpage-{force}"
+        root.mkdir()
+        original, incoming = root / "original", root / "incoming"
+        collision, added = "osdk-collision.1", "osdk-added.1"
+        incoming_name = "osdk-migration-manpage"
+        write_project(original, CLI, "ORIGINAL")
+        write_project(incoming, incoming_name, "INCOMING")
+        for project, names in [(original, [collision]), (incoming, [added, collision])]:
+            manifest = project / "package.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            data["man"] = names
+            if project == incoming and force:
+                # Prove npm replaced the existing man link before it failed.
+                data["scripts"] = {"postinstall": "node verify-overwrite.cjs"}
+                (project / "verify-overwrite.cjs").write_text(
+                    'const link = require("fs").readlinkSync('
+                    'process.env.npm_config_prefix + "/share/man/man1/osdk-collision.1");\n'
+                    f'process.exit(link.includes("{incoming_name}") ? 47 : 48);\n',
+                    encoding="utf-8",
+                )
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            for name in names:
+                (project / name).write_text(project.name, encoding="utf-8")
+        _, original_tarball = pack(original, root / "original.tgz")
+        incoming_fixture = pack(incoming, root / "incoming.tgz")
+        with loopback_registry({incoming_name: incoming_fixture}) as server:
+            env = registry_env(root, server.url)
+            source, target = (Path(env["OSDK_INSTALL_DIR"]) / "node" / v for v in (SOURCE, TARGET))
+            for prefix in (source, target):
+                shutil.copytree(self.nodes / prefix.name, prefix, symlinks=True)
+            npm(env | {"npm_config_cache": str(root / "source-cache")}, source,
+                "install", "-g", "--ignore-scripts", incoming_fixture[1])
+            npm(env | {"npm_config_cache": str(root / "target-cache")}, target,
+                "install", "-g", original_tarball)
+            man = target / "share/man/man1"
+            original_link = os.readlink(man / collision)
+            original_destination = (man / collision).resolve(strict=True)
+            self.assertFalse(os.path.lexists(man / added))
+
+            env["npm_config_cache"] = str(root / "migration-cache")
+            if force:
+                env["npm_config_force"] = "true"
+            failure = run(env, root, self.osdk, "node", "migrate-packages",
+                          "--from", SOURCE, "--to", TARGET, "--apply", code=1)
+            print(json.dumps({
+                "scenario": "manpage-collision", "force": force, "exit": failure.returncode,
+                "original_link": original_link, "current_link": os.readlink(man / collision),
+                "added_link": os.path.lexists(man / added), "stderr": failure.stderr,
+            }), flush=True)
+            self.assertIn("restored the target Node package set", failure.stderr)
+            self.assertIn("npm error code 47" if force else "EEXIST", failure.stderr)
+            self.assertEqual(os.readlink(man / collision), original_link)
+            self.assertEqual((man / collision).resolve(strict=True), original_destination)
+            self.assertEqual((man / collision).read_text(encoding="utf-8"), "original")
+            self.assertFalse(os.path.lexists(man / added))
+            self.assertFalse(os.path.lexists(target / MODULES / incoming_name))
+
     def verify_failure(self, scenario, local_marker, registry_marker):
         root = self.root / scenario
         root.mkdir()
@@ -144,31 +234,16 @@ class MigrationRollback(unittest.TestCase):
             MISSING: pack(missing, root / "missing.tgz"),
             "corepack": pack(corepack, root / "corepack.tgz"),
         }
-        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry) as server:
-            server.packages = packages
-            server.url = f"http://127.0.0.1:{server.server_port}"
-            server.requests = []
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                for method in ["npm", "osdk"]:
-                    with self.subTest(method=method):
-                        self.verify_target(
-                            root / method, server, scenario, method, local,
-                            local_tarball, local_marker,
-                        )
-            finally:
-                server.shutdown()
-                thread.join()
+        with loopback_registry(packages) as server:
+            for method in ["npm", "osdk"]:
+                with self.subTest(method=method):
+                    self.verify_target(
+                        root / method, server, scenario, method, local,
+                        local_tarball, local_marker,
+                    )
 
     def verify_target(self, root, server, scenario, method, local, local_tarball, local_marker):
-        env = isolated_env(root) | {
-            "npm_config_registry": server.url,
-            "npm_config_fetch_retries": "0",
-            "npm_config_audit": "false",
-            "npm_config_fund": "false",
-            "npm_config_update_notifier": "false",
-        }
+        env = registry_env(root, server.url)
         source, target = (Path(env["OSDK_INSTALL_DIR"]) / "node" / v for v in (SOURCE, TARGET))
         shutil.copytree(self.nodes / TARGET, target, symlinks=True)
         project = root / "local project"
