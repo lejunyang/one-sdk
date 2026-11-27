@@ -25,9 +25,11 @@ pub(crate) async fn self_upgrade(
     // cannot find its own directory (a deleted or relocated binary) must say so
     // rather than fetch a release it has nowhere to put.
     let install_dir = self_update::install_dir()?;
-    // Windows cannot delete the running program, so a previous upgrade may have
-    // left the file it replaced behind. It is no longer running now.
-    self_update::clean_replaced_programs(&install_dir);
+    if !dry_run {
+        // A previous upgrade on Windows may have left a running program's
+        // backup behind. Try to clean it up when running a real upgrade.
+        self_update::clean_replaced_programs(&install_dir);
+    }
 
     apply_source_override(app, self_update::SOURCE_ID);
     if app.refresh_sources {
