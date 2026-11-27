@@ -195,8 +195,11 @@ class MigrationRollback(unittest.TestCase):
     def test_forced_manpage_collision(self):
         self.verify_manpage_collision(force=True)
 
-    def verify_manpage_collision(self, force):
-        root = self.root / f"manpage-{force}"
+    def test_forced_manpage_collision_with_linked_section(self):
+        self.verify_manpage_collision(force=True, linked_section=True)
+
+    def verify_manpage_collision(self, force, linked_section=False):
+        root = self.root / f"manpage-{force}-{linked_section}"
         root.mkdir()
         original, incoming = root / "original", root / "incoming"
         collision, added = "osdk-collision.1", "osdk-added.1"
@@ -208,12 +211,14 @@ class MigrationRollback(unittest.TestCase):
             data = json.loads(manifest.read_text(encoding="utf-8"))
             data["man"] = names
             if project == incoming and force:
-                # Prove npm replaced the existing man link before it failed.
+                # Prove npm wrote both man links before it failed.
                 data["scripts"] = {"postinstall": "node verify-overwrite.cjs"}
                 (project / "verify-overwrite.cjs").write_text(
-                    'const link = require("fs").readlinkSync('
-                    'process.env.npm_config_prefix + "/share/man/man1/osdk-collision.1");\n'
-                    f'process.exit(link.includes("{incoming_name}") ? 47 : 48);\n',
+                    'const {readlinkSync} = require("fs");\n'
+                    'const man = process.env.npm_config_prefix + "/share/man/man1/";\n'
+                    f'const names = {json.dumps([collision, added])};\n'
+                    f'process.exit(names.every(name => readlinkSync(man + name)'
+                    f'.includes("{incoming_name}")) ? 47 : 48);\n',
                     encoding="utf-8",
                 )
             manifest.write_text(json.dumps(data), encoding="utf-8")
@@ -226,11 +231,17 @@ class MigrationRollback(unittest.TestCase):
             source, target = (Path(env["OSDK_INSTALL_DIR"]) / "node" / v for v in (SOURCE, TARGET))
             for prefix in (source, target):
                 shutil.copytree(self.nodes / prefix.name, prefix, symlinks=True)
+            man = target / "share/man/man1"
+            if linked_section:
+                section_dir = target / "share/manual-store/man1"
+                section_dir.parent.mkdir()
+                man.rename(section_dir)
+                man.symlink_to(os.path.relpath(section_dir, man.parent), target_is_directory=True)
+                section_link = os.readlink(man)
             npm(env | {"npm_config_cache": str(root / "source-cache")}, source,
                 "install", "-g", "--ignore-scripts", incoming_fixture[1])
             npm(env | {"npm_config_cache": str(root / "target-cache")}, target,
                 "install", "-g", original_tarball)
-            man = target / "share/man/man1"
             original_link = os.readlink(man / collision)
             original_destination = (man / collision).resolve(strict=True)
             self.assertFalse(os.path.lexists(man / added))
@@ -242,11 +253,15 @@ class MigrationRollback(unittest.TestCase):
                           "--from", SOURCE, "--to", TARGET, "--apply", code=1)
             print(json.dumps({
                 "scenario": "manpage-collision", "force": force, "exit": failure.returncode,
+                "linked_section": linked_section,
                 "original_link": original_link, "current_link": os.readlink(man / collision),
                 "added_link": os.path.lexists(man / added), "stderr": failure.stderr,
             }), flush=True)
             self.assertIn("restored the target Node package set", failure.stderr)
             self.assertIn("npm error code 47" if force else "EEXIST", failure.stderr)
+            if linked_section:
+                self.assertEqual(os.readlink(man), section_link)
+                self.assertEqual(man.resolve(strict=True), section_dir)
             self.assertEqual(os.readlink(man / collision), original_link)
             self.assertEqual((man / collision).resolve(strict=True), original_destination)
             self.assertEqual((man / collision).read_text(encoding="utf-8"), "original")
