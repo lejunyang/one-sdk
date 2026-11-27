@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use super::runtimes::{managed_node_tools, npm_command, ManagedNodeTools};
 use super::*;
 
+pub(super) mod rollback;
+
 #[derive(Debug)]
 struct GlobalPackage {
     name: String,

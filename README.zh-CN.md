@@ -564,6 +564,8 @@ osdk node migrate-packages --from 20.19.0 --to 22.17.0
 osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
 ```
 
+迁移失败时，目标版本保留原有的全局 npm 包，包括本地链接和从本地 tarball 安装的包。
+
 ### Python
 
 ```bash

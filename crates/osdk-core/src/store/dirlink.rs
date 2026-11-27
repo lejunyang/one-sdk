@@ -33,6 +33,12 @@ pub fn create(target: &Path, link: &Path) -> std::io::Result<()> {
     platform::create(target, link)
 }
 
+/// Recreate a Windows junction from its read_link target without resolving it.
+#[cfg(windows)]
+pub fn recreate_junction(target: &Path, link: &Path) -> std::io::Result<()> {
+    platform::create_junction(target, link)
+}
+
 /// Point an existing link at a new target, creating it if absent.
 ///
 /// The link is removed and recreated rather than edited: there is no atomic
@@ -142,6 +148,10 @@ mod platform {
 
     /// Create an NTFS directory junction, via the reparse-point ioctl.
     pub(super) fn create(target: &Path, link: &Path) -> std::io::Result<()> {
+        create_junction(&std::fs::canonicalize(target)?, link)
+    }
+
+    pub(super) fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
@@ -156,13 +166,15 @@ mod platform {
 
         // A junction target must be fully qualified in the NT namespace
         // (`\??\C:\...`); a plain path or a `\\?\` prefix is not accepted.
-        let absolute = std::fs::canonicalize(target)?;
-        let native = absolute.to_string_lossy().replace("\\\\?\\", "");
-        let substitute: Vec<u16> = format!("\\??\\{native}")
+        let wide: Vec<u16> = target.as_os_str().encode_wide().collect();
+        let dos_prefix: Vec<u16> = "\\\\?\\".encode_utf16().collect();
+        let native = wide.strip_prefix(dos_prefix.as_slice()).unwrap_or(&wide);
+        let substitute: Vec<u16> = "\\??\\"
             .encode_utf16()
+            .chain(native.iter().copied())
             .chain(std::iter::once(0))
             .collect();
-        let print: Vec<u16> = native.encode_utf16().chain(std::iter::once(0)).collect();
+        let print: Vec<u16> = native.iter().copied().chain(std::iter::once(0)).collect();
 
         // The reparse point is set on an *existing empty directory*.
         std::fs::create_dir(link)?;

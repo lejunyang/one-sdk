@@ -429,9 +429,16 @@ links resolving outside the prefix are withheld from staged npm. After npm exits
 and migrated artifacts pass verification, their original link text is restored
 before publication. Occupied link paths or symlinked parent directories abort
 publication. External projects are never copied or written; relative links resolve
-to their original targets once published at the original location. The existing
-Node-to-Node migration also pins prefixes explicitly, independent of activation
-variables and builtin defaults.
+to their original targets once published at the original location.
+
+Node-to-Node migration (`--to`) also pins prefixes explicitly, independent of
+activation variables and builtin defaults. Before installing, it backs up global
+`node_modules` and launchers on the target volume, preserving link text. On install
+failure it finds newly added planned packages by their directory entries and
+tries an offline npm uninstall. It then removes filesystem entries absent from
+the backup, including leftovers with incomplete manifests. It restores original
+files and links only where they changed, and the command reports the original
+install error. Failed rollback keeps the backup and reports its path.
 
 `--allow-scripts` requires shared migration and explicit `--package` selection.
 It passes `--ignore-scripts=false` to override inherited ignore-scripts settings,

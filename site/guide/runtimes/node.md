@@ -79,8 +79,10 @@ osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
 
 源、目标都必须是已安装且含 npm 的受管 Node。osdk 通过源版本的
 `npm ls -g --depth=0 --json --long` 枚举，跳过 npm 自身、目标已存在的包，以及声明
-`hasInstallScript=true` 或 `gypfile=true` 的原生/安装脚本包。`--apply` 按精确版本安装；
-失败时恢复目标原有的全局包集合。
+`hasInstallScript=true` 或 `gypfile=true` 的原生/安装脚本包。`--apply` 按精确版本安装。
+安装失败时，osdk 清理本次新增的包和命令入口。被覆盖的目标包文件和链接从本地备份恢复，
+因此 `npm link` 仍指向原项目，本地 tarball 安装的包仍使用原文件。回滚也失败时，错误会给出备份路径。
+迁移期间请暂停对源和目标的其他全局 npm 安装或卸载。
 
 `reshim` 即使当前优先选择 system Node/npm，也会修复磁盘上已有托管安装的 npm
 默认 prefix；只处理 osdk 安装目录，不修改系统 Node/npm 的配置。

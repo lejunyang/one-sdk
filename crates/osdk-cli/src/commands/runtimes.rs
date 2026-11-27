@@ -1753,6 +1753,13 @@ pub(crate) fn system_python_candidates() -> Vec<std::path::PathBuf> {
 }
 
 pub(crate) fn migrate_node_packages(app: &App, from: &str, to: &str, apply: bool) -> Result<()> {
+    let _lock = apply
+        .then(|| {
+            osdk_core::lock::FileLock::acquire(
+                app.ctx.dirs.lock_dir("node").join("migrate-packages.lock"),
+            )
+        })
+        .transpose()?;
     let source = managed_node_tools(app, from)?;
     let target = managed_node_tools(app, to)?;
     let source_packages = list_global_npm_packages(&source)?;
@@ -1791,10 +1798,11 @@ pub(crate) fn migrate_node_packages(app: &App, from: &str, to: &str, apply: bool
         return Ok(());
     }
 
-    let before = target_packages;
+    let snapshot = super::npm_migration::rollback::Snapshot::capture(&target)?;
     let specs: Vec<String> = planned.iter().map(NpmPackage::spec).collect();
     if let Err(error) = npm_install_global(&target, &specs) {
-        return match restore_global_npm_packages(&target, &before) {
+        return match snapshot.restore(&target, planned.iter().map(|package| package.name.as_str()))
+        {
             Ok(()) => Err(error.context(t!("err.node_migrate_rolled_back"))),
             Err(rollback) => Err(error.context(format!(
                 "{}: {rollback:#}",
@@ -1900,32 +1908,6 @@ pub(crate) fn npm_install_global(tools: &ManagedNodeTools, specs: &[String]) -> 
     let mut args = vec!["install", "-g"];
     args.extend(specs.iter().map(String::as_str));
     npm_command(tools, &args).map(|_| ())
-}
-
-pub(crate) fn restore_global_npm_packages(
-    tools: &ManagedNodeTools,
-    packages: &[NpmPackage],
-) -> Result<()> {
-    let current = list_global_npm_packages(tools)?;
-    let removable: Vec<String> = current
-        .iter()
-        .filter(|package| package.name != "npm")
-        .map(|package| package.name.clone())
-        .collect();
-    if !removable.is_empty() {
-        let mut args = vec!["uninstall", "-g"];
-        args.extend(removable.iter().map(String::as_str));
-        npm_command(tools, &args)?;
-    }
-    let desired: Vec<String> = packages
-        .iter()
-        .filter(|package| package.name != "npm")
-        .map(NpmPackage::spec)
-        .collect();
-    if !desired.is_empty() {
-        npm_install_global(tools, &desired)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std::process::Output> {

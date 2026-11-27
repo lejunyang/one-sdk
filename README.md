@@ -644,6 +644,9 @@ osdk node migrate-packages --from 20.19.0 --to 22.17.0
 osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
 ```
 
+If migration fails, the target keeps its original global npm packages, including
+local links and packages installed from local tarballs.
+
 ### Python
 
 ```bash

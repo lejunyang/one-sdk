@@ -5543,41 +5543,46 @@ fi
 #[cfg(unix)]
 #[test]
 fn failed_node_package_migration_restores_target_packages() {
+    use std::os::unix::fs::MetadataExt;
+
     let temp = tempfile::tempdir().unwrap();
-    let state = temp.path().join("target-state");
+    let prefix = temp.path().join("installs/node/22.0.0");
+    let original = prefix.join("lib/node_modules/typescript");
+    std::fs::create_dir_all(&original).unwrap();
+    let original_file = original.join("cli.js");
+    std::fs::write(&original_file, "local tarball").unwrap();
+    let inode = original_file.metadata().unwrap().ino();
     let calls = temp.path().join("target-calls");
-    std::fs::write(&state, "before").unwrap();
     let source_script = r#"#!/bin/sh
 printf '{"dependencies":{"eslint":{"version":"9.1.0"}}}\n'
 "#;
     let target_script = format!(
         r#"#!/bin/sh
-state='{}'
+prefix='{}'
 calls='{}'
+set -e
 printf '%s\n' "$*" >> "$calls"
 if [ "$1" = "ls" ]; then
-  IFS= read -r current < "$state"
-  if [ "$current" = "before" ]; then
-    printf '{{"dependencies":{{"typescript":{{"version":"5.5.0"}}}}}}\n'
-  else
-    printf '{{"dependencies":{{"broken":{{"version":"1.0.0"}}}}}}\n'
-  fi
+  test ! -e "$prefix/lib/node_modules/eslint" || exit 8
+  printf '{{"dependencies":{{"typescript":{{"version":"5.5.0"}}}}}}\n'
 elif [ "$1" = "install" ] && [ "$3" = "eslint@9.1.0" ]; then
-  printf changed > "$state"
+  mkdir "$prefix/lib/node_modules/eslint"
+  printf '{{' > "$prefix/lib/node_modules/eslint/package.json"
+  ln -s ../lib/node_modules/eslint/cli.js "$prefix/bin/eslint"
+  printf '%s\n' 'fixture tarball 404' >&2
   exit 9
 elif [ "$1" = "uninstall" ]; then
-  printf empty > "$state"
-elif [ "$1" = "install" ] && [ "$3" = "typescript@5.5.0" ]; then
-  printf before > "$state"
+  exit 8
 fi
 "#,
-        state.display(),
+        prefix.display(),
         calls.display()
     );
     write_fake_managed_npm(temp.path(), "20.0.0", source_script);
     write_fake_managed_npm(temp.path(), "22.0.0", &target_script);
 
-    let output = run_isolated(
+    let output = run_isolated_in_with_env(
+        temp.path(),
         temp.path(),
         &[
             "node",
@@ -5588,13 +5593,32 @@ fi
             "22.0.0",
             "--apply",
         ],
+        &[("PATH", "/usr/bin:/bin")],
     );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("restored"));
-    assert_eq!(std::fs::read_to_string(state).unwrap(), "before");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("restored"), "{stderr}");
+    assert!(stderr.contains("fixture tarball 404"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&original_file).unwrap(),
+        "local tarball"
+    );
+    assert_eq!(original_file.metadata().unwrap().ino(), inode);
+    assert!(!prefix.join("lib/node_modules/eslint").exists());
+    assert!(prefix.join("bin/eslint").symlink_metadata().is_err());
     let calls = std::fs::read_to_string(calls).unwrap();
-    assert!(calls.contains("uninstall -g broken"));
-    assert!(calls.contains("install -g typescript@5.5.0"));
+    let commands: Vec<_> = calls
+        .lines()
+        .map(|line| line.split(" --prefix ").next().unwrap())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "ls -g --depth=0 --json --long",
+            "install -g eslint@9.1.0",
+            "uninstall -g --offline --ignore-scripts eslint",
+        ]
+    );
 }
 
 /// Compile a single-file Windows fixture executable with the ambient rustc.
