@@ -102,7 +102,7 @@ fn agents() -> Result<()> {
     Ok(())
 }
 
-/// List installed skills recorded in the lock and where they are linked.
+/// List locked skills and installations found in the project's Agent directories.
 fn list(app: &App, global: bool) -> Result<()> {
     let lock_path = lock_path_for(app, global);
     let skills = if lock_path.is_file() {
@@ -110,8 +110,24 @@ fn list(app: &App, global: bool) -> Result<()> {
     } else {
         Default::default()
     };
-    let recovery = legacy_skill_recovery(app, global, None, &skills);
-    if skills.is_empty() && recovery.is_none() {
+    let agent_dirs = project_agent_dirs(app, global)?;
+    let mut unlocked = BTreeMap::<String, Vec<PathBuf>>::new();
+    for dir in &agent_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let path = entry.path();
+            if !skills.contains_key(&name) && path.join(install::SKILL_MANIFEST).is_file() {
+                unlocked.entry(name).or_default().push(path);
+            }
+        }
+    }
+    let recovery = legacy_skill_recovery(app, global, None, &skills, &agent_dirs);
+    if skills.is_empty() && unlocked.is_empty() && recovery.is_none() {
         println!("No skills installed.");
     }
     for (name, entry) in &skills {
@@ -122,29 +138,57 @@ fn list(app: &App, global: bool) -> Result<()> {
         };
         println!("{name}  <- {}  [{}]", entry.source, agents);
     }
+    for (name, paths) in unlocked {
+        println!("{}", unlocked_skill_message(&name, &paths));
+    }
     if let Some(hint) = recovery {
         eprintln!("{hint}");
     }
     Ok(())
 }
 
-/// Older releases could record a child's installation in the nearest existing
-/// ancestor lock. Check the recorded Agent locations, but leave ownership for
-/// the user to verify.
+fn project_agent_dirs(app: &App, global: bool) -> Result<Vec<PathBuf>> {
+    if global {
+        return Ok(Vec::new());
+    }
+    let root = scope_root(app, false)?;
+    Ok(agent_choices(false)
+        .into_iter()
+        .map(|choice| choice.members[0].project_dir(&root))
+        .collect())
+}
+
+fn unlocked_skill_message(name: &str, paths: &[PathBuf]) -> String {
+    let locations = paths
+        .iter()
+        .map(|path| format!("`{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("skill `{name}` is not recorded in the lock; found in project Agent directories: {locations}")
+}
+
+/// Older releases could record a child's installation in an ancestor lock.
+/// Report candidate entries for names absent from the current project.
 fn legacy_skill_recovery(
     app: &App,
     global: bool,
     wanted: Option<&str>,
     recorded: &BTreeMap<String, LockedSkill>,
+    agent_dirs: &[PathBuf],
 ) -> Option<String> {
     let project = app.ctx.config.project.as_ref()?;
     if global || project.is_external() {
         return None;
     }
+    let repository = project
+        .root
+        .ancestors()
+        .find(|directory| directory.join(".git").exists())?;
     let ancestors = project
         .root
         .ancestors()
         .skip(1)
+        .take_while(|directory| directory.starts_with(repository))
         .map(|directory| directory.join(lockfile::LOCKFILE_NAME))
         .filter(|path| path.is_file());
     let mut hints = Vec::new();
@@ -153,33 +197,16 @@ fn legacy_skill_recovery(
         let Ok(lock) = lockfile::load(&ancestor) else {
             continue;
         };
-        let candidates = lock.skills.iter().filter(|(name, entry)| {
+        let candidates = lock.skills.keys().filter(|name| {
             wanted.is_none_or(|wanted| wanted == *name)
                 && !recorded.contains_key(*name)
                 && skills::validate_skill_name(name).is_ok()
-                && entry
-                    .agents
-                    .iter()
-                    .filter_map(|id| agent_target(id))
-                    .any(|agent| {
-                        agent
-                            .project_dir(&project.root)
-                            .join(name)
-                            .join(install::SKILL_MANIFEST)
-                            .is_file()
-                    })
+                && !agent_dirs.iter().any(|dir| dir.join(name).is_dir())
         });
-        for (name, _) in candidates {
-            let table = format!("[skills.{name:?}]");
+        for name in candidates {
             hints.push(format!(
-                "Skill `{name}` is installed here and {table} is recorded in ancestor lock `{}`.\n\
-                 Verify that the entry belongs to this project. Copy the full {table} table verbatim \
-                 into `{}` (start it with `schema = {}` if absent). \
-                 Remove the ancestor entry only if it belongs exclusively to this project. \
-                 Run `osdk skills list` here to verify, then rerun your original command.",
-                ancestor.display(),
-                project.lock_path.display(),
-                lockfile::schema_version(),
+                "Found [skills.{name:?}] in ancestor lock `{}`. Verify which project owns this entry.",
+                ancestor.display()
             ));
         }
     }
@@ -444,7 +471,18 @@ fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Re
         lockfile::Lockfile::default()
     };
     let Some(entry) = lock.skills.get(name).cloned() else {
-        if let Some(hint) = legacy_skill_recovery(app, global, Some(name), &lock.skills) {
+        let agent_dirs = project_agent_dirs(app, global)?;
+        let installed_paths: Vec<_> = agent_dirs
+            .iter()
+            .map(|dir| dir.join(name))
+            .filter(|path| path.is_dir())
+            .collect();
+        if !installed_paths.is_empty() {
+            anyhow::bail!("{}", unlocked_skill_message(name, &installed_paths));
+        }
+        if let Some(hint) =
+            legacy_skill_recovery(app, global, Some(name), &lock.skills, &agent_dirs)
+        {
             anyhow::bail!("{hint}");
         }
         if has_lock {

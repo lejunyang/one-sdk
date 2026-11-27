@@ -768,7 +768,7 @@ osdk skills find agent skills             # 在 GitHub 上搜可安装的 skill�
 osdk skills add github:vercel-labs/agent-skills --list        # 只列仓库里有哪些 skill
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # 交互选择 Agent 与链接/复制
 osdk skills add ./my-skills -s my-skill -a codex              # 本地源，选装指定 skill
-osdk skills list                         # 已装 skill 与其链接到的 Agent
+osdk skills list                         # 已锁定的技能和未锁定的项目技能路径
 osdk skills sync                         # 复现已锁定的技能，补齐缺锁的声明
 osdk skills remove web-design-guidelines
 ```
@@ -788,7 +788,7 @@ osdk skills remove web-design-guidelines
 要更换固定 commit，修改 `ref` 后联网运行 `skills update`。
 设置 `[skills].scope = "global"` 默认使用用户级 Agent 目录，也可为单次命令传 `-g`。
 
-如果 `skills list` 或 `skills remove` 提示旧版把子项目技能记在上级锁里，见
+如果 `skills list` 或 `skills remove` 报告上级锁候选条目，见
 [子项目恢复指南](site/guide/ai/skills.md#恢复旧版子项目的技能)。
 
 指南：[Agent skills](site/guide/ai/skills.md)

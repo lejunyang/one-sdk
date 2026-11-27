@@ -171,9 +171,7 @@ agents = ["claude-code", "codex"]
 
 ### 恢复旧版子项目的技能
 
-旧版可能把子项目安装的技能记在上级 `osdk.lock` 中。如果 `osdk skills list` 或
-`osdk skills remove demo` 报告这类安装，先确认提示中的条目确实归这个子项目。
-将上级锁中的完整 `[skills.demo]` 表原样复制到提示所列的子项目锁中，新建锁时先写一行
-`schema = 4`。这样可保留原来的提交、内容哈希、Agent 和安装方式。仅在确认条目只归这个
-子项目时，才从上级锁中移走该表。回到子项目运行 `osdk skills list` 核对，再重试
-`osdk skills remove demo` 或原命令。
+旧版可能把子项目的技能记在上级 `osdk.lock` 中。子项目缺少同名锁条目和安装目录时，
+`osdk skills list` 和 `osdk skills remove <名>` 会列出当前 Git 仓库内的候选上级锁及条目。
+请先核对候选条目归哪个项目。子项目有同名的未锁定安装时，两条命令会报告本项目的
+Agent 安装路径。`remove` 需要当前项目的锁条目才能移除技能。

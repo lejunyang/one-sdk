@@ -867,7 +867,7 @@ osdk skills find agent skills             # search GitHub for installable skills
 osdk skills add github:vercel-labs/agent-skills --list        # list a repo's skills only
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # choose agents and link/copy interactively
 osdk skills add ./my-skills -s my-skill -a codex              # a local source, one skill
-osdk skills list                         # installed skills and the agents they link into
+osdk skills list                         # locked skills and unlocked project paths
 osdk skills sync                         # replay locked skills and install missing declarations
 osdk skills remove web-design-guidelines
 ```
@@ -894,7 +894,7 @@ with network access.
 Set `[skills].scope = "global"` to use user-level Agent directories by default,
 or pass `-g` on an individual command.
 
-If `skills list` or `skills remove` reports an older installation recorded in an
+If `skills list` or `skills remove` reports a candidate entry in an
 ancestor lock, follow the [subproject recovery guide](site/en/guide/ai/skills.md#recovering-skills-installed-by-an-older-version-in-a-subproject).
 
 Guide: [Agent skills](site/en/guide/ai/skills.md)

@@ -212,12 +212,10 @@ reference.
 
 ### Recovering skills installed by an older version in a subproject
 
-Older releases could record a subproject's installed skill in an ancestor's
-`osdk.lock`. If `osdk skills list` or `osdk skills remove demo` reports this
-layout, verify that the reported entry belongs to the subproject. Copy the
-entire `[skills.demo]` table verbatim into the subproject lock named in the hint.
-If creating the lock, start it with `schema = 4`. This preserves the pinned
-commit, content hash, Agents, and installation mode. Remove the table from the
-ancestor lock only if it belongs exclusively to this subproject. Run
-`osdk skills list` in the subproject to verify, then retry
-`osdk skills remove demo` or your original command.
+Older releases could record a subproject's skill in an ancestor's `osdk.lock`.
+When the subproject has neither a lock entry nor an installation for that name,
+`osdk skills list` and `osdk skills remove <name>` show candidate entries and
+their lock paths within the current Git repository. Check which project owns each
+candidate. If the subproject has an unlocked installation with the same name,
+both commands report its project Agent paths. `remove` requires a lock entry in
+the current project to remove the skill.
