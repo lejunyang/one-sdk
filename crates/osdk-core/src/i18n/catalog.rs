@@ -1687,6 +1687,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.syspkg_invalid_keys",
+        (
+            "`[sys.pkg]` has {count} unusable package key(s); fix the config before planning or installing",
+            "`[sys.pkg]` 有 {count} 个无法识别的包键，请先修正配置再做计划或安装",
+        ),
+    );
+    m.insert(
         "msg.excluded_by_platform",
         (
             "(not for this platform: configured for {restriction})",

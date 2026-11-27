@@ -1,6 +1,4 @@
-//! `osdk pkg`: read-only diagnostics for the host's own package managers.
-//!
-//! This command reports; it does not install, configure, or elevate.
+//! `osdk pkg`: inspect and manage packages through the host's package managers.
 
 use std::io::Write;
 
@@ -30,7 +28,11 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
             Ok(())
         }
         PkgCommand::Status { missing, json } => {
-            let report = build_status(app)?;
+            let (packages, key_errors) = app.ctx.config.sources.syspkg.parsed_packages();
+            let report = syspkg::StatusReport::new(
+                package_statuses(app, &packages),
+                package_key_diagnostics(&key_errors),
+            );
             if json {
                 serde_json::to_writer(&mut stdout, &report)
                     .context("serializing package status")?;
@@ -38,6 +40,7 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
             } else {
                 write_status(&mut stdout, &report)?;
             }
+            validate_package_keys(&mut stdout, &report.invalid_keys, KeyErrorOutput::Status)?;
             // `--missing` is the CI contract: a requested package that is absent
             // must fail the check. A version difference does not, because the
             // config never promised to hold a version.
@@ -50,7 +53,7 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
             json,
             detailed_exitcode,
         } => {
-            let (plan, _) = build_plan(app)?;
+            let plan = build_plan(app, &mut stdout, KeyErrorOutput::Plan { json })?;
             if json {
                 serde_json::to_writer(&mut stdout, &plan).context("serializing package plan")?;
                 writeln!(stdout)?;
@@ -110,18 +113,67 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
     }
 }
 
-/// Compare package entries in `[sys.pkg]` against the host.
+enum KeyErrorOutput {
+    Status,
+    Plan { json: bool },
+    Apply { json: bool },
+}
+
+fn package_key_diagnostics(errors: &[syspkg::KeyError]) -> Vec<String> {
+    errors.iter().map(ToString::to_string).collect()
+}
+
+fn validate_package_keys(
+    output: &mut dyn Write,
+    invalid_keys: &[String],
+    mode: KeyErrorOutput,
+) -> Result<()> {
+    if invalid_keys.is_empty() {
+        return Ok(());
+    }
+
+    let summary = osdk_core::t!("err.syspkg_invalid_keys", count = invalid_keys.len());
+    match mode {
+        // The status report has already printed the individual diagnostics.
+        KeyErrorOutput::Status => anyhow::bail!("{summary}"),
+        KeyErrorOutput::Plan { json: true } | KeyErrorOutput::Apply { json: true } => {
+            let mut payload = serde_json::json!({
+                "refused": {
+                    "reason": "invalid-package-keys",
+                    "detail": { "invalid_keys": invalid_keys },
+                },
+            });
+            if matches!(mode, KeyErrorOutput::Apply { .. }) {
+                payload["applied"] = false.into();
+            }
+            serde_json::to_writer(&mut *output, &payload)
+                .context("serializing system package key refusal")?;
+            writeln!(output)?;
+        }
+        _ => {}
+    }
+    let details = invalid_keys
+        .iter()
+        .map(|key| format!("  - {key}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!("{summary}:\n{details}");
+}
+
+/// Compare parsed package entries in `[sys.pkg]` against the host.
 ///
-/// The installed set is read once and reused for every request, so a report is
-/// one query rather than one per package.
-fn build_status(app: &App) -> Result<syspkg::StatusReport> {
+/// Return one status per entry, in the same order. The installed winget set is
+/// read once and reused across all winget requests.
+fn package_statuses(
+    app: &App,
+    packages: &[(syspkg::PackageKey, syspkg::PackageRequest)],
+) -> Vec<syspkg::PackageStatus> {
     let config = &app.ctx.config.sources.syspkg;
-    let (parsed, key_errors) = config.parsed_packages();
     let runner = SystemCommandRunner;
 
     // Query only when something actually asks for that manager, so a project
     // with no winget packages never shells out to winget.
-    let wants_winget = parsed
+    let wants_winget = packages
         .iter()
         .any(|(key, _)| key.manager == ManagerKind::Winget);
     let installed = if wants_winget && config.allows(ManagerKind::Winget) {
@@ -131,7 +183,7 @@ fn build_status(app: &App) -> Result<syspkg::StatusReport> {
     };
 
     let platform = app.ctx.platform;
-    let statuses = parsed
+    packages
         .iter()
         .map(|(key, request)| match key.manager {
             // A distro manager answers one package at a time -- there is no
@@ -146,12 +198,7 @@ fn build_status(app: &App) -> Result<syspkg::StatusReport> {
             // not be reported on as though it had been queried.
             _ => syspkg::evaluate(key, request, None, &platform),
         })
-        .collect();
-
-    Ok(syspkg::StatusReport::new(
-        statuses,
-        key_errors.iter().map(ToString::to_string).collect(),
-    ))
+        .collect()
 }
 
 /// Evaluate one distro package against the host.
@@ -220,25 +267,25 @@ fn distro_status(
 }
 
 /// Build an install plan from the current status.
-fn build_plan(app: &App) -> Result<(syspkg::InstallPlan, syspkg::StatusReport)> {
+fn build_plan(
+    app: &App,
+    output: &mut dyn Write,
+    mode: KeyErrorOutput,
+) -> Result<syspkg::InstallPlan> {
     let config = &app.ctx.config.sources.syspkg;
-    let report = build_status(app)?;
-    let (parsed, _) = config.parsed_packages();
+    let (packages, key_errors) = config.parsed_packages();
+    validate_package_keys(output, &package_key_diagnostics(&key_errors), mode)?;
 
-    let triples: Vec<_> = parsed
+    let statuses = package_statuses(app, &packages);
+    let triples: Vec<_> = packages
         .into_iter()
-        .filter_map(|(key, request)| {
-            report
-                .packages
-                .iter()
-                .find(|status| status.id == key.id && status.manager == key.manager)
-                .cloned()
-                .map(|status| (key, request, status))
-        })
+        .zip(statuses)
+        .map(|((key, request), status)| (key, request, status))
         .collect();
 
-    let plan = syspkg::plan_installs(&triples, |manager| config.allows(manager));
-    Ok((plan, report))
+    Ok(syspkg::plan_installs(&triples, |manager| {
+        config.allows(manager)
+    }))
 }
 
 /// Whether an empty executable plan really means every request is present.
@@ -258,7 +305,7 @@ fn all_requests_present(plan: &syspkg::InstallPlan) -> bool {
 /// Install what is missing, after showing exactly what that is.
 async fn apply_packages(app: &App, dry_run: bool, yes: bool, json: bool) -> Result<()> {
     let mut stdout = std::io::stdout();
-    let (plan, _) = build_plan(app)?;
+    let plan = build_plan(app, &mut stdout, KeyErrorOutput::Apply { json })?;
 
     if plan.is_empty() {
         if all_requests_present(&plan) {

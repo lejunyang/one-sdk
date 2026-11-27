@@ -175,7 +175,7 @@ System packages
   Git.Git              ok               requested latest (installed 2.46.0)
   Some.MacTool         not for this os  requested latest (installed -)
   This.Is.Absent       missing          requested latest (installed -)
-  invalid entry: `broken-no-prefix` needs a manager prefix, for example `winget:broken-no-prefix`
+  invalid entry: `atp:libssl-dev` names an unknown manager `atp`; use one of winget, brew, apt, apk, pacman, dnf; did you mean `apt:`?
 ```
 
 Two of the five states are easy to conflate:
@@ -186,21 +186,35 @@ Two of the five states are easy to conflate:
   can be said about the package. That is not the same as "absent": treating it
   as missing would send you installing something you may already have.
 
-A malformed key is listed as an `invalid entry` rather than ignored: it stands
-for a package you believe is managed, so skipping it silently would make
-"nothing missing" untrue.
+`pkg status` reports the state of valid entries and lists malformed keys as
+`invalid entry` (the `invalid_keys` string array in JSON). It exits `1` for
+invalid keys with or without `--missing`. Each diagnostic shows the original key
+and known package managers. When the prefix has a unique close match, the
+diagnostic suggests it. For example, `atp:` calls out the missing package ID
+and suggests `apt:`.
 
 ## Installing what is missing
 
 ```bash
 osdk pkg plan                      # just show what would be installed
-osdk pkg plan --detailed-exitcode  # 2 when work is pending, 0 when it is not
+osdk pkg plan --detailed-exitcode  # 2 for pending changes, 0 for none, 1 on error
 osdk pkg apply --dry-run
 osdk pkg apply --yes               # the only command that installs anything
 ```
 
-A plan accounts for every request — what it will install, and **why it leaves
-the rest alone** — so nothing has to be inferred from an omission:
+`pkg plan` validates package keys before querying the package manager.
+`pkg apply` (including `--dry-run`) performs the same validation after startup
+checks. Both exit `1` when validation finds invalid keys. With `--json`, stdout
+contains `refused.reason: "invalid-package-keys"` and
+`refused.detail.invalid_keys`. The `pkg apply` response also contains `applied: false`.
+
+If the project declares packages that apply on this host, `pkg apply` checks
+project trust first. If that check fails, the command exits `1` with empty stdout
+and reports the trust error on stderr. Run `osdk pkg plan --json` to inspect
+invalid keys before approving the project.
+
+For valid requests, the plan lists the packages to install and gives a reason
+for each package it skips.
 
 ```text
 Would install:

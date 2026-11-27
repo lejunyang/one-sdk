@@ -17,6 +17,7 @@ use crate::source::{Selection, Source, SourceMode};
 use crate::store::link::LinkMode;
 
 pub mod inheritance;
+mod suggest;
 /// Package declarations used by both trust checks and system-package operations.
 pub mod system_packages;
 
@@ -2505,29 +2506,7 @@ fn unknown_top_level_keys(value: &toml::Value) -> Vec<String> {
 
 /// The known key one or two edits away from `key`, for a "did you mean".
 fn closest_top_level_key(key: &str) -> Option<&'static str> {
-    fn distance(a: &str, b: &str) -> usize {
-        let b: Vec<char> = b.chars().collect();
-        let mut row: Vec<usize> = (0..=b.len()).collect();
-        for (i, ca) in a.chars().enumerate() {
-            let mut previous = row[0];
-            row[0] = i + 1;
-            for (j, cb) in b.iter().enumerate() {
-                let current = row[j + 1];
-                row[j + 1] = (previous + usize::from(ca != *cb))
-                    .min(row[j] + 1)
-                    .min(current + 1);
-                previous = current;
-            }
-        }
-        row[b.len()]
-    }
-    KNOWN_TOP_LEVEL_KEYS
-        .iter()
-        .copied()
-        .map(|known| (distance(key, known), known))
-        .filter(|(distance, _)| *distance <= 2)
-        .min_by_key(|(distance, _)| *distance)
-        .map(|(_, known)| known)
+    suggest::closest(key, KNOWN_TOP_LEVEL_KEYS.iter().copied(), 2)
 }
 
 fn warn_unknown_top_level_keys(path: &Path, value: &toml::Value) {
@@ -4024,7 +4003,9 @@ X = \"1\"
         .unwrap();
         assert_eq!(unknown_top_level_keys(&value), ["env", "toolz"]);
         assert_eq!(closest_top_level_key("toolz"), Some("tools"));
-        assert_eq!(closest_top_level_key("taks"), Some("tasks"));
+        assert_eq!(closest_top_level_key("tolos"), Some("tools"));
+        // Both `task` (transpose) and `tasks` (insert) are one edit away.
+        assert_eq!(closest_top_level_key("taks"), None);
         assert_eq!(closest_top_level_key("env"), None);
         // Every section ConfigFile reads must be on the list, or it would warn.
         let all = KNOWN_TOP_LEVEL_KEYS
