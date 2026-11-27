@@ -242,6 +242,15 @@ run = "python scripts/test-deps-monorepo.py"
 description = "Native npm/pnpm/Bun/uv source adapters against isolated local fixtures"
 run = "python3 scripts/test-package-sources.py"
 
+[tasks.node-migration-rollback]
+description = "Real npm rollback for Node 20.19.0 to 22.17.0 (Linux; requires a built osdk binary)"
+when = { os = "linux" }
+run = [{ argv = ["python", "scripts/test-node-migration-rollback.py", "--osdk", "{{osdk}}"] }]
+
+[tasks.node-migration-rollback.options.osdk]
+help = "CLI binary to test"
+default = "target/debug/osdk"
+
 [tasks.pypi-native-install]
 description = "Real pip/uv loopback installs (Linux; openssl and real uv required; pass --python and --uv paths)"
 depends = ["build"]
