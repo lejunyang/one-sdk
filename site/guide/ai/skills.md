@@ -36,6 +36,7 @@ osdk skills agents
 `GH_TOKEN`；**不接触 skills.sh**，因此不需要任何注册表密钥。`--owner` 限定某 org/user，
 `--limit` 限结果数（1–50）。
 
+`list` 列出所选范围锁定的技能。项目范围还会报告未锁定的项目安装路径。
 `sync` 复现 lock 记录的 commit、内容哈希和安装方式，也会安装尚未锁定的适用声明并写锁。
 `update` 重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
 前进但目标 skill 内容哈希未变时只推进 lock，不重装；内容变化才重新落地。已有项目保存的裸

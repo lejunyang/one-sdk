@@ -768,7 +768,7 @@ osdk skills find agent skills             # 在 GitHub 上搜可安装的 skill�
 osdk skills add github:vercel-labs/agent-skills --list        # 只列仓库里有哪些 skill
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # 交互选择 Agent 与链接/复制
 osdk skills add ./my-skills -s my-skill -a codex              # 本地源，选装指定 skill
-osdk skills list                         # 已锁定的技能和未锁定的项目技能路径
+osdk skills list                         # 已锁定的技能，项目范围还显示未锁定的安装路径
 osdk skills sync                         # 复现已锁定的技能，补齐缺锁的声明
 osdk skills remove web-design-guidelines
 ```

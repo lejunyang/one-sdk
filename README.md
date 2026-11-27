@@ -867,7 +867,7 @@ osdk skills find agent skills             # search GitHub for installable skills
 osdk skills add github:vercel-labs/agent-skills --list        # list a repo's skills only
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # choose agents and link/copy interactively
 osdk skills add ./my-skills -s my-skill -a codex              # a local source, one skill
-osdk skills list                         # locked skills and unlocked project paths
+osdk skills list                         # locked skills, plus unlocked paths in project scope
 osdk skills sync                         # replay locked skills and install missing declarations
 osdk skills remove web-design-guidelines
 ```

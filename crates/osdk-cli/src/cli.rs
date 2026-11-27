@@ -1182,7 +1182,7 @@ pub enum SkillsCommand {
         #[arg(long = "no-lock")]
         no_lock: bool,
     },
-    /// List locked skills and paths of installed skills missing from the project lock.
+    /// List locked skills. Project scope also shows unlocked installation paths.
     #[command(alias = "ls")]
     List {
         /// Use the user-level scope, overriding `[skills].scope`.

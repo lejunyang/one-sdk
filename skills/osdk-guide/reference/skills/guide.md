@@ -5,7 +5,7 @@
 | 子命令 | 主要参数 | 语义 |
 | --- | --- | --- |
 | `add <SOURCE>` | `-s/--skill`、`-a/--agent` 可重复；`-g`、`--copy`、`--ref`、`-l/--list`、`--no-lock` | 列出或安装来源中的 skill；无显式/默认 Agent 时先检测、再按需多选；仅多目标目录时选择链接或复制；摘要确认后写盘，`--yes` 跳过交互 |
-| `list`（`ls`） | `-g` | 列出锁里的 skill、Agent 和项目中未锁定的 skill 路径 |
+| `list`（`ls`） | `-g` | 列出所选范围锁里的 skill 和 Agent。项目范围还报告未锁定的安装路径 |
 | `remove <NAME>`（`rm`） | `-g`、`-a/--agent` 可重复 | 摘除全部或指定 Agent 链接 |
 | `sync` | `-g` | 按锁复现当前平台适用的 skill，安装适用且缺锁的声明并写锁。保留跳过的锁条目，替换任何已有但未锁定的 skill 目录前确认 |
 | `update [SKILL...]` | `-g` | 重解析 `requested_ref` 或应用声明的新 ref，包括新的 `rev:<commit>`。仅目标 skill 内容哈希变化时重装，仓库其他变更只推进 lock。未变更的 `rev:<commit>` 保持固定，旧裸 commit 迁移为默认分支意图。同时让 Agent 跟随声明的 `agents`（删掉的取消链接、新增的装入、改写 lock） |

@@ -41,6 +41,8 @@ when it hits the anonymous rate limit; it **never contacts skills.sh**, so no
 registry key is needed. `--owner` restricts to one org/user and `--limit` caps
 the result count (1–50).
 
+`list` shows locked skills for the selected scope. Project scope also reports
+unlocked project installation paths.
 `sync` reproduces the commit, content hash, and install mode recorded in the lock.
 It also installs applicable declarations that have no lock entry and records them.
 `update` re-resolves the lock's
