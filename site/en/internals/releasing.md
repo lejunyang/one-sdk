@@ -268,7 +268,8 @@ file is moved in, and a failure part-way rolls every rename back; a regression
 test asserts that a failure on the second program leaves the first one at its
 old contents. Backups are removed only after the whole set is in place. A
 backup that Windows refuses to delete because the process is still running is
-left behind and cleaned up at the start of the next upgrade.
+left behind and cleaned up at the start of the next upgrade without `--dry-run`.
+Previews preserve existing backups.
 
 This is also why the command is not a `Backend`. A backend installs a tool into
 the store under a version directory; this replaces the two programs the user is

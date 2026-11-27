@@ -3235,6 +3235,71 @@ fn completions_emit_target_shell_script() {
 }
 
 #[test]
+fn self_upgrade_dry_run_preserves_the_install_directory() {
+    use osdk_core::pipeline::{verify::hash_file, HashAlgo};
+    use osdk_core::self_update::CURRENT_VERSION;
+    use std::env::consts::EXE_SUFFIX;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let install = root.join("bin");
+    let project = root.join("project");
+    std::fs::create_dir(&install).unwrap();
+    std::fs::create_dir(&project).unwrap();
+
+    let program = install.join(format!("osdk{EXE_SUFFIX}"));
+    let shim = install.join(format!("osdk-shim{EXE_SUFFIX}"));
+    std::fs::copy(osdk(), &program).unwrap();
+    std::fs::write(&shim, b"installed shim fixture").unwrap();
+    std::fs::write(program.with_extension("osdk-old-424242"), b"old osdk").unwrap();
+    std::fs::write(shim.with_extension("osdk-old-424242"), b"old shim").unwrap();
+
+    let snapshot = || {
+        std::fs::read_dir(&install)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let hash = hash_file(&entry.path(), HashAlgo::Sha256).unwrap();
+                (entry.file_name(), hash)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+
+    for (version, expected) in [
+        (
+            "0.0.99",
+            "would upgrade to osdk 0.0.99; rerun without --dry-run to apply".to_owned(),
+        ),
+        (
+            CURRENT_VERSION,
+            format!("osdk {CURRENT_VERSION} is already the newest version"),
+        ),
+    ] {
+        let mut command = isolated_command(root, &project, &program);
+        command.env("OSDK_LANG", "en").args([
+            "--offline",
+            "self",
+            "upgrade",
+            "--dry-run",
+            "--version",
+            version,
+        ]);
+        let output = run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{}: {stderr}", output.status);
+        assert!(stderr.is_empty(), "{stderr}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.lines().any(|line| line == expected), "{stdout}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "preview for {version} changed installed files"
+        );
+    }
+}
+
+#[test]
 fn self_upgrade_offline_reports_the_blocker_without_touching_the_binaries() {
     // `self upgrade` replaces the running programs, so the failure mode that
     // matters most is a half-applied upgrade. Offline is the cheapest way to
