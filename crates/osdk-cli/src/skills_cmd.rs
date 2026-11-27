@@ -1,13 +1,10 @@
 //! `osdk skills` command handlers.
-//!
-//! P0-4a covers the offline surface: `agents`, `list`, `add` from a local path,
-//! `remove`, `path`, and `sync` from `osdk.lock`. GitHub sources and the network
-//! path land in P0-4b; `add` of a GitHub source reports that clearly rather than
-//! pretending to work.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use osdk_core::config::SkillDeclaration;
 use osdk_core::skills;
 use osdk_core::skills::{agent_target, install, AgentTarget, SkillSource, AGENT_TARGETS};
 use osdk_core::store::link::LinkMode;
@@ -17,10 +14,19 @@ use crate::cli::SkillsCommand;
 use crate::lockfile::{self, LockedSkill};
 
 pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
+    let default_global = match app.ctx.config.skills_defaults.scope.as_deref() {
+        None => None,
+        Some("project") => Some(false),
+        Some("global") => Some(true),
+        Some(value) => anyhow::bail!(
+            "invalid `[skills].scope` value `{value}`: expected `project` or `global`"
+        ),
+    };
+    let effective_global = |flag| flag || default_global.unwrap_or(false);
     match command {
         SkillsCommand::Agents => agents(),
-        SkillsCommand::List { global } => list(app, global),
-        SkillsCommand::Path { name } => path(app, &name),
+        SkillsCommand::List { global } => list(app, effective_global(global)),
+        SkillsCommand::Path { name } => path(app, &name, default_global),
         SkillsCommand::Add {
             source,
             skills,
@@ -37,7 +43,7 @@ pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
                     source,
                     skills,
                     agents,
-                    global,
+                    global: effective_global(global),
                     copy,
                     reference: r#ref,
                     list_only: list,
@@ -50,9 +56,11 @@ pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
             name,
             global,
             agents,
-        } => remove(app, &name, global, &agents),
-        SkillsCommand::Sync { global } => sync(app, global).await,
-        SkillsCommand::Update { skills, global } => update(app, &skills, global).await,
+        } => remove(app, &name, effective_global(global), &agents),
+        SkillsCommand::Sync { global } => sync(app, effective_global(global)).await,
+        SkillsCommand::Update { skills, global } => {
+            update(app, &skills, effective_global(global)).await
+        }
         SkillsCommand::Use {
             source,
             skill,
@@ -94,7 +102,7 @@ fn agents() -> Result<()> {
     Ok(())
 }
 
-/// List installed skills recorded in the lock and where they are linked.
+/// List locked skills and installations found in the project's Agent directories.
 fn list(app: &App, global: bool) -> Result<()> {
     let lock_path = lock_path_for(app, global);
     let skills = if lock_path.is_file() {
@@ -102,9 +110,25 @@ fn list(app: &App, global: bool) -> Result<()> {
     } else {
         Default::default()
     };
-    if skills.is_empty() {
+    let agent_dirs = project_agent_dirs(app, global)?;
+    let mut unlocked = BTreeMap::<String, Vec<PathBuf>>::new();
+    for dir in &agent_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let path = entry.path();
+            if !skills.contains_key(&name) && path.join(install::SKILL_MANIFEST).is_file() {
+                unlocked.entry(name).or_default().push(path);
+            }
+        }
+    }
+    let recovery = legacy_skill_recovery(app, global, None, &skills, &agent_dirs);
+    if skills.is_empty() && unlocked.is_empty() && recovery.is_empty() {
         println!("No skills installed.");
-        return Ok(());
     }
     for (name, entry) in &skills {
         let agents = if entry.agents.is_empty() {
@@ -114,14 +138,129 @@ fn list(app: &App, global: bool) -> Result<()> {
         };
         println!("{name}  <- {}  [{}]", entry.source, agents);
     }
+    for (name, paths) in unlocked {
+        if !recovery.contains_key(&name) {
+            println!("{}", unlocked_skill_message(&name, &paths));
+        }
+    }
+    for hint in recovery.into_values().flatten() {
+        eprintln!("{hint}");
+    }
     Ok(())
 }
 
+fn project_agent_dirs(app: &App, global: bool) -> Result<Vec<PathBuf>> {
+    if global {
+        return Ok(Vec::new());
+    }
+    let root = scope_root(app, false)?;
+    Ok(agent_choices(false)
+        .into_iter()
+        .map(|choice| choice.members[0].project_dir(&root))
+        .collect())
+}
+
+fn installed_skill_paths(agent_dirs: &[PathBuf], name: &str) -> Vec<PathBuf> {
+    agent_dirs
+        .iter()
+        .map(|dir| dir.join(name))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+fn skill_locations(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("`{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn unlocked_skill_message(name: &str, paths: &[PathBuf]) -> String {
+    let locations = skill_locations(paths);
+    format!("skill `{name}` is not recorded in the lock; found in project agent directories: {locations}")
+}
+
+/// Older releases could record a child's installation in an ancestor lock.
+/// Report candidates for names with no local install, or verify the installed bytes.
+fn legacy_skill_recovery(
+    app: &App,
+    global: bool,
+    wanted: Option<&str>,
+    recorded: &BTreeMap<String, LockedSkill>,
+    agent_dirs: &[PathBuf],
+) -> BTreeMap<String, Vec<String>> {
+    let Some(project) = app
+        .ctx
+        .config
+        .project
+        .as_ref()
+        .filter(|project| !global && !project.is_external())
+    else {
+        return BTreeMap::new();
+    };
+    let Some(repository) = project
+        .root
+        .ancestors()
+        .find(|directory| directory.join(".git").exists())
+    else {
+        return BTreeMap::new();
+    };
+    let ancestors = project
+        .root
+        .ancestors()
+        .skip(1)
+        .take_while(|directory| directory.starts_with(repository))
+        .map(|directory| directory.join(lockfile::LOCKFILE_NAME))
+        .filter(|path| path.is_file());
+    let mut hints = BTreeMap::<String, Vec<String>>::new();
+    for ancestor in ancestors {
+        // A closer lock may have been created later or may be unreadable.
+        let Ok(lock) = lockfile::load(&ancestor) else {
+            continue;
+        };
+        let candidates = lock.skills.into_iter().filter(|(name, _)| {
+            wanted.is_none_or(|wanted| wanted == name)
+                && !recorded.contains_key(name)
+                && !matches!(name.as_str(), "." | "..")
+                && skills::validate_skill_name(name).is_ok()
+        });
+        for (name, entry) in candidates {
+            let paths = installed_skill_paths(agent_dirs, &name);
+            let hint = if paths.is_empty() {
+                format!(
+                    "Found [skills.{name:?}] in ancestor lock `{}`. Verify which project owns this entry.",
+                    ancestor.display()
+                )
+            } else if paths.iter().all(|path| {
+                install::installed_content_hash(path).is_ok_and(|hash| hash == entry.content_hash)
+            }) {
+                format!(
+                    "Skill `{name}` in project agent directories {} matches [skills.{name:?}] in ancestor lock `{}`. \
+                     Verify which project owns this entry, then move the complete skill table to `{}` and run `osdk skills remove {name}` to remove it.",
+                    skill_locations(&paths),
+                    ancestor.display(),
+                    project.lock_path.display()
+                )
+            } else {
+                continue;
+            };
+            hints.entry(name).or_default().push(hint);
+        }
+    }
+    hints
+}
+
 /// Print the staged store path of an installed skill.
-fn path(app: &App, name: &str) -> Result<()> {
+fn path(app: &App, name: &str, default_global: Option<bool>) -> Result<()> {
     osdk_core::skills::validate_skill_name(name)?;
+    let scopes: &[bool] = match default_global {
+        Some(true) => &[true],
+        Some(false) => &[false],
+        None => &[false, true],
+    };
     // Prefer the recorded content hash so the path is the exact staged copy.
-    for global in [false, true] {
+    for &global in scopes {
         let lock_path = lock_path_for(app, global);
         if !lock_path.is_file() {
             continue;
@@ -149,27 +288,80 @@ struct AddArgs {
 }
 
 async fn add(app: &mut App, args: AddArgs) -> Result<()> {
-    let source = SkillSource::parse(&args.source)?;
+    let source = resolve_source(
+        app,
+        &args.source,
+        None,
+        &args.skills,
+        args.reference.as_deref(),
+    )
+    .await?;
 
-    // Resolve the source to one or more on-disk skill roots plus, for GitHub, the
-    // immutable commit the ref pinned to. Both source kinds converge on
-    // `local_roots`, which handles "one skill dir" and "a directory of skills".
-    let (roots, resolved_commit): (Vec<(String, PathBuf)>, Option<String>) = match &source {
+    if args.list_only {
+        println!("Skills offered by {}:", source.canonical);
+        for (name, root) in &source.roots {
+            let package = install::read_skill_dir(root)?;
+            println!("  {name}  — {}", package.description);
+        }
+        return Ok(());
+    }
+
+    let scope_root = scope_root(app, args.global)?;
+    let targets = resolve_agents(app, &args.agents, &scope_root, args.global).context(
+        "selecting target agents for `skills add`; pass -a/--agent to choose explicitly",
+    )?;
+    let target_dirs = agent_dirs_by_path(&targets, &scope_root, args.global)?;
+    let mode = add_link_mode(app, args.copy, target_dirs.len())?;
+    let installation = SkillInstallation::prepare(source, targets, target_dirs, mode, None)?;
+    installation.preview();
+    if !app.prompt.confirm("Proceed with installation?")? {
+        println!("Installation cancelled.");
+        return Ok(());
+    }
+
+    let lock_entries = installation.install(app)?;
+    if !args.no_lock {
+        write_lock_entries(&lock_path_for(app, args.global), lock_entries)?;
+    }
+    Ok(())
+}
+
+struct ResolvedSource {
+    canonical: String,
+    roots: Vec<(String, PathBuf)>,
+    requested_ref: Option<String>,
+    resolved_commit: Option<String>,
+}
+
+async fn resolve_source(
+    app: &App,
+    input: &str,
+    base: Option<&Path>,
+    wanted: &[String],
+    reference: Option<&str>,
+) -> Result<ResolvedSource> {
+    let source = SkillSource::parse(input)?;
+    let (roots, resolved_commit) = match &source {
         SkillSource::Local { path } => {
-            if args.reference.is_some() {
+            if reference.is_some() {
                 anyhow::bail!("--ref applies only to a GitHub source, not a local path");
             }
-            (local_roots(path, &args.skills)?, None)
+            let root = match base {
+                Some(base) if !path.is_absolute() => {
+                    base.join(path.to_string_lossy().replace('\\', "/"))
+                }
+                _ => path.clone(),
+            };
+            (local_roots(&root, wanted)?, None)
         }
         SkillSource::GitHub {
             owner,
             repo,
             subdir,
         } => {
-            let commit =
-                skills::fetch::resolve_commit(&app.ctx, owner, repo, args.reference.as_deref())
-                    .await
-                    .with_context(|| format!("resolving {owner}/{repo}"))?;
+            let commit = skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
+                .await
+                .with_context(|| format!("resolving {owner}/{repo}"))?;
             println!(
                 "Resolved {owner}/{repo} to commit {}",
                 &commit[..commit.len().min(12)]
@@ -178,114 +370,161 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
                 .await
                 .with_context(|| format!("downloading {owner}/{repo}@{commit}"))?;
             let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
-            (local_roots(&root, &args.skills)?, Some(commit))
+            (local_roots(&root, wanted)?, Some(commit))
         }
     };
+    Ok(ResolvedSource {
+        canonical: source.canonical(),
+        roots,
+        requested_ref: resolved_commit
+            .as_ref()
+            .and_then(|_| normalized_requested_ref(reference)),
+        resolved_commit,
+    })
+}
 
-    if args.list_only {
-        println!("Skills offered by {}:", source.canonical());
-        for (name, root) in &roots {
+type AgentDirs = BTreeMap<PathBuf, Vec<&'static AgentTarget>>;
+
+struct PreparedSkill {
+    name: String,
+    selector: String,
+    package: install::SkillPackage,
+}
+
+struct SkillInstallation {
+    source: ResolvedSource,
+    skills: Vec<PreparedSkill>,
+    targets: Vec<&'static AgentTarget>,
+    target_dirs: AgentDirs,
+    mode: LinkMode,
+}
+
+impl SkillInstallation {
+    fn prepare(
+        source: ResolvedSource,
+        targets: Vec<&'static AgentTarget>,
+        target_dirs: AgentDirs,
+        mode: LinkMode,
+        declaration: Option<(&str, &str)>,
+    ) -> Result<Self> {
+        let mut skills = Vec::new();
+        for (selector, root) in &source.roots {
             let package = install::read_skill_dir(root)?;
-            println!("  {name}  — {}", package.description);
+            let (name, selector) = declaration.unwrap_or((&package.name, selector));
+            for directory in target_dirs.keys() {
+                install::validate_source_destination(root, &directory.join(name))?;
+            }
+            skills.push(PreparedSkill {
+                name: name.to_string(),
+                selector: selector.to_string(),
+                package,
+            });
         }
-        return Ok(());
+        Ok(Self {
+            source,
+            skills,
+            targets,
+            target_dirs,
+            mode,
+        })
     }
 
-    let scope_root = scope_root(app, args.global)?;
-    let targets = resolve_agents(app, &args.agents, &scope_root, args.global)?;
-    let target_dirs = agent_dirs_by_path(&targets, &scope_root, args.global)?;
-    let mode = add_link_mode(app, args.copy, target_dirs.len())?;
-    let packages = roots
-        .iter()
-        .map(|(name, root)| Ok((name.clone(), root.clone(), install::read_skill_dir(root)?)))
-        .collect::<Result<Vec<_>>>()?;
-
-    for (_, source_root, package) in &packages {
-        for agent_dir in target_dirs.keys() {
-            install::validate_source_destination(source_root, &agent_dir.join(&package.name))?;
-        }
-    }
-
-    println!("Installation summary:");
-    for (_, _, package) in &packages {
-        println!("  {}", package.preview());
-        for (agent_dir, owners) in &target_dirs {
-            let destination = agent_dir.join(&package.name);
-            let agent_ids = owners
-                .iter()
-                .map(|target| target.id)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let overwrites = std::fs::symlink_metadata(&destination).is_ok();
-            println!(
-                "    {} -> {}{}",
-                agent_ids,
-                destination.display(),
-                if overwrites {
-                    " (overwrites existing)"
-                } else {
-                    ""
-                }
-            );
+    fn preview(&self) {
+        println!("Installation summary:");
+        for skill in &self.skills {
+            println!("  {}", skill.package.preview());
+            for (agent_dir, owners) in &self.target_dirs {
+                let destination = agent_dir.join(&skill.name);
+                let overwrites = std::fs::symlink_metadata(&destination).is_ok();
+                println!(
+                    "    {} -> {}{}",
+                    target_ids(owners).collect::<Vec<_>>().join(", "),
+                    destination.display(),
+                    if overwrites {
+                        " (overwrites existing)"
+                    } else {
+                        ""
+                    }
+                );
+            }
         }
     }
-    if !app.prompt.confirm("Proceed with installation?")? {
-        println!("Installation cancelled.");
-        return Ok(());
+
+    fn replaces_existing_skill(&self) -> bool {
+        self.skills.iter().any(|skill| {
+            self.target_dirs
+                .keys()
+                .any(|agent_dir| agent_dir.join(&skill.name).symlink_metadata().is_ok())
+        })
     }
 
-    let mut lock_entries: Vec<(String, LockedSkill)> = Vec::new();
-    for (name, _, package) in &packages {
-        let staged = install::stage(&app.ctx.dirs, &source.canonical(), package, mode)
+    fn install(&self, app: &App) -> Result<Vec<(String, LockedSkill)>> {
+        let mut entries = Vec::new();
+        for skill in &self.skills {
+            let name = &skill.name;
+            let staged = install::stage(
+                &app.ctx.dirs,
+                &self.source.canonical,
+                &skill.package,
+                self.mode,
+            )
             .with_context(|| format!("staging skill `{name}`"))?;
+            for (agent_dir, owners) in &self.target_dirs {
+                install::link_into(agent_dir, name, &staged, self.mode).with_context(|| {
+                    format!(
+                        "linking `{name}` into {}",
+                        target_ids(owners).collect::<Vec<_>>().join(", ")
+                    )
+                })?;
+                println!("  installed into {}", agent_dir.display());
+            }
 
-        for (agent_dir, owners) in &target_dirs {
-            install::link_into(agent_dir, &package.name, &staged, mode).with_context(|| {
-                format!(
-                    "linking `{}` into {}",
-                    package.name,
-                    owners
-                        .iter()
-                        .map(|target| target.id)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-            println!("  installed into {}", agent_dir.display());
+            entries.push((
+                name.clone(),
+                LockedSkill {
+                    source: self.source.canonical.clone(),
+                    content_hash: skill.package.content_hash(),
+                    requested_ref: self.source.requested_ref.clone(),
+                    resolved_commit: self.source.resolved_commit.clone(),
+                    skill: (skill.selector != *name).then(|| skill.selector.clone()),
+                    agents: target_ids(&self.targets).map(str::to_string).collect(),
+                    install_mode: Some(self.mode),
+                },
+            ));
         }
-
-        lock_entries.push((
-            package.name.clone(),
-            LockedSkill {
-                source: source.canonical(),
-                content_hash: package.content_hash(),
-                requested_ref: resolved_commit
-                    .as_ref()
-                    .and_then(|_| normalized_requested_ref(args.reference.as_deref())),
-                resolved_commit: resolved_commit.clone(),
-                skill: (name != &package.name).then(|| name.clone()),
-                agents: targets.iter().map(|target| target.id.to_string()).collect(),
-                install_mode: Some(mode),
-            },
-        ));
+        Ok(entries)
     }
+}
 
-    if !args.no_lock {
-        write_lock_entries(app, args.global, lock_entries)?;
-    }
-    Ok(())
+fn target_ids<'a>(targets: &'a [&AgentTarget]) -> impl Iterator<Item = &'static str> + 'a {
+    targets.iter().map(|target| target.id)
 }
 
 /// Remove a skill from its agents and drop it from the lock.
 fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Result<()> {
     osdk_core::skills::validate_skill_name(name)?;
     let lock_path = lock_path_for(app, global);
-    if !lock_path.is_file() {
-        anyhow::bail!("no lockfile; nothing to remove");
-    }
-    let mut lock = lockfile::load(&lock_path)?;
+    let has_lock = lock_path.is_file();
+    let mut lock = if has_lock {
+        lockfile::load(&lock_path)?
+    } else {
+        lockfile::Lockfile::default()
+    };
     let Some(entry) = lock.skills.get(name).cloned() else {
-        anyhow::bail!("skill `{name}` is not recorded in the lock");
+        let agent_dirs = project_agent_dirs(app, global)?;
+        let mut recovery =
+            legacy_skill_recovery(app, global, Some(name), &lock.skills, &agent_dirs);
+        if let Some(hints) = recovery.remove(name) {
+            anyhow::bail!("{}", hints.join("\n"));
+        }
+        let installed_paths = installed_skill_paths(&agent_dirs, name);
+        if !installed_paths.is_empty() {
+            anyhow::bail!("{}", unlocked_skill_message(name, &installed_paths));
+        }
+        if has_lock {
+            anyhow::bail!("skill `{name}` is not recorded in the lock");
+        }
+        anyhow::bail!("no lockfile; nothing to remove");
     };
 
     let scope_root = scope_root(app, global)?;
@@ -332,6 +571,23 @@ fn unlink_agents(
     scope_root: &Path,
     global: bool,
 ) -> Result<bool> {
+    let plan = plan_agent_unlinks(remove_from, remaining, scope_root, global)?;
+    let mut removed_any = false;
+    for step in &plan {
+        if !step.physically_unlink || install::unlink_from(&step.dir(scope_root, global)?, name)? {
+            removed_any = true;
+            step.report(name);
+        }
+    }
+    Ok(removed_any)
+}
+
+fn plan_agent_unlinks(
+    remove_from: &[String],
+    remaining: &[String],
+    scope_root: &Path,
+    global: bool,
+) -> Result<Vec<UnlinkStep>> {
     let mut dir_of: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
     for agent_id in remove_from.iter().chain(remaining.iter()) {
         let Some(target) = agent_target(agent_id) else {
@@ -344,31 +600,7 @@ fn unlink_agents(
         let canonical = dir.canonicalize().unwrap_or(dir);
         dir_of.insert(agent_id.clone(), canonical);
     }
-    let plan = plan_unlinks(remove_from, remaining, &dir_of);
-
-    let mut removed_any = false;
-    for step in &plan {
-        if step.physically_unlink {
-            let dir = agent_dir(
-                agent_target(&step.agent).expect("planned agent exists"),
-                scope_root,
-                global,
-            )?;
-            if install::unlink_from(&dir, name)? {
-                removed_any = true;
-                println!("removed `{name}` from {}", step.agent);
-            }
-        } else {
-            // A remaining agent shares this directory, or another removed agent
-            // already unlinked it: keep the files, only drop ownership in lock.
-            removed_any = true;
-            println!(
-                "unlinked `{name}` from {} (shared dir kept for other agents)",
-                step.agent
-            );
-        }
-    }
-    Ok(removed_any)
+    Ok(plan_unlinks(remove_from, remaining, &dir_of))
 }
 
 /// The agents the project now declares for `name`, when it declares any.
@@ -386,27 +618,18 @@ fn declared_agents(app: &App, name: &str) -> Option<Vec<String>> {
     (!agents.is_empty()).then(|| agents.clone())
 }
 
-/// Bring a locked skill's agents in line with its declaration.
-///
-/// `update` only ever re-resolved the source, so editing `agents` in osdk.toml
-/// (dropping `claude-code`, say) changed nothing: the lock kept the old list
-/// and the skill stayed installed where the project no longer asks for it.
-/// Dropped agents are unlinked the way `remove --agent` does it; added ones
-/// get the copy the lock already pins. Returns whether the lock changed.
-async fn reconcile_declared_agents(
+/// Prepare a replacement for the final set of agents, or use the locked
+/// bytes for newly declared agents. Dropped agents join the same transaction.
+async fn prepare_skill_targets<'a>(
     app: &App,
-    lock: &mut lockfile::Lockfile,
-    name: &str,
+    name: &'a str,
+    entry: &mut LockedSkill,
     scope_root: &Path,
     global: bool,
     mode: LinkMode,
-) -> Result<bool> {
-    let Some(declared) = declared_agents(app, name) else {
-        return Ok(false);
-    };
-    let Some(entry) = lock.skills.get(name).cloned() else {
-        return Ok(false);
-    };
+    replacement: Option<PathBuf>,
+) -> Result<(install::SkillTargetChanges<'a>, Vec<UnlinkStep>)> {
+    let declared = declared_agents(app, name).unwrap_or_else(|| entry.agents.clone());
     let removed: Vec<String> = entry
         .agents
         .iter()
@@ -418,59 +641,200 @@ async fn reconcile_declared_agents(
         .filter(|agent| !entry.agents.contains(agent))
         .cloned()
         .collect();
-    if removed.is_empty() && added.is_empty() {
-        return Ok(false);
-    }
     for agent in &added {
         agent_target(agent).with_context(|| {
             format!("unknown agent `{agent}` (run `osdk skills agents` for the list)")
         })?;
     }
 
-    if !removed.is_empty() {
-        let kept: Vec<String> = entry
-            .agents
-            .iter()
-            .filter(|agent| declared.contains(agent))
-            .cloned()
-            .collect();
-        unlink_agents(name, &removed, &kept, scope_root, global)?;
-    }
-    if !added.is_empty() {
-        let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
-        if !staged.exists() {
-            staged = refetch_staged(app, name, &entry, mode)
-                .await?
-                .with_context(|| {
-                    format!("skill `{name}` has no staged copy to install for the added agents")
-                })?;
+    let installation = match replacement {
+        Some(staged) => Some((&declared, staged)),
+        None if !added.is_empty() => {
+            let mut staged =
+                install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
+            if !staged.exists() {
+                staged = refetch_staged(app, name, entry, mode)
+                    .await?
+                    .with_context(|| {
+                        format!("skill `{name}` has no staged copy to install for the added agents")
+                    })?;
+            }
+            Some((&added, staged))
         }
-        let targets = added
+        None => None,
+    };
+    let mut changes = install::SkillTargetChanges::new(name)?;
+    if let Some((agents, staged)) = installation {
+        let targets = agents
             .iter()
             .filter_map(|agent| agent_target(agent))
             .collect::<Vec<_>>();
         for agent_dir in agent_dirs_by_path(&targets, scope_root, global)?.keys() {
-            install::link_into(agent_dir, name, &staged, mode)?;
+            changes.replace(agent_dir, &staged, mode)?;
         }
     }
-    if let Some(existing) = lock.skills.get_mut(name) {
-        existing.agents = declared.clone();
+    let mut unlinks = Vec::new();
+    if !removed.is_empty() {
+        for step in plan_agent_unlinks(&removed, &declared, scope_root, global)? {
+            if !step.physically_unlink || changes.remove(&step.dir(scope_root, global)?)? {
+                unlinks.push(step);
+            }
+        }
     }
-    println!("`{name}`: agents now {}", declared.join(", "));
-    Ok(true)
+    if !removed.is_empty() || !added.is_empty() {
+        entry.agents = declared;
+    }
+    Ok((changes, unlinks))
 }
 
-/// Reproduce every skill the lock declares (the counterpart to `add`).
-async fn sync(app: &mut App, global: bool) -> Result<()> {
+fn platform_exclusion(app: &App, declaration: &SkillDeclaration) -> Option<String> {
+    declaration
+        .when
+        .as_ref()
+        .filter(|filter| !filter.matches(&app.ctx.platform))
+        .map(|filter| filter.describe())
+}
+
+fn skipped_skill_message(subject: &str, name: &str, reason: &str) -> String {
+    format!("skipping {subject} `{name}`: its `when` filter excludes this platform ({reason})")
+}
+
+fn report_skipped_locked(name: &str, reason: &str) {
+    println!(
+        "{}; keeping its lock entry",
+        skipped_skill_message("locked skill", name, reason)
+    );
+}
+
+async fn prepare_declared_skill(
+    app: &App,
+    name: &str,
+    declaration: &SkillDeclaration,
+    scope_root: &Path,
+    global: bool,
+) -> Result<SkillInstallation> {
+    skills::validate_skill_name(name)?;
+    if declaration.endpoint.is_some() {
+        anyhow::bail!("`[skills.{name}].endpoint` is not supported yet");
+    }
+    let targets = resolve_agents(app, &declaration.agents, scope_root, global).with_context(|| {
+        format!("selecting target agents for `[skills.{name}]`; set its `agents` to choose explicitly")
+    })?;
+    let target_dirs = agent_dirs_by_path(&targets, scope_root, global)?;
+    let mode = match app.ctx.config.skills_defaults.link_mode.as_deref() {
+        Some(configured) => configured.parse()?,
+        None if target_dirs.len() == 1 => LinkMode::Copy,
+        None => LinkMode::Auto,
+    };
+    let selector = declaration.skill.as_deref().unwrap_or(name);
+    let source = resolve_source(
+        app,
+        &declaration.source,
+        declaration.source_dir.as_deref(),
+        &[selector.to_string()],
+        declaration.r#ref.as_deref(),
+    )
+    .await?;
+    if source.roots.len() != 1 {
+        anyhow::bail!(
+            "expected one skill for selector `{selector}` in {}",
+            source.canonical
+        );
+    }
+    SkillInstallation::prepare(source, targets, target_dirs, mode, Some((name, selector)))
+}
+
+fn report_declaration_changes(
+    app: &App,
+    name: &str,
+    declaration: &SkillDeclaration,
+    entry: &LockedSkill,
+    flag: &str,
+) {
+    let source_matches = SkillSource::parse(&declaration.source)
+        .is_ok_and(|source| source.canonical() == entry.source);
+    if !source_matches
+        || declaration.skill.as_deref().unwrap_or(name) != entry.skill.as_deref().unwrap_or(name)
+    {
+        println!(
+            "skill `{name}`: source or skill selection differs from osdk.lock; using the lock. \
+             To replace it, run `osdk skills remove {name}{flag}` then `osdk skills sync{flag}`."
+        );
+    }
+    let ref_changed = entry.resolved_commit.is_some()
+        && normalized_requested_ref(declaration.r#ref.as_deref()).as_deref()
+            != Some(entry.requested_ref.as_deref().unwrap_or("default"));
+    let agents_changed = declared_agents(app, name).is_some_and(|agents| {
+        agents.iter().any(|agent| !entry.agents.contains(agent))
+            || entry.agents.iter().any(|agent| !agents.contains(agent))
+    });
+    if ref_changed || agents_changed {
+        println!(
+            "skill `{name}`: ref or agents differ from osdk.lock; using the lock. \
+             Run `osdk skills update {name}{flag}` to apply the change."
+        );
+    }
+}
+
+/// Install missing declarations, then reproduce the skills that were already locked.
+async fn sync(app: &App, global: bool) -> Result<()> {
     let lock_path = lock_path_for(app, global);
-    if !lock_path.is_file() {
-        println!("No lockfile; nothing to sync.");
+    let has_lock = lock_path.is_file();
+    let skills = if has_lock {
+        lockfile::load(&lock_path)?.skills
+    } else {
+        BTreeMap::new()
+    };
+    let declarations = &app.ctx.config.skills;
+    let flag = if global { " -g" } else { "" };
+    let mut pending = Vec::new();
+    for (name, declaration) in declarations
+        .iter()
+        .filter(|(name, _)| !skills.contains_key(*name))
+    {
+        if let Some(reason) = platform_exclusion(app, declaration) {
+            println!("{}", skipped_skill_message("declaration", name, &reason));
+        } else {
+            pending.push((name, declaration));
+        }
+    }
+    if pending.is_empty() && skills.is_empty() {
+        if has_lock {
+            println!("No skills in the lock; nothing to sync.");
+        } else {
+            println!("No lockfile; nothing to sync.");
+        }
         return Ok(());
     }
-    let skills = lockfile::load(&lock_path)?.skills;
-    if skills.is_empty() {
-        println!("No skills in the lock; nothing to sync.");
+
+    let scope_root = scope_root(app, global)?;
+    let mut installations = Vec::new();
+    for (name, declaration) in pending {
+        let installation = prepare_declared_skill(app, name, declaration, &scope_root, global)
+            .await
+            .with_context(|| format!("preparing skill `{name}` from project config"))?;
+        installations.push(installation);
+    }
+    for installation in &installations {
+        installation.preview();
+    }
+    if installations
+        .iter()
+        .any(SkillInstallation::replaces_existing_skill)
+        && !app
+            .prompt
+            .confirm("Replace existing unlocked skill files?")
+            .context("move the existing skill directories aside before syncing to keep them")?
+    {
+        println!("Installation cancelled.");
         return Ok(());
+    }
+    let mut entries = Vec::new();
+    for installation in installations {
+        entries.extend(installation.install(app)?);
+    }
+    if !entries.is_empty() {
+        write_lock_entries(&lock_path, entries)?;
     }
 
     // Reproduce each skill from its staged copy. When the copy is gone, a GitHub
@@ -478,10 +842,23 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
     // is then re-checked so a moved tag or a tampered mirror cannot silently swap
     // the bytes. A local source that has lost its staged copy cannot be replayed
     // (its origin path may be gone), so it is reported rather than guessed at.
-    let scope_root = scope_root(app, global)?;
     let fallback_mode = link_mode(app, false);
     let mut missing = Vec::new();
     for (name, entry) in &skills {
+        match declarations.get(name) {
+            Some(declaration) => {
+                if let Some(reason) = platform_exclusion(app, declaration) {
+                    report_skipped_locked(name, &reason);
+                    continue;
+                }
+                report_declaration_changes(app, name, declaration, entry, flag);
+            }
+            None if !declarations.is_empty() => println!(
+                "skill `{name}` is locked without a declaration in osdk.toml; using the lock. \
+                 Run `osdk skills remove {name}{flag}` to remove it."
+            ),
+            None => {}
+        }
         let mode = install_mode_for_entry(entry, name, &scope_root, global, fallback_mode)?;
         let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
         if !staged.exists() {
@@ -563,149 +940,164 @@ async fn refetch_staged(
 
 /// Update installed skills to the latest resolution of their source.
 ///
-/// For each targeted skill, re-resolve its GitHub source's ref to the current
-/// commit; if that differs from the lock, re-download, re-stage, re-link the
-/// agents it was in, and rewrite the lock. Local sources and commit-pinned
-/// GitHub sources have nothing to re-resolve and are reported as up to date.
+/// Resolve and stage changes to a GitHub source before changing agent
+/// directories. Local skills and GitHub skills that keep their current commit
+/// can still update their agent list.
 async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
+    let exclusion = |name: &str| {
+        app.ctx
+            .config
+            .skills
+            .get(name)
+            .and_then(|declaration| platform_exclusion(app, declaration))
+    };
+    for name in wanted {
+        if let Some(reason) = exclusion(name) {
+            anyhow::bail!("skill `{name}` is not available on this platform ({reason})");
+        }
+    }
+
     let lock_path = lock_path_for(app, global);
     if !lock_path.is_file() {
         println!("No lockfile; nothing to update.");
         return Ok(());
     }
     let mut lock = lockfile::load(&lock_path)?;
-    let names: Vec<String> = if wanted.is_empty() {
-        lock.skills.keys().cloned().collect()
+    let candidates: Vec<_> = if wanted.is_empty() {
+        lock.skills
+            .keys()
+            .map(|name| (name.clone(), exclusion(name)))
+            .collect()
     } else {
-        wanted.to_vec()
+        wanted.iter().map(|name| (name.clone(), None)).collect()
     };
-    if names.is_empty() {
+    if candidates.is_empty() {
         println!("No skills in the lock to update.");
         return Ok(());
     }
 
     let scope_root = scope_root(app, global)?;
     let fallback_mode = link_mode(app, false);
-    let mut changed = false;
-    for name in &names {
-        let Some(entry) = lock.skills.get(name).cloned() else {
+    for (name, reason) in &candidates {
+        if let Some(reason) = reason {
+            report_skipped_locked(name, reason);
+            continue;
+        }
+        let Some(locked) = lock.skills.get(name) else {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
-        let mode = install_mode_for_entry(&entry, name, &scope_root, global, fallback_mode)?;
-        if reconcile_declared_agents(app, &mut lock, name, &scope_root, global, mode).await? {
-            changed = true;
-        }
-        // Re-read: the re-link below must target the agents now declared.
-        let entry = lock.skills.get(name).cloned().expect("entry checked above");
-        let source = SkillSource::parse(&entry.source)?;
-        let SkillSource::GitHub {
-            owner,
-            repo,
-            subdir,
-        } = &source
-        else {
-            println!("`{name}`: local source, nothing to update");
-            continue;
-        };
-        // New locks carry the user's request independently from the immutable
-        // commit. Legacy locks fall back to project configuration for migration.
-        let configured_reference = app
-            .ctx
-            .config
-            .skills
-            .get(name)
-            .map(|declaration| declaration.r#ref.as_deref());
-        let requested_reference = configured_reference.unwrap_or(entry.requested_ref.as_deref());
-        let reference = match reference_for_update(requested_reference) {
-            UpdateReference::Pinned(reference) => {
-                let requested_ref = normalized_requested_ref(Some(reference));
-                if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
-                    if let Some(existing) = lock.skills.get_mut(name) {
-                        existing.requested_ref = requested_ref;
-                        existing.install_mode = Some(mode);
-                    }
-                    changed = true;
-                    println!("`{name}`: pinned at {reference}; migrated lock metadata");
-                } else {
-                    println!("`{name}`: pinned at {reference}; nothing to update");
-                }
-                continue;
+        let mode = install_mode_for_entry(locked, name, &scope_root, global, fallback_mode)?;
+        let mut entry = locked.clone();
+        let (replacement, message) = resolve_skill_update(app, name, &mut entry, mode).await?;
+        let (targets, unlinks) = prepare_skill_targets(
+            app,
+            name,
+            &mut entry,
+            &scope_root,
+            global,
+            mode,
+            replacement,
+        )
+        .await?;
+        if &entry != locked {
+            let agents_changed = entry.agents != locked.agents;
+            lock.skills.insert(name.clone(), entry);
+            // Save each skill before discarding its backups. A later skill can
+            // fail independently, even when one invocation updates several.
+            targets.apply(|| lockfile::save_before_directory_sync(&lock_path, &lock))?;
+            // A directory sync error occurs after the lock has been replaced.
+            lockfile::sync_directory(&lock_path)?;
+            for step in &unlinks {
+                step.report(name);
             }
-            UpdateReference::Resolve(reference) => reference,
-        };
-        let commit = skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
-            .await
-            .with_context(|| format!("re-resolving {owner}/{repo}"))?;
-        if Some(&commit) == entry.resolved_commit.as_ref() {
-            let requested_ref = normalized_requested_ref(requested_reference);
-            if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
-                if let Some(existing) = lock.skills.get_mut(name) {
-                    existing.requested_ref = requested_ref;
-                    existing.install_mode = Some(mode);
-                }
-                changed = true;
+            if agents_changed {
                 println!(
-                    "`{name}`: already at {}, migrated lock metadata",
-                    &commit[..commit.len().min(12)]
+                    "`{name}`: agents now {}",
+                    lock.skills[name].agents.join(", ")
                 );
-            } else {
-                println!("`{name}`: already at {}", &commit[..commit.len().min(12)]);
             }
-            continue;
         }
-
-        let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
-        let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
-        let wanted_dir = entry.skill.as_deref().unwrap_or(name);
-        let skill_root = recorded_skill_root(&root, wanted_dir)?;
-        let package = install::read_skill_dir(&skill_root)?;
-        let content_hash = package.content_hash();
-        let requested_ref = normalized_requested_ref(requested_reference);
-        if content_hash == entry.content_hash {
-            if let Some(existing) = lock.skills.get_mut(name) {
-                existing.requested_ref = requested_ref;
-                existing.resolved_commit = Some(commit.clone());
-                existing.install_mode = Some(mode);
-            }
-            changed = true;
-            println!(
-                "`{name}`: source advanced to {}, skill content unchanged",
-                &commit[..commit.len().min(12)]
-            );
-            continue;
-        }
-
-        let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
-        let targets = entry
-            .agents
-            .iter()
-            .filter_map(|agent_id| agent_target(agent_id))
-            .collect::<Vec<_>>();
-        for agent_dir in agent_dirs_by_path(&targets, &scope_root, global)?.keys() {
-            install::link_into(agent_dir, name, &staged, mode)?;
-        }
-        if let Some(existing) = lock.skills.get_mut(name) {
-            existing.requested_ref = requested_ref;
-            existing.resolved_commit = Some(commit.clone());
-            existing.content_hash = content_hash;
-            existing.install_mode = Some(mode);
-        }
-        changed = true;
-        println!("`{name}`: updated to {}", &commit[..commit.len().min(12)]);
-    }
-
-    if changed {
-        lockfile::save(&lock_path, &lock)?;
+        println!("`{name}`: {message}");
     }
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateReference<'a> {
-    /// Re-resolve the default branch or this floating branch/tag name.
-    Resolve(Option<&'a str>),
-    /// An explicitly immutable `rev:` selector never advances.
-    Pinned(&'a str),
+async fn resolve_skill_update(
+    app: &App,
+    name: &str,
+    entry: &mut LockedSkill,
+    mode: LinkMode,
+) -> Result<(Option<PathBuf>, String)> {
+    let source = SkillSource::parse(&entry.source)?;
+    let SkillSource::GitHub {
+        owner,
+        repo,
+        subdir,
+    } = &source
+    else {
+        return Ok((None, "local source, nothing to update".into()));
+    };
+    // New locks carry the user's request independently from the immutable
+    // commit. Legacy locks fall back to project configuration for migration.
+    let configured_reference = app
+        .ctx
+        .config
+        .skills
+        .get(name)
+        .map(|declaration| declaration.r#ref.as_deref());
+    let requested_reference = configured_reference.unwrap_or(entry.requested_ref.as_deref());
+    let reference = reference_for_update(requested_reference);
+    let requested_ref = normalized_requested_ref(requested_reference);
+    // An abbreviated pin can reuse a resolution made for that same request.
+    let pinned_commit = reference.and_then(|reference| reference.strip_prefix("rev:"));
+    let commit = match &entry.resolved_commit {
+        Some(commit)
+            if pinned_commit.is_some_and(|pin| {
+                pin.eq_ignore_ascii_case(commit)
+                    || (entry.requested_ref == requested_ref
+                        && !pin.is_empty()
+                        && commit
+                            .get(..pin.len())
+                            .is_some_and(|prefix| pin.eq_ignore_ascii_case(prefix)))
+            }) =>
+        {
+            commit.clone()
+        }
+        _ => skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
+            .await
+            .with_context(|| format!("re-resolving {owner}/{repo}"))?,
+    };
+    let short_commit = &commit[..commit.len().min(12)];
+    if Some(&commit) == entry.resolved_commit.as_ref() {
+        let mut message = format!("already at {short_commit}");
+        if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
+            entry.requested_ref = requested_ref;
+            entry.install_mode = Some(mode);
+            message.push_str(", migrated lock metadata");
+        }
+        return Ok((None, message));
+    }
+
+    let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
+    let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
+    let wanted_dir = entry.skill.as_deref().unwrap_or(name);
+    let skill_root = recorded_skill_root(&root, wanted_dir)?;
+    let package = install::read_skill_dir(&skill_root)?;
+    let content_hash = package.content_hash();
+    let (replacement, message) = if content_hash != entry.content_hash {
+        let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
+        (Some(staged), format!("updated to {short_commit}"))
+    } else {
+        (
+            None,
+            format!("source advanced to {short_commit}, skill content unchanged"),
+        )
+    };
+    entry.requested_ref = requested_ref;
+    entry.resolved_commit = Some(commit);
+    entry.content_hash = content_hash;
+    entry.install_mode = Some(mode);
+    Ok((replacement, message))
 }
 
 /// Interpret a declaration ref for an explicit `skills update`.
@@ -716,17 +1108,15 @@ enum UpdateReference<'a> {
 /// declarations through the unambiguous `rev:` spelling;
 /// every other selector is a moving update target, while a bare 40-hex snapshot
 /// follows the source's default branch for backward compatibility.
-fn reference_for_update(reference: Option<&str>) -> UpdateReference<'_> {
+fn reference_for_update(reference: Option<&str>) -> Option<&str> {
     match reference.map(str::trim).filter(|value| !value.is_empty()) {
-        Some("default") => UpdateReference::Resolve(None),
-        Some(reference) if reference.starts_with("rev:") => UpdateReference::Pinned(reference),
+        Some("default") => None,
         Some(reference)
             if reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
         {
-            UpdateReference::Resolve(None)
+            None
         }
-        Some(reference) => UpdateReference::Resolve(Some(reference)),
-        None => UpdateReference::Resolve(None),
+        reference => reference,
     }
 }
 
@@ -1025,9 +1415,8 @@ fn resolve_agent_ids(
     }
     if !prompt.is_interactive() {
         anyhow::bail!(
-            "no target agent in this non-interactive session: pass -a/--agent \
-             (e.g. -a claude-code), set [skills].default_agents in osdk.toml, \
-             or pass --yes to accept detected agents"
+            "no target agent in this non-interactive session: set [skills].default_agents \
+             in osdk.toml or pass --yes to accept the recommended targets"
         );
     }
 
@@ -1163,8 +1552,8 @@ fn agent_dirs_by_path(
     targets: &[&'static AgentTarget],
     scope_root: &Path,
     global: bool,
-) -> Result<std::collections::BTreeMap<PathBuf, Vec<&'static AgentTarget>>> {
-    let mut dirs = std::collections::BTreeMap::new();
+) -> Result<AgentDirs> {
+    let mut dirs = BTreeMap::new();
     for target in targets {
         dirs.entry(agent_dir(target, scope_root, global)?)
             .or_insert_with(Vec::new)
@@ -1296,35 +1685,29 @@ fn agent_dir(target: &AgentTarget, scope_root: &Path, global: bool) -> Result<Pa
     }
 }
 
-/// The lockfile path for the chosen scope: the user lock for global, else the
-/// nearest project lock (creating its path at the project root when absent).
+/// The lockfile path for the chosen scope. With a selected project, use the
+/// lock that belongs to its config, even if only an ancestor has a lock.
 fn lock_path_for(app: &App, global: bool) -> PathBuf {
     if global {
         app.ctx.dirs.user_lock_file()
+    } else if let Some(project) = &app.ctx.config.project {
+        project.lock_path.clone()
     } else {
-        let start = app
-            .ctx
-            .config
-            .project_config_path
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         lockfile::default_path(&start)
     }
 }
 
-fn write_lock_entries(app: &App, global: bool, entries: Vec<(String, LockedSkill)>) -> Result<()> {
-    let lock_path = lock_path_for(app, global);
+fn write_lock_entries(lock_path: &Path, entries: Vec<(String, LockedSkill)>) -> Result<()> {
     let mut lock = if lock_path.is_file() {
-        lockfile::load(&lock_path)?
+        lockfile::load(lock_path)?
     } else {
         lockfile::Lockfile::default()
     };
     for (name, entry) in entries {
         lock.skills.insert(name, entry);
     }
-    lockfile::save(&lock_path, &lock)?;
+    lockfile::save(lock_path, &lock)?;
     Ok(())
 }
 
@@ -1347,6 +1730,27 @@ fn home_dir() -> Result<PathBuf> {
 struct UnlinkStep {
     agent: String,
     physically_unlink: bool,
+}
+
+impl UnlinkStep {
+    fn dir(&self, scope_root: &Path, global: bool) -> Result<PathBuf> {
+        agent_dir(
+            agent_target(&self.agent).expect("planned agent exists"),
+            scope_root,
+            global,
+        )
+    }
+
+    fn report(&self, name: &str) {
+        if self.physically_unlink {
+            println!("removed `{name}` from {}", self.agent);
+        } else {
+            println!(
+                "unlinked `{name}` from {} (shared dir kept for other agents)",
+                self.agent
+            );
+        }
+    }
 }
 
 /// Decide, for each agent being removed, whether to physically unlink its skills
@@ -1757,31 +2161,22 @@ mod tests {
     #[test]
     fn update_reference_advances_bare_commit_snapshots() {
         let snapshot = "02a2f2b3142ded7d73554aaee629a24966a62313";
-        assert_eq!(
-            reference_for_update(Some(snapshot)),
-            UpdateReference::Resolve(None)
-        );
-        assert_eq!(reference_for_update(None), UpdateReference::Resolve(None));
+        assert_eq!(reference_for_update(Some(snapshot)), None);
+        assert_eq!(reference_for_update(None), None);
     }
 
     #[test]
     fn update_reference_preserves_explicit_pins_and_floating_refs() {
         assert_eq!(
             reference_for_update(Some("rev:02a2f2b3142ded7d73554aaee629a24966a62313")),
-            UpdateReference::Pinned("rev:02a2f2b3142ded7d73554aaee629a24966a62313")
+            Some("rev:02a2f2b3142ded7d73554aaee629a24966a62313")
         );
         assert_eq!(
             reference_for_update(Some("branch:main")),
-            UpdateReference::Resolve(Some("branch:main"))
+            Some("branch:main")
         );
-        assert_eq!(
-            reference_for_update(Some("tag:v1")),
-            UpdateReference::Resolve(Some("tag:v1"))
-        );
-        assert_eq!(
-            reference_for_update(Some("release")),
-            UpdateReference::Resolve(Some("release"))
-        );
+        assert_eq!(reference_for_update(Some("tag:v1")), Some("tag:v1"));
+        assert_eq!(reference_for_update(Some("release")), Some("release"));
     }
 
     #[test]

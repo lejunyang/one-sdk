@@ -20,6 +20,7 @@ use crate::dirs::{sanitize_tool_id, sanitize_version_component, Dirs};
 use crate::error::{Error, Result};
 use crate::store::dirlink;
 use crate::store::link::LinkMode;
+use crate::store::manifest::MANIFEST_FILE;
 use crate::store::Cas;
 
 use super::{content_hash, safe_relative_path, SkillFile};
@@ -94,6 +95,15 @@ impl SkillPackage {
 /// skipped (a skill is content, not a link farm) and paths that would escape the
 /// root are rejected via [`safe_relative_path`].
 pub fn read_skill_dir(root: &Path) -> Result<SkillPackage> {
+    read_skill_package(root, None)
+}
+
+/// Hash the installed skill's files, excluding the metadata added by staging.
+pub fn installed_content_hash(root: &Path) -> Result<String> {
+    Ok(read_skill_package(root, Some(MANIFEST_FILE))?.content_hash())
+}
+
+fn read_skill_package(root: &Path, excluded_file: Option<&str>) -> Result<SkillPackage> {
     let manifest_path = root.join(SKILL_MANIFEST);
     if !manifest_path.is_file() {
         return Err(Error::config(format!(
@@ -119,6 +129,9 @@ pub fn read_skill_dir(root: &Path) -> Result<SkillPackage> {
             .strip_prefix(root)
             .map_err(|_| Error::other("skill file escaped its root"))?;
         let rel_str = safe_relative_path(&rel.to_string_lossy())?;
+        if excluded_file == Some(rel_str.as_str()) {
+            continue;
+        }
         let bytes = std::fs::read(entry.path()).map_err(|e| Error::io(entry.path(), e))?;
         total += bytes.len() as u64;
         if total > MAX_SKILL_BYTES {
@@ -222,37 +235,154 @@ pub fn stage(dirs: &Dirs, id: &str, package: &SkillPackage, mode: LinkMode) -> R
 /// activation failure restores the backup. This permits confirmed copy-mode
 /// updates without exposing a half-written destination.
 pub fn link_into(agent_skills_dir: &Path, name: &str, staged: &Path, mode: LinkMode) -> Result<()> {
-    super::validate_skill_name(name)?;
-    std::fs::create_dir_all(agent_skills_dir).map_err(|e| Error::io(agent_skills_dir, e))?;
-    let dest = agent_skills_dir.join(name);
-    let staged = dunce::canonicalize(staged).map_err(|e| Error::io(staged, e))?;
-    let canonical_parent =
-        dunce::canonicalize(agent_skills_dir).map_err(|e| Error::io(agent_skills_dir, e))?;
-    let intended_dest = canonical_parent.join(name);
+    let mut targets = SkillTargetChanges::new(name)?;
+    targets.replace(agent_skills_dir, staged, mode)?;
+    targets.apply(|| Ok(()))
+}
 
-    if let Ok(meta) = dest.symlink_metadata() {
-        if let Ok(existing) = dunce::canonicalize(&dest) {
-            if dirlink::is_link(&meta) {
-                if mode != LinkMode::Copy && existing == staged {
-                    return Ok(());
-                }
-            } else {
-                reject_overlapping_trees(&staged, &existing)?;
-            }
-        }
-    } else {
-        reject_overlapping_trees(&staged, &intended_dest)?;
+/// Prepared directory changes for one skill. Old destinations remain live until
+/// every replacement is ready, and backups are kept until the lock is saved.
+pub struct SkillTargetChanges<'a> {
+    name: &'a str,
+    targets: Vec<PreparedTarget>,
+}
+
+impl<'a> SkillTargetChanges<'a> {
+    pub fn new(name: &'a str) -> Result<Self> {
+        super::validate_skill_name(name)?;
+        Ok(Self {
+            name,
+            targets: Vec::new(),
+        })
     }
 
-    let transaction = tempfile::Builder::new()
-        .prefix(".osdk-skill-replace-")
-        .tempdir_in(agent_skills_dir)
-        .map_err(|e| Error::io(agent_skills_dir, e))?;
-    let prepared = transaction.path().join("prepared");
-    let backup = transaction.path().join("backup");
+    pub fn replace(
+        &mut self,
+        agent_skills_dir: &Path,
+        staged: &Path,
+        mode: LinkMode,
+    ) -> Result<()> {
+        std::fs::create_dir_all(agent_skills_dir).map_err(|e| Error::io(agent_skills_dir, e))?;
+        let dest = agent_skills_dir.join(self.name);
+        let staged = dunce::canonicalize(staged).map_err(|e| Error::io(staged, e))?;
+        let canonical_parent =
+            dunce::canonicalize(agent_skills_dir).map_err(|e| Error::io(agent_skills_dir, e))?;
 
-    prepare_destination(&staged, &prepared, mode)?;
-    activate_prepared(&dest, &prepared, &backup)
+        if let Ok(meta) = dest.symlink_metadata() {
+            if let Ok(existing) = dunce::canonicalize(&dest) {
+                if dirlink::is_link(&meta) {
+                    if mode != LinkMode::Copy && existing == staged {
+                        return Ok(());
+                    }
+                } else {
+                    reject_overlapping_trees(&staged, &existing)?;
+                }
+            }
+        } else {
+            reject_overlapping_trees(&staged, &canonical_parent.join(self.name))?;
+        }
+
+        let mut target = PreparedTarget::new(agent_skills_dir, dest)?;
+        let prepared = target.scratch.path().join("prepared");
+        prepare_destination(&staged, &prepared, mode)?;
+        target.prepared = Some(prepared);
+        self.targets.push(target);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, agent_skills_dir: &Path) -> Result<bool> {
+        use std::io::ErrorKind::{NotADirectory, NotFound};
+
+        let dest = agent_skills_dir.join(self.name);
+        match dest.symlink_metadata() {
+            Ok(_) => self
+                .targets
+                .push(PreparedTarget::new(agent_skills_dir, dest)?),
+            Err(error) if matches!(error.kind(), NotFound | NotADirectory) => return Ok(false),
+            Err(error) => return Err(Error::io(&dest, error)),
+        }
+        Ok(true)
+    }
+
+    /// Activate all prepared changes, then persist their metadata. A failure
+    /// reverses every completed rename, including those for removed targets.
+    pub fn apply<E>(
+        self,
+        persist: impl FnOnce() -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E>
+    where
+        E: From<Error> + std::fmt::Display,
+    {
+        let mut renames = Vec::new();
+        let result = self
+            .targets
+            .iter()
+            .try_for_each(|target| target.activate(&mut renames))
+            .map_err(E::from)
+            .and_then(|()| persist());
+        if let Err(error) = result {
+            let restore_errors: Vec<_> = renames
+                .into_iter()
+                .rev()
+                .filter_map(|(from, to)| {
+                    std::fs::rename(to, from).err().map(|err| {
+                        format!("restoring {} from {}: {err}", from.display(), to.display())
+                    })
+                })
+                .collect();
+            if !restore_errors.is_empty() {
+                // Leave the backups available if the filesystem refused to restore them.
+                for target in self.targets {
+                    let _ = target.scratch.keep();
+                }
+                return Err(Error::other(format!("{error}; {}", restore_errors.join("; "))).into());
+            }
+            return Err(error);
+        }
+        for target in self.targets {
+            let _ = remove_path_if_exists(&target.backup);
+        }
+        Ok(())
+    }
+}
+
+struct PreparedTarget {
+    dest: PathBuf,
+    scratch: tempfile::TempDir,
+    backup: PathBuf,
+    prepared: Option<PathBuf>,
+}
+
+impl PreparedTarget {
+    fn new(parent: &Path, dest: PathBuf) -> Result<Self> {
+        let scratch = tempfile::Builder::new()
+            .prefix(".osdk-skill-replace-")
+            .tempdir_in(parent)
+            .map_err(|e| Error::io(parent, e))?;
+        let backup = scratch.path().join("backup");
+        Ok(Self {
+            dest,
+            scratch,
+            backup,
+            prepared: None,
+        })
+    }
+
+    fn activate<'a>(&'a self, renames: &mut Vec<(&'a Path, &'a Path)>) -> Result<()> {
+        match self.dest.symlink_metadata() {
+            Ok(_) => {
+                std::fs::rename(&self.dest, &self.backup).map_err(|e| Error::io(&self.dest, e))?;
+                renames.push((&self.dest, &self.backup));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(&self.dest, error)),
+        }
+        if let Some(prepared) = &self.prepared {
+            std::fs::rename(prepared, &self.dest).map_err(|e| Error::io(&self.dest, e))?;
+            renames.push((prepared, &self.dest));
+        }
+        Ok(())
+    }
 }
 
 /// Reject a source tree that is also the install destination (or contains it).
@@ -309,33 +439,6 @@ fn prepare_destination(staged: &Path, prepared: &Path, mode: LinkMode) -> Result
             copy_tree(staged, prepared)
         }
     }
-}
-
-fn activate_prepared(dest: &Path, prepared: &Path, backup: &Path) -> Result<()> {
-    let had_destination = dest.symlink_metadata().is_ok();
-    if had_destination {
-        std::fs::rename(dest, backup).map_err(|e| Error::io(dest, e))?;
-    }
-
-    if let Err(install_error) = std::fs::rename(prepared, dest) {
-        if had_destination {
-            if let Err(restore_error) = std::fs::rename(backup, dest) {
-                return Err(Error::other(format!(
-                    "activating skill at {} failed: {install_error}; restoring the previous directory also failed: {restore_error}",
-                    dest.display()
-                )));
-            }
-        }
-        return Err(Error::io(dest, install_error));
-    }
-
-    if had_destination {
-        // The new destination is already live. Cleanup is best-effort: reporting
-        // failure here would leave callers with the new bytes but the old lock.
-        // TempDir drop retries removal of any leftover transaction directory.
-        let _ = remove_path_if_exists(backup);
-    }
-    Ok(())
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<()> {
@@ -698,21 +801,69 @@ mod tests {
     }
 
     #[test]
-    fn activation_failure_restores_the_previous_directory() {
+    fn later_activation_failure_restores_replaced_and_removed_targets() {
         let temp = tempfile::tempdir().unwrap();
-        let destination = temp.path().join("mine");
-        let prepared = temp.path().join("missing-prepared");
-        let backup = temp.path().join("backup");
-        std::fs::create_dir_all(&destination).unwrap();
-        std::fs::write(destination.join("keep.txt"), "old data").unwrap();
+        let codex = temp.path().join(".agents/skills");
+        let dropped = temp.path().join("dropped/skills");
+        let claude = temp.path().join(".claude/skills");
+        let staged = temp.path().join("staged");
+        for dir in [&codex, &dropped, &claude] {
+            write(&dir.join("mine"), "SKILL.md", "old data");
+        }
+        write(&staged, "SKILL.md", "new data");
+        let mut targets = SkillTargetChanges::new("mine").unwrap();
+        targets.replace(&codex, &staged, LinkMode::Copy).unwrap();
+        assert!(targets.remove(&dropped).unwrap());
+        targets.replace(&claude, &staged, LinkMode::Auto).unwrap();
 
-        let error = activate_prepared(&destination, &prepared, &backup).unwrap_err();
-        assert!(error.to_string().contains("io error"));
+        // Fail the second replacement after its old directory was moved aside.
+        remove_path_if_exists(targets.targets[2].prepared.as_ref().unwrap()).unwrap();
+        let error = targets
+            .apply::<Error>(|| panic!("a failed activation must not save the lock"))
+            .unwrap_err();
+        assert!(matches!(error, Error::Io { path, .. } if path == claude.join("mine")));
+        for dir in [codex, dropped, claude] {
+            assert_eq!(
+                std::fs::read_to_string(dir.join("mine/SKILL.md")).unwrap(),
+                "old data"
+            );
+            assert_eq!(std::fs::read_dir(dir).unwrap().count(), 1);
+        }
         assert_eq!(
-            std::fs::read_to_string(destination.join("keep.txt")).unwrap(),
+            std::fs::read_to_string(staged.join("SKILL.md")).unwrap(),
+            "new data"
+        );
+    }
+
+    #[test]
+    fn lock_save_failure_restores_existing_target_and_removes_new_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp.path().join(".agents/skills");
+        let claude = temp.path().join(".claude/skills");
+        let staged = temp.path().join("staged");
+        write(&codex.join("mine"), "SKILL.md", "old data");
+        write(&staged, "SKILL.md", "new data");
+        let mut targets = SkillTargetChanges::new("mine").unwrap();
+        targets.replace(&codex, &staged, LinkMode::Copy).unwrap();
+        targets.replace(&claude, &staged, LinkMode::Auto).unwrap();
+
+        let error = targets
+            .apply(|| {
+                for dir in [&codex, &claude] {
+                    assert_eq!(
+                        std::fs::read_to_string(dir.join("mine/SKILL.md")).unwrap(),
+                        "new data"
+                    );
+                }
+                Err(Error::other("could not save lock"))
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "could not save lock");
+        assert_eq!(
+            std::fs::read_to_string(codex.join("mine/SKILL.md")).unwrap(),
             "old data"
         );
-        assert!(!backup.exists());
+        assert_eq!(std::fs::read_dir(&claude).unwrap().count(), 0);
     }
 
     #[test]

@@ -95,19 +95,63 @@ fn located(path: &Path, text: &str, error: &toml::de::Error) -> String {
     format!("{}:{line}:{column}", path.display())
 }
 
+pub(super) struct LoadedConfig {
+    pub value: toml::Value,
+    #[cfg(feature = "install")]
+    pub skill_source_dirs: std::collections::BTreeMap<String, PathBuf>,
+}
+
+impl LoadedConfig {
+    #[cfg(feature = "install")]
+    fn record_skill_source_dirs(&mut self, layer: &toml::Value, base: &Path) {
+        if let Some(skills) = layer.get("skills").and_then(toml::Value::as_table) {
+            for (name, declaration) in skills {
+                if declaration.get("source").is_some() {
+                    self.skill_source_dirs
+                        .insert(name.clone(), base.to_path_buf());
+                }
+            }
+        }
+    }
+}
+
 pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
+    Ok(load_with_skill_sources(path, rel_base)?.value)
+}
+
+pub(super) fn load_with_skill_sources(
+    path: &Path,
+    rel_base: Option<&Path>,
+) -> Result<LoadedConfig> {
     let direct = raw(path)?;
+    let mut config = LoadedConfig {
+        value: toml::Value::Table(Default::default()),
+        #[cfg(feature = "install")]
+        skill_source_dirs: Default::default(),
+    };
     if direct.get("extends").is_none() {
-        return Ok(direct);
+        #[cfg(feature = "install")]
+        config
+            .record_skill_source_dirs(&direct, rel_base.unwrap_or_else(|| path.parent().unwrap()));
+        config.value = direct;
+        return Ok(config);
     }
     let chain = sources(path, rel_base)?;
     let inherited = chain.len() > 1;
-    let mut value = toml::Value::Table(Default::default());
     let anchor = chain[0].parent().unwrap().to_path_buf();
     let leaf = chain[chain.len() - 1].clone();
     for source in chain {
         let mut layer = raw(&source)?;
         layer.as_table_mut().unwrap().remove("extends");
+        // Only the external leaf uses a logical base. Inherited sources
+        // resolve relative paths against the file that supplied them.
+        let layer_base = if source == leaf {
+            rel_base.unwrap_or_else(|| source.parent().unwrap())
+        } else {
+            source.parent().unwrap()
+        };
+        #[cfg(feature = "install")]
+        config.record_skill_source_dirs(&layer, layer_base);
         if inherited {
             if let Some(tools) = layer.get_mut("tools").and_then(toml::Value::as_table_mut) {
                 for (_, entry) in tools.iter_mut() {
@@ -120,16 +164,7 @@ pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
                     }
                 }
             }
-            // The leaf layer's relative paths are written against the logical
-            // base (real project root), not the bundle's physical directory.
-            let layer_base = if source == leaf {
-                rel_base
-                    .map(|b| b.to_path_buf())
-                    .unwrap_or_else(|| source.parent().unwrap().to_path_buf())
-            } else {
-                source.parent().unwrap().to_path_buf()
-            };
-            rebase(&mut layer, &layer_base);
+            rebase(&mut layer, layer_base);
             if let Some(roots) = layer
                 .get_mut("task")
                 .and_then(|task| task.get_mut("roots"))
@@ -137,7 +172,7 @@ pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
             {
                 let logical_base = layer_base
                     .canonicalize()
-                    .map_err(|e| Error::io(&layer_base, e))?;
+                    .map_err(|e| Error::io(layer_base, e))?;
                 let prefix = logical_base
                     .strip_prefix(&anchor)
                     .map_err(|_| Error::config("task roots escape the inheritance anchor"))?
@@ -152,9 +187,9 @@ pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
                 }
             }
         }
-        merge(&mut value, layer);
+        merge(&mut config.value, layer);
     }
-    Ok(value)
+    Ok(config)
 }
 
 /// Rooted-task names are rebased to the oldest inherited config. With no

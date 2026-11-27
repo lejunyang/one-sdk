@@ -1784,6 +1784,9 @@ impl Default for ModelViewDeclaration {
 pub struct SkillDeclaration {
     /// Source reference, e.g. `github:vercel-labs/agent-skills`.
     pub source: String,
+    /// Base for reading a relative source, recorded separately from its lock identity.
+    #[serde(skip)]
+    pub source_dir: Option<PathBuf>,
     /// When the repository holds several skills, which one to install.
     pub skill: Option<String>,
     /// Version selector for the source, e.g. `branch:main` or `rev:<sha>`.
@@ -2536,11 +2539,16 @@ fn warn_unknown_top_level_keys(path: &Path, value: &toml::Value) {
 }
 
 fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> {
-    let value = inheritance::load(path, rel_base)?;
-    warn_unknown_top_level_keys(path, &value);
-    let mut file: ConfigFile = value
+    let loaded = inheritance::load_with_skill_sources(path, rel_base)?;
+    warn_unknown_top_level_keys(path, &loaded.value);
+    let mut file: ConfigFile = loaded
+        .value
         .try_into()
         .map_err(|error| with_config_path(path, sanitize_config_parse_error(error)))?;
+    #[cfg(feature = "install")]
+    for (name, declaration) in &mut file.skills.entries {
+        declaration.source_dir = loaded.skill_source_dirs.get(name).cloned();
+    }
     file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
         registries.validate()?;

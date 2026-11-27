@@ -78,6 +78,14 @@ pub async fn resolve_commit(
 /// existing pipeline extractor, so a hostile or oversized repo fails closed
 /// rather than filling the disk.
 pub async fn fetch_at_commit(ctx: &Ctx, owner: &str, repo: &str, commit: &str) -> Result<PathBuf> {
+    // Archives are temporary. Callers that can replay a staged skill do so
+    // before reaching this download path.
+    if ctx.config.settings.offline {
+        return Err(Error::other(format!(
+            "offline skill archive cache miss for {owner}/{repo}@{commit} (run once without --offline)"
+        )));
+    }
+
     // codeload serves the gzipped tarball; route it through the same source
     // candidates so a configured proxy is used when the direct host is slow.
     let canonical = format!("https://github.com/{owner}/{repo}/tar.gz/{commit}");

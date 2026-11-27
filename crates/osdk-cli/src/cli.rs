@@ -1166,7 +1166,7 @@ pub enum SkillsCommand {
         /// prompts when none is configured.
         #[arg(short = 'a', long = "agent", value_name = "ID")]
         agents: Vec<String>,
-        /// Install into each agent's user-level directory instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
         /// Copy the skill into each agent directory instead of linking it.
@@ -1182,10 +1182,10 @@ pub enum SkillsCommand {
         #[arg(long = "no-lock")]
         no_lock: bool,
     },
-    /// List installed skills and the agents they are linked into.
+    /// List locked skills. Project scope also shows unlocked installation paths.
     #[command(alias = "ls")]
     List {
-        /// Inspect the user-level agent directories instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
     },
@@ -1194,7 +1194,7 @@ pub enum SkillsCommand {
     Remove {
         /// Skill name to remove.
         name: String,
-        /// Remove from user-level agent directories instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
         /// Limit removal to these agents (repeatable). Default: every agent that
@@ -1202,13 +1202,21 @@ pub enum SkillsCommand {
         #[arg(short = 'a', long = "agent", value_name = "ID")]
         agents: Vec<String>,
     },
-    /// Materialize every skill declared in osdk.lock (the reproduce path).
+    /// Reproduce locked skills and install missing declarations from osdk.toml.
+    ///
+    /// New installs are recorded in the lock. A declaration's `when` filter
+    /// also applies to locked skills, whose entries stay available to other platforms.
+    /// Confirm before replacing an existing unlocked skill directory. In CI
+    /// or without a terminal, pass `--yes` to approve the replacement.
     Sync {
-        /// Install into user-level agent directories instead of the project.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
     },
     /// Print the staged store path of an installed skill.
+    ///
+    /// Uses the configured scope, or checks the project then the user lock
+    /// when `[skills].scope` is unset.
     Path {
         /// Skill name.
         name: String,
@@ -1232,15 +1240,17 @@ pub enum SkillsCommand {
     },
     /// Update installed skills to the latest resolution of their source.
     ///
-    /// The counterpart to `sync`: `sync` reproduces the commit the lock records,
+    /// For an already locked skill, `sync` reproduces the commit the lock records,
     /// while `update` re-resolves the configured branch/tag (or the default
-    /// branch) and rewrites the lock. Use an explicit `rev:<commit>` declaration
-    /// to keep a skill immutable across `update`; a bare commit stored as the
-    /// installation snapshot is advanced instead.
+    /// branch) and rewrites the lock. Set `rev:<commit>` to pin a skill, or
+    /// change it to select another commit at the next update. A bare commit
+    /// stored as an installation snapshot follows the default branch.
+    /// Bulk updates skip skills whose `when` excludes the current platform.
+    /// Naming an excluded skill returns an error that describes the filter.
     Update {
         /// Skills to update by name; omit to update all.
         skills: Vec<String>,
-        /// Update only the user-level lock instead of the project lock.
+        /// Use the user-level scope, overriding `[skills].scope`.
         #[arg(short, long)]
         global: bool,
     },

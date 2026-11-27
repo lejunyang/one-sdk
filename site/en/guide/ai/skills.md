@@ -41,13 +41,17 @@ when it hits the anonymous rate limit; it **never contacts skills.sh**, so no
 registry key is needed. `--owner` restricts to one org/user and `--limit` caps
 the result count (1–50).
 
-`sync` and `update` are counterparts: `sync` reproduces the commit, content hash,
-and install mode recorded in the lock. `update` re-resolves the lock's
+`list` shows locked skills for the selected scope. Project scope also reports
+unlocked project installation paths.
+`sync` reproduces the commit, content hash, and install mode recorded in the lock.
+It also installs applicable declarations that have no lock entry and records them.
+`update` re-resolves the lock's
 `requested_ref`, except that an explicit `[skills.<name>].ref` change wins. If the
 repository commit advances but the selected skill's content hash does not, only the
 lock commit advances; changed skill content is reinstalled. A bare 40-hex commit
 left by an older project is migrated to default-branch intent; spell an intentional
-permanent pin as `ref = "rev:<commit>"`. `update` also makes the install follow the
+permanent pin as `ref = "rev:<commit>"`. To switch to a different pinned commit,
+edit `ref` and run `skills update` with network access. `update` also makes the install follow the
 project's `[skills.<name>].agents` (or `[skills].default_agents` when empty): an agent
 removed there is unlinked, keeping a directory a still-declared agent shares, an added
 one gets the copy the lock pins, and the lock's `agents` is rewritten. `use` installs nothing and writes no
@@ -98,12 +102,12 @@ choice, while with `-g` each agent has its own -- and installs exactly what is c
 none are detected), while other non-interactive calls fail immediately. Link/copy is
 asked only for multiple physical destinations; one destination is copied directly.
 Explicit `--copy` and `[skills].link_mode` take precedence. Before writing, the
-installation summary lists every destination, marks overwrites, and asks for
+installation summary lists every destination and marks overwrites. `add` asks for
 confirmation unless `--yes` was supplied. Shared physical directories are written once.
 
 ## Immutable identity and reproduction
 
-`add` records the identity in `osdk.lock`:
+`add` and first installs via `sync` record the identity in `osdk.lock`:
 
 ```toml
 [skills.web-design-guidelines]
@@ -115,16 +119,19 @@ install_mode = "copy"                    # selected placement policy
 agents = ["claude-code"]
 ```
 
-`osdk skills sync` reproduces from it: it prefers the staged content-addressed
+For an existing lock entry, `osdk skills sync` reproduces from it: it prefers the staged content-addressed
 copy, and when that copy is gone it **re-downloads a GitHub source at the recorded
 `resolved_commit`** and recomputes `content_hash`. A mismatch fails closed — a
 moved tag or a substituted mirror cannot install — and placement reuses
 `install_mode`. A local source whose staged copy is gone cannot be reproduced and is reported.
+With `--offline`, GitHub lock replay requires the staged copy. An operation that
+needs to download the archive reports a cache miss even when commit metadata is cached.
 
 ## How skills land
 
-The default is a directory link: a junction on Windows, a symlink on Unix (neither
-needs privilege). Where links are unavailable, or with `--copy`, the tree is copied.
+Directory links use a junction on Windows and a symlink on Unix. Both work
+without elevated privileges. Where links are unavailable, or with `--copy`,
+the tree is copied.
 Override the link mode for skills alone with `[skills].link_mode`. After the
 installation summary is confirmed, an existing real directory may be replaced: osdk
 prepares the new path beside the destination, renames the old directory to a temporary
@@ -132,6 +139,10 @@ backup, and restores it if activation fails. A copied skill can therefore be upd
 by a later `add`, `update`, or `sync`. A legacy lock without `install_mode` infers
 its placement from the existing target (link versus real directory). A local source
 that overlaps its destination is rejected before staging so it cannot delete itself.
+
+For each skill, `update` prepares every Agent target before changing the active
+installation. If a target fails to activate, the previous installation and lock
+entry are preserved.
 
 ## Security
 
@@ -154,8 +165,9 @@ that overlaps its destination is rejected before staging so it cannot delete its
 
 ## Declarative configuration
 
-You can also declare skills in `osdk.toml` and let a team reproduce them with
-`osdk skills sync`:
+Declare skills in `osdk.toml` and run `osdk skills sync` on a fresh checkout.
+It installs declarations that match `when` and have no lock entry, then writes
+their resolutions to `osdk.lock`.
 
 ```toml
 [skills]
@@ -168,7 +180,63 @@ ref = "branch:main"
 agents = ["claude-code", "codex"]
 ```
 
-The top-level `[skills]` table accepts `default_agents`, `scope`
-(`project`/`global`), and `link_mode`; each `[skills.<name>]` accepts `source`,
-`skill`, `ref`, `agents`, `when`, and `endpoint`, and a misspelled field errors
-loudly. The `osdk-guide` skill's `reference/configuration/skills.md` documents each field.
+The declaration name is the lock key and the installation directory name. For a
+collection, `skill` selects a directory and defaults to the declaration name.
+Relative local paths are resolved from the config file that declares `source`.
+For an external project config, they are relative to the actual project root.
+`ref` applies to GitHub sources. An empty `agents` list falls back to
+`[skills].default_agents` and then to agent detection. A single detected Agent
+is selected automatically. If a choice is still needed in CI or without a
+terminal, `sync` exits immediately with status 1 and asks you to set `agents`
+or `[skills].default_agents`. Pass `--yes` to accept the recommended targets.
+`sync` prints a summary for first-time
+installs and asks before replacing any existing unlocked skill directory, even when
+the file contents match. A nonempty `CI` value enables CI mode, except `false`
+(case-insensitive) and `0`. In CI or without a terminal, pass `--yes` to replace
+the directory or move it aside first. `sync` copies
+to a single destination and uses automatic linking
+for multiple destinations unless `[skills].link_mode` is set. Custom `endpoint`
+support is pending. Setting it on a declaration with no lock entry produces an error.
+
+Existing entries are replayed from the lock. When a declaration's `when` filter
+excludes the current platform, `sync` and `skills update` without names report the
+required platform and skip the skill, preserving its installation and lock entry.
+A named update for an excluded skill reports the requirement and exits with status 1. Use
+`osdk skills update <name>` to apply changes to a ref or Agent list.
+To change the source or skill selection,
+run `osdk skills remove <name>` and sync again, or install explicitly with
+`skills add`. When removing a declaration, use `osdk skills remove <name>` to
+drop the lock entry too.
+
+`[skills].scope` sets the default scope. The default `project` uses project Agent
+directories and the project lock. Set `global` to use user-level Agent directories
+and the `osdk.lock` in the user configuration directory. Pass `-g` to explicitly
+select user scope. `skills path` uses the configured scope. With `scope` unset,
+it checks the project lock first, then the user lock. See
+`reference/configuration/skills.md` in the `osdk-guide` skill for the full field
+reference.
+
+### Recovering skills installed by an older version in a subproject
+
+Older releases could install a skill in a subproject and record it in an
+ancestor's `osdk.lock`. When the current project has no lock entry for that name,
+`osdk skills list` and `osdk skills remove <name>` look for entries in ancestor
+locks within the same Git repository. When the installed content matches an
+ancestor entry's content hash, both commands report the installation paths and
+how to migrate the entry. If the local directories are gone, they show candidates
+for you to check.
+
+1. From the subproject, run `osdk skills list` or `osdk skills remove <name>`.
+   Verify that the ancestor entry belongs to this subproject. You can also inspect
+   ancestor `osdk.lock` files manually, including in projects without Git.
+2. Copy the entire `[skills.<name>]` table into the `osdk.lock` beside the
+   subproject's `osdk.toml`. Keep every field, including the content hash, agents,
+   install mode, and any recorded commit. If the subproject has no lockfile yet,
+   create one with `schema = 4`.
+3. Verify that both tables match, then delete the old table from the ancestor lock.
+   Keep the other entries in both locks. To uninstall the skill, run
+   `osdk skills remove <name>` again from the subproject.
+
+If the installation matches none of the ancestor entries, both commands report
+the unlocked paths. Once you confirm it is a standalone installation, you can
+remove it manually from those agent paths.

@@ -36,11 +36,13 @@ osdk skills agents
 `GH_TOKEN`；**不接触 skills.sh**，因此不需要任何注册表密钥。`--owner` 限定某 org/user，
 `--limit` 限结果数（1–50）。
 
-`sync` 与 `update` 是一对：`sync` 复现 lock 记录的 commit、内容哈希和安装方式；`update`
-重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
+`list` 列出所选范围锁定的技能。项目范围还会报告未锁定的项目安装路径。
+`sync` 复现 lock 记录的 commit、内容哈希和安装方式，也会安装尚未锁定的适用声明并写锁。
+`update` 重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
 前进但目标 skill 内容哈希未变时只推进 lock，不重装；内容变化才重新落地。已有项目保存的裸
 40 位 commit 只视为安装快照，迁移为默认分支意图；需要永久固定时明确写
-`ref = "rev:<commit>"`。`update` 还会让安装位置跟随项目声明：`[skills.<名>].agents`（为空时用
+`ref = "rev:<commit>"`。要改用另一个固定 commit，修改 `ref` 后联网运行 `skills update`。
+`update` 还会让安装位置跟随项目声明：`[skills.<名>].agents`（为空时用
 `[skills].default_agents`）删掉的 Agent 会被取消链接（与仍在用的 Agent 共享的目录保留），新增的
 Agent 装入 lock 已固定的那份内容，lock 的 `agents` 随之改写。
 `use` 不安装、不写 lock，临时取用一个 skill：无 `-a` 时把生成的 prompt 打到 stdout（可
@@ -83,12 +85,12 @@ Agent。只检测到一个时自动选中它和共享目录（记为 `universal`
 各有自己的目录、各占一项——且只安装勾选的那几项。`--yes` 接受检测结果（无结果时选择全部），
 其他非交互调用立即报错。
 仅多个实际目标目录时询问链接（推荐）或复制；单一目录直接复制。显式 `--copy` 与
-`[skills].link_mode` 均优先于提示。安装摘要会逐项列出目标目录，已有路径标记为覆盖；未传
-`--yes` 时确认后才写盘。共享物理目录只写一次。
+`[skills].link_mode` 均优先于提示。`add` 的安装摘要会逐项列出目标目录，已有路径标记为覆盖。
+运行 `add` 时，使用 `--yes` 可跳过确认。共享物理目录只写一次。
 
 ## 不可变身份与复现
 
-`add` 把身份写进 `osdk.lock`：
+`add` 与 `sync` 首次安装声明时都把身份写进 `osdk.lock`：
 
 ```toml
 [skills.web-design-guidelines]
@@ -100,18 +102,23 @@ install_mode = "copy"                    # 选定的落地策略
 agents = ["claude-code"]
 ```
 
-`osdk skills sync` 据此复现：优先用已落地的内容寻址副本，副本不在时对 GitHub 源**按记录的
+对锁里已有的技能，`osdk skills sync` 据此复现：优先用已落地的内容寻址副本，副本不在时对 GitHub 源**按记录的
 `resolved_commit` 重新下载**并重算 `content_hash`，与 lock 不符就 fail-closed 拒绝——移动过的
 tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`。本地源丢了副本无法复现，会如实报告。
+使用 `--offline` 时，GitHub 技能的锁回放需要已落地的副本。需要下载归档时，即使提交元数据
+已缓存，也会直接报离线缓存缺失。
 
 ## 落地方式
 
-默认目录链接：Windows 用 junction、Unix 用 symlink（都无需特权）。无链接环境或显式 `--copy`
-时整树拷贝。link mode 可用 `[skills].link_mode` 覆盖，仅对 skill 生效。确认安装摘要后可以覆盖
+目录链接在 Windows 上用 junction，在 Unix 上用 symlink，两者都无需特权。无链接环境或显式
+传 `--copy` 时整树拷贝。link mode 可用 `[skills].link_mode` 覆盖，仅对 skill 生效。确认安装摘要后可以覆盖
 已有真实目录；新内容先在目标同级准备完成，旧目录改名为临时备份，再激活新目录。激活失败会
 恢复旧目录，成功后清理备份，因此复制模式安装的 skill 也能继续 `add`、`update` 或 `sync`。
 旧 lock 没有 `install_mode` 时，从已有目标是链接还是真实目录推断原方式；本地源与目标目录重叠
 会在 staging 前拒绝，避免安装操作删除自己的源。
+
+`update` 会先为同一技能准备所有 Agent 目标，再切换当前安装。任何目标激活失败时，
+都会保留原来的安装内容和锁条目。
 
 ## 安全
 
@@ -128,7 +135,8 @@ tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`�
 
 ## 声明式配置
 
-也可以在 `osdk.toml` 里声明，让团队 `osdk skills sync` 一步到位：
+在 `osdk.toml` 里声明技能后，运行 `osdk skills sync`。它会安装符合 `when` 且缺少锁条目的技能，
+并将结果写入 `osdk.lock`，因此首次检出可以直接同步。
 
 ```toml
 [skills]
@@ -141,7 +149,43 @@ ref = "branch:main"
 agents = ["claude-code", "codex"]
 ```
 
-顶层 `[skills]` 支持 `default_agents`、`scope`（`project`/`global`）、`link_mode`；每条
-`[skills.<名>]` 支持 `source`、`skill`、`ref`、`agents`、`when`、`endpoint`，其中拼错的字段会
-硬报错。仓库内给 AI Agent 阅读的 `osdk-guide` 指引里，
-`reference/configuration/skills.md` 有逐字段说明。
+声明名用作锁键和安装目录名。来源包含多个技能时，`skill` 选择其中一个目录，省略时按声明名查找。
+本地相对路径以声明该 `source` 的配置文件所在目录为基准，外置项目配置以实际项目根目录为基准。
+`ref` 仅用于 GitHub 来源。声明的 `agents` 为空时用
+`[skills].default_agents`，再为空则检测已安装的 Agent。只检测到一个时自动选择。
+在 CI 或无终端时，如果仍需选择，`sync` 会立即退出 1，并提示配置 `agents` 或
+`[skills].default_agents`。也可传 `--yes` 接受推荐目标。
+`sync` 首次安装会打印摘要。替换任何已有但未锁定的技能目录都需要确认，即使文件内容相同。
+`CI` 为非空值时按 CI 运行，`false`（不区分大小写）和 `0` 除外。CI 或无终端时，
+可用 `--yes` 确认替换，或先移走旧目录再同步。
+默认单目录复制，多目录自动链接，可用
+`[skills].link_mode` 覆盖。自定义 `endpoint` 尚未实现。缺锁的声明设置该字段时会报错。
+
+已有锁条目继续按锁复现。如果对应声明的 `when` 排除当前平台，`sync` 和不点名的
+`skills update` 会说明平台要求并跳过该技能，保留已有安装和锁条目。
+点名更新被排除的技能会说明平台要求并退出 1。要应用声明中的 `ref` 或 Agent 改动，运行
+`osdk skills update <名>`。
+要换来源或技能，运行 `osdk skills remove <名>` 后重新同步，也可以显式用 `skills add` 安装。
+从配置去掉一项后，运行 `osdk skills remove <名>` 删除对应锁条目。
+
+`[skills].scope` 设置默认范围。默认值 `project` 使用项目 Agent 目录和项目锁。`global`
+使用用户级 Agent 目录与用户配置目录下的 `osdk.lock`。传 `-g` 可显式选择用户范围。
+`skills path` 按配置选择范围。未配置 `scope` 时，先查项目锁，再查用户锁。
+完整字段说明见 `osdk-guide` 的 `reference/configuration/skills.md`。
+
+### 恢复旧版子项目的技能
+
+旧版可能把技能装进子项目，却记在上级 `osdk.lock` 中。缺少当前项目的锁条目时，
+`osdk skills list` 和 `osdk skills remove <名>` 会在当前 Git 仓库内查找同名的上级锁条目。
+本地安装内容与上级锁的内容哈希匹配时，两条命令会同时报告安装路径和迁移指引。
+本地目录已移走时，两条命令会列出供核对的候选条目。
+
+1. 从子项目运行 `osdk skills list` 或 `osdk skills remove <名>`，核对上级条目确实属于该子项目。
+   也可以手工查看上级 `osdk.lock`，包括项目未使用 Git 时。
+2. 将完整的 `[skills.<名>]` 表复制进子项目 `osdk.toml` 旁的 `osdk.lock`，保留其中所有字段，
+   包括内容哈希、Agent 列表、安装方式以及已有的提交记录。需要新建锁时，先写 `schema = 4`。
+3. 核对两个表逐项一致，再从上级锁删掉旧表，保留两份锁中的其他条目。
+   要移除该技能时，在子项目重跑 `osdk skills remove <名>`。
+
+本地安装与上级条目都不匹配时，两条命令会报告未锁定的安装路径。
+确认这是独立安装后，可以按报告的 Agent 路径手工移除。
