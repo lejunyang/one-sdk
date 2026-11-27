@@ -18,6 +18,22 @@ fn write(root: &Path, path: &str, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+fn native_test_cargo() -> PathBuf {
+    let cargo = std::env::var_os("OSDK_TEST_CARGO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO")));
+    assert!(
+        cargo.is_absolute() && cargo.is_file() && matching_rustc(&cargo).is_file(),
+        "set OSDK_TEST_CARGO to the absolute path of a native Cargo next to rustc: {}",
+        cargo.display()
+    );
+    cargo
+}
+
+fn matching_rustc(cargo: &Path) -> PathBuf {
+    cargo.with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+}
+
 struct CargoWorkspace {
     temp: tempfile::TempDir,
     cargo: PathBuf,
@@ -25,8 +41,12 @@ struct CargoWorkspace {
 
 impl CargoWorkspace {
     fn new(cargo: PathBuf) -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("osdk Cargo 工作区 ")
+            .tempdir()
+            .unwrap();
         let root = temp.path();
+        std::fs::create_dir_all(root.join("state/home")).unwrap();
         write(
             root,
             "Cargo.toml",
@@ -58,8 +78,10 @@ impl CargoWorkspace {
         command
             .current_dir(root)
             .env("HOME", root.join("state/home"))
+            .env("USERPROFILE", root.join("state/home"))
             .env("CARGO_HOME", root.join("state/cargo"))
             .env("RUSTUP_HOME", root.join("state/rustup"))
+            .env("RUSTC", matching_rustc(&self.cargo))
             .env("CARGO_TARGET_DIR", root.join("state/target"))
             .env("CARGO_NET_OFFLINE", "true");
         command
@@ -77,14 +99,7 @@ impl CargoWorkspace {
     }
 
     fn native(&self, args: &[&str]) -> Output {
-        let rustc = self
-            .cargo
-            .with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX));
-        self.command(&self.cargo)
-            .env("RUSTC", rustc)
-            .args(args)
-            .output()
-            .unwrap()
+        self.command(&self.cargo).args(args).output().unwrap()
     }
 
     fn run(&self, provider: &str, extra: &[&str]) -> Output {
@@ -137,12 +152,12 @@ fn cargo_metadata_unavailable_explains_why_a_member_cannot_freeze() {
 }
 
 #[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
 fn cargo_workspace_member_frozen_uses_the_native_root_lock() {
-    let cargo = PathBuf::from(env!("CARGO"));
-    if cfg!(windows) && cargo.extension().is_none() {
-        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
-        return;
-    }
+    let cargo = native_test_cargo();
     for scenario in ["valid", "missing", "stale", "excluded", "unlisted"] {
         let fixture = CargoWorkspace::new(cargo.clone());
         fixture.link_rust();
@@ -166,6 +181,7 @@ fn cargo_workspace_member_frozen_uses_the_native_root_lock() {
             let unchanged = fixture.member(&[]);
             assert!(unchanged.status.success(), "{unchanged:?}");
             assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+            eprintln!("unchanged member: successful frozen fetch reused the cache");
             write(
                 root,
                 "crates/other/Cargo.toml",
@@ -190,6 +206,7 @@ fn cargo_workspace_member_frozen_uses_the_native_root_lock() {
         fixture.assert_locks(lock.as_deref());
         let actual = fixture.member(&[]);
         fixture.assert_locks(lock.as_deref());
+        let statuses = (preview.status.code(), actual.status.code());
         if scenario == "valid" || scenario == "stale" {
             let expected = "cargo fetch --locked --offline";
             assert!(preview.status.success(), "{scenario}: {preview:?}");
@@ -242,16 +259,17 @@ fn cargo_workspace_member_frozen_uses_the_native_root_lock() {
                 assert!(!String::from_utf8_lossy(&output.stdout).contains("cargo fetch"));
             }
         }
+        eprintln!("{scenario}: preview/actual exit {statuses:?}; lock bytes and presence checked");
     }
 }
 
 #[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
 fn cargo_workspace_member_ignores_a_leftover_local_lock() {
-    let cargo = PathBuf::from(env!("CARGO"));
-    if cfg!(windows) && cargo.extension().is_none() {
-        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
-        return;
-    }
+    let cargo = native_test_cargo();
     for remove_root_lock in [true, false] {
         let fixture = CargoWorkspace::new(cargo.clone());
         let root = fixture.temp.path();
@@ -296,12 +314,12 @@ fn cargo_workspace_member_ignores_a_leftover_local_lock() {
 }
 
 #[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
 fn cargo_requires_native_membership_even_with_a_local_lock() {
-    let cargo = PathBuf::from(env!("CARGO"));
-    if cfg!(windows) && cargo.extension().is_none() {
-        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
-        return;
-    }
+    let cargo = native_test_cargo();
     let fixture = CargoWorkspace::new(cargo);
     fixture.link_rust();
     let root = fixture.temp.path();
@@ -340,12 +358,12 @@ fn cargo_requires_native_membership_even_with_a_local_lock() {
 }
 
 #[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
 fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
-    let cargo = PathBuf::from(env!("CARGO"));
-    if cfg!(windows) && cargo.extension().is_none() {
-        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
-        return;
-    }
+    let cargo = native_test_cargo();
     for source in ["provider environment", "included Cargo config"] {
         let fixture = CargoWorkspace::new(cargo.clone());
         fixture.link_rust();
@@ -409,12 +427,12 @@ fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
 }
 
 #[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
 fn cargo_workspace_frozen_rechecks_nonmember_path_dependencies() {
-    let cargo = PathBuf::from(env!("CARGO"));
-    if cfg!(windows) && cargo.extension().is_none() {
-        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
-        return;
-    }
+    let cargo = native_test_cargo();
     let fixture = CargoWorkspace::new(cargo);
     fixture.link_rust();
     let root = fixture.temp.path();
