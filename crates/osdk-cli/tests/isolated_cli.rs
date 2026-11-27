@@ -6032,7 +6032,7 @@ fn compile_windows_fixture(source: &Path, output: &Path, crate_name: &str) -> bo
 /// `None` means this environment cannot build that executable at all (see
 /// [`compile_windows_fixture`]); the caller skips instead of failing.
 #[cfg(windows)]
-fn write_fake_rustup(root: &Path, project: &Path) -> Option<PathBuf> {
+fn write_fake_rustup(root: &Path, project: &Path, toolchain: &str) -> Option<PathBuf> {
     let rustup = root.join("data/cargo/bin/rustup.exe");
     std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
     let log = root.join("rustup-calls.log");
@@ -6071,8 +6071,7 @@ fn main() {{
     }} else if joined.starts_with("check") {{
         print!("stable - Up to date\n");
     }} else if joined.starts_with("override list") {{
-        print!(r#"{project}"#);
-        print!(" stable-x86_64-pc-windows-msvc\n");
+        print!("{{:<40}}\t{{:<20}}\n", r#"{project}"#, "{toolchain}");
     }}
 }}
 "##,
@@ -6090,7 +6089,7 @@ fn main() {{
 /// Always `Some` on Unix: a shell script needs no compiler. The `Option` exists
 /// only so both platforms present one signature to the call sites.
 #[cfg(unix)]
-fn write_fake_rustup(root: &Path, project: &Path) -> Option<PathBuf> {
+fn write_fake_rustup(root: &Path, project: &Path, toolchain: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
     let rustup = root.join("data/cargo/bin/rustup");
@@ -6105,7 +6104,7 @@ case "$1 $2" in
   "component list") printf 'rustfmt-x86_64-unknown-linux-gnu (installed)\n' ;;
   "target list") printf 'x86_64-unknown-linux-gnu (installed)\n' ;;
   "check ") printf 'stable - Up to date\n' ;;
-  "override list") printf '{} stable-x86_64-unknown-linux-gnu\n' ;;
+  "override list") printf '%-40s\t%-20s\n' '{}' '{toolchain}' ;;
 esac
 "#,
             log.display(),
@@ -6124,7 +6123,8 @@ fn rust_lifecycle_commands_use_isolated_rustup_and_repair_markers() {
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     // Unix-only test: the fixture is a shell script and cannot fail to build.
-    write_fake_rustup(temp.path(), &project).expect("the unix fixture is always available");
+    write_fake_rustup(temp.path(), &project, "stable")
+        .expect("the unix fixture is always available");
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
     let stale = temp.path().join("installs/rust/stale");
     std::fs::create_dir_all(&stale).unwrap();
@@ -6196,8 +6196,11 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "").unwrap();
     // Unix-only test: the fixture is a shell script and cannot fail to build.
-    write_fake_rustup(temp.path(), &project).expect("the unix fixture is always available");
+    let toolchain = "local-dev";
+    write_fake_rustup(temp.path(), &project, toolchain)
+        .expect("the unix fixture is always available");
 
     let import = run_isolated_in(temp.path(), &project, &["rust", "override", "import"]);
     assert!(
@@ -6206,7 +6209,7 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
         String::from_utf8_lossy(&import.stderr)
     );
     let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
-    assert!(config.contains("rust = \"stable-x86_64-unknown-linux-gnu\""));
+    assert!(config.contains("rust = \"local-dev\""));
 
     let export = run_isolated_in(temp.path(), &project, &["rust", "override", "export"]);
     assert!(
@@ -6242,8 +6245,109 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     );
     let calls = std::fs::read_to_string(temp.path().join("rustup-calls.log")).unwrap();
     assert!(calls.contains("override list"));
-    assert!(calls.contains("override set stable-x86_64-unknown-linux-gnu --path"));
+    assert!(calls.contains("override set local-dev --path"));
     assert!(calls.contains("toolchain link local-dev"));
+}
+
+#[test]
+fn rust_override_import_writes_the_sibling_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let a = temp.path().join("A");
+    let b = temp.path().join("B");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let a_config = a.join("osdk.toml");
+    let b_config = b.join("osdk.toml");
+    let original = b"# Keep project A's pin.\n[tools]\nrust = '1.91.1'\n";
+    std::fs::write(&a_config, original).unwrap();
+    std::fs::write(&b_config, "[tools]\nrust = \"1.93.0\"\n").unwrap();
+    let toolchain = "linked-rust-for-sibling-import";
+    if write_fake_rustup(temp.path(), &b, toolchain).is_none() {
+        return;
+    }
+
+    let output = run_isolated_in(temp.path(), &a, &["rust", "override", "import", "../B"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&b_config).unwrap(),
+        format!("[tools]\nrust = \"{toolchain}\"\n")
+    );
+    assert_eq!(std::fs::read(a_config).unwrap(), original);
+    let written = dunce::canonicalize(b_config).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim_end().ends_with(&*written.to_string_lossy()),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn rust_override_import_requires_a_project_for_the_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let a = temp.path().join("A");
+    let b = temp.path().join("B");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let a_config = a.join("osdk.toml");
+    let original = b"[tools]\nrust = \"1.91.1\"\n";
+    std::fs::write(&a_config, original).unwrap();
+    if write_fake_rustup(temp.path(), &b, "linked-rust-for-sibling-import").is_none() {
+        return;
+    }
+
+    for (cwd, args) in [
+        (&a, &["rust", "override", "import", "../B"][..]),
+        (&b, &["rust", "override", "import"][..]),
+    ] {
+        let output = run_isolated_in(temp.path(), cwd, args);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let target = dunce::canonicalize(&b).unwrap();
+        assert!(
+            stderr.contains(&format!(
+                "no osdk project config found for {}",
+                target.display()
+            )),
+            "{stderr}"
+        );
+        assert_eq!(std::fs::read(&a_config).unwrap(), original);
+        assert!(!b.join("osdk.toml").exists());
+    }
+}
+
+#[test]
+fn rust_override_import_writes_the_external_project_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bound = root.join("bound");
+    let child = bound.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let toolchain = "local-dev";
+    if write_fake_rustup(root, &child, toolchain).is_none() {
+        return;
+    }
+    let add = run_isolated(root, &["project", "add", "bound"]);
+    assert!(add.status.success(), "{add:?}");
+    let [binding]: [_; 1] = osdk_core::project::list_bindings(&root.join("config"))
+        .unwrap()
+        .try_into()
+        .expect("one external project");
+
+    let output = run_isolated(root, &["rust", "override", "import", "bound/child"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(std::fs::read_to_string(&binding.config_path)
+        .unwrap()
+        .contains("rust = \"local-dev\""));
+    assert!(!bound.join("osdk.toml").exists());
+    assert!(!child.join("osdk.toml").exists());
+    assert!(!root.join("osdk.toml").exists());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .trim_end()
+            .ends_with(&*binding.config_path.to_string_lossy()),
+        "{stdout}"
+    );
 }
 
 #[cfg(unix)]
@@ -6385,7 +6489,7 @@ fn rust_target_add_drives_the_selected_source_over_an_ambient_mirror() {
     std::fs::create_dir_all(&project).unwrap();
     // The recorder must be a runnable executable; where it cannot be built this
     // contract is unobservable rather than broken.
-    if write_fake_rustup(temp.path(), &project).is_none() {
+    if write_fake_rustup(temp.path(), &project, "stable").is_none() {
         return;
     }
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
@@ -6446,7 +6550,7 @@ fn local_rust_operations_do_not_inherit_an_ambient_mirror() {
     std::fs::create_dir_all(&project).unwrap();
     // The recorder must be a runnable executable; where it cannot be built this
     // contract is unobservable rather than broken.
-    if write_fake_rustup(temp.path(), &project).is_none() {
+    if write_fake_rustup(temp.path(), &project, "stable").is_none() {
         return;
     }
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();

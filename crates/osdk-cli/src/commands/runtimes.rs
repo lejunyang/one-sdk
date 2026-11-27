@@ -1548,6 +1548,11 @@ pub(crate) fn rust_override(app: &App, command: RustOverrideCommand) -> Result<(
     match command {
         RustOverrideCommand::Import { path } => {
             let directory = path.unwrap_or(cwd);
+            let canonical = dunce_path(&directory)?;
+            let project = osdk_core::project::discover(&canonical, &app.ctx.dirs.config)?
+                .ok_or_else(|| {
+                    anyhow!("no osdk project config found for {}", canonical.display())
+                })?;
             let output = osdk_core::backend::rust::RustBackend::run_rustup(
                 &app.ctx,
                 &["override", "list"],
@@ -1555,20 +1560,19 @@ pub(crate) fn rust_override(app: &App, command: RustOverrideCommand) -> Result<(
                 None,
             )?;
             let text = String::from_utf8_lossy(&output.stdout);
-            let canonical = dunce_path(&directory)?;
             let toolchain = parse_rustup_override(&text, &canonical).ok_or_else(|| {
                 anyhow!(
                     "no isolated rustup override found for {}",
                     canonical.display()
                 )
             })?;
-            let path = crate::config_edit::set_project_tool("rust", &toolchain)?;
+            crate::config_edit::edit_tool_version(&project.config_path, "rust", &toolchain)?;
             println!(
                 "{}",
                 t!(
                     "msg.rust_override_imported",
                     toolchain = toolchain,
-                    path = path.display()
+                    path = project.config_path.display()
                 )
             );
         }
@@ -1642,10 +1646,22 @@ pub(crate) fn dunce_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
 
 pub(crate) fn parse_rustup_override(text: &str, path: &std::path::Path) -> Option<String> {
     text.lines().find_map(|line| {
-        let (directory, toolchain) = line.rsplit_once(char::is_whitespace)?;
+        let (directory, toolchain) = rustup_override_columns(line)?;
         (dunce::canonicalize(directory).ok().as_deref() == Some(path))
-            .then(|| toolchain.trim().to_string())
+            .then(|| toolchain.to_string())
     })
+}
+
+fn rustup_override_columns(line: &str) -> Option<(&str, &str)> {
+    // rustup left-aligns both columns and separates them with a tab.
+    let line = line.trim_end();
+    if line == "no overrides" {
+        return None;
+    }
+    let (directory, toolchain) = line
+        .rsplit_once('\t')
+        .or_else(|| line.rsplit_once(char::is_whitespace))?;
+    Some((directory.trim_end(), toolchain))
 }
 
 pub(crate) fn validate_rust_link_name(name: &str) -> Result<()> {
@@ -1963,9 +1979,63 @@ pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std
 
 #[cfg(test)]
 mod tests {
-    use super::restore_endpoint;
+    use super::{parse_rustup_override, restore_endpoint, rustup_override_columns};
     use crate::lockfile::LockedModel;
     use osdk_core::model::ProviderId;
+
+    #[test]
+    fn parse_rustup_override_splits_padded_columns() {
+        let directory = "project with spaces";
+        let toolchain = "local-dev";
+        let row = format!("{directory:<40}\t{toolchain:<20}");
+        assert_eq!(rustup_override_columns(&row), Some((directory, toolchain)));
+    }
+
+    #[test]
+    fn parse_rustup_override_accepts_rustup_column_padding() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("sub")).unwrap();
+        let directory = temp
+            .path()
+            .join("sub")
+            .join("..")
+            .join("project with spaces and a path wider than the rustup column");
+        std::fs::create_dir(&directory).unwrap();
+        let canonical = dunce::canonicalize(&directory).unwrap();
+        for toolchain in ["local-dev", "linked-rust-for-sibling-import"] {
+            let text = format!("{:<40}\t{toolchain:<20}\n", directory.display());
+            assert_eq!(
+                parse_rustup_override(&text, &canonical).as_deref(),
+                Some(toolchain),
+                "override list row: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rustup_override_ignores_unavailable_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = dunce::canonicalize(temp.path()).unwrap();
+        let missing = directory.join("removed directory");
+        let missing_label = format!("{} (not a directory)", missing.display());
+        let text = format!("{missing_label:<40}\t{:<20}\n", "local-dev");
+
+        assert_eq!(parse_rustup_override(&text, &directory), None);
+        assert_eq!(parse_rustup_override("no overrides\n", &directory), None);
+    }
+
+    #[test]
+    fn parse_rustup_override_accepts_space_separated_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("project with spaces");
+        std::fs::create_dir(&directory).unwrap();
+        let directory = dunce::canonicalize(directory).unwrap();
+        let text = format!("{} local-dev\n", directory.display());
+        assert_eq!(
+            parse_rustup_override(&text, &directory).as_deref(),
+            Some("local-dev")
+        );
+    }
 
     fn locked(provider: ProviderId, endpoint: &str) -> LockedModel {
         LockedModel {

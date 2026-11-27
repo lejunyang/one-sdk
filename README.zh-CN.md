@@ -603,6 +603,8 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 osdk rust check --repair
 ```
 
+用 `osdk rust override import PATH` 把隔离 rustup 的目录覆盖写入从 `PATH` 向上找到的最近 osdk 项目配置。省略 `PATH` 时从当前目录开始。导入要求已有项目配置。
+
 Rust 的 source probe 只负责排序；安装 toolchain、component 或 target 时，rustup 会按序尝试全部候选源。首选镜像缺少精确版本或下载失败时会自动回退。
 
 ### Zig

@@ -683,6 +683,8 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 osdk rust check --repair
 ```
 
+Use `osdk rust override import PATH` to import an isolated rustup directory override into the nearest osdk project config at or above `PATH`. Omit `PATH` to use the current directory. The command requires an existing project config.
+
 The Rust source probe only ranks candidates. Toolchain, component, and target installs run rustup against each candidate in order, so a preferred mirror that lacks the exact target falls back automatically.
 
 ### Zig
