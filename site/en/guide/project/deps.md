@@ -111,12 +111,14 @@ from `.cargo` under the effective home directory. `[deps.cargo.env]` can set tha
 directory through `HOME` (or `USERPROFILE` on Windows).
 Cargo ignores a leftover lock in a member directory.
 An excluded crate can use its own lock, while Cargo rejects an unlisted crate.
-A missing effective lock rejects the frozen plan. Cargo rejects a stale lock and
-leaves it unchanged. For path dependencies outside the workspace, osdk runs
-`cargo fetch --locked` so Cargo can validate them. Use `--list --all --explain` to
-see the workspace root and effective lock.
+If osdk knows the effective lock path and the file is missing, it rejects the
+frozen plan. If the path is unresolved, `--dry-run` can still show
+`cargo fetch --locked`. During the actual fetch, Cargo checks for a current lock
+and leaves it unchanged. osdk also runs the locked fetch for path dependencies
+outside the workspace. Use `--list --all --explain` to see the workspace root
+and the lock path when known.
 
-If Rust is missing, a local `Cargo.lock` is enough to preview a locked fetch.
+If Rust is missing, a local `Cargo.lock` can produce a provisional preview.
 An actual run without `--no-install-tools` can prepare Rust first, then use that
 Cargo to check which lock applies before fetching.
 If linked Rust provides Cargo through the shared rustup proxy, the actual run

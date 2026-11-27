@@ -40,10 +40,11 @@ osdk 用已安装或已链接的 Cargo 离线确认工作区归属，在成员�
 Cargo 从有效的 `HOME`（Windows 上是 `USERPROFILE`）下的 `.cargo` 读取配置。
 `--dry-run` 展示计划，
 `--list --all --explain` 展示根和实际生效的锁。成员目录的旧锁不影响归属。
-被排除的 crate 可以使用自己的锁，未列入的 crate 由 Cargo 拒绝。锁缺失时冻结计划失败，
-过期时由 Cargo 拒绝拉取。工作区外的路径依赖由实际的冻结拉取校验。
+被排除的 crate 可以使用自己的锁，未列入的 crate 由 Cargo 拒绝。已确定锁路径而文件缺失时，
+冻结计划失败。锁路径未确定时，预览仍可显示 `cargo fetch --locked`，实际拉取由 Cargo
+检查锁是否存在、是否过期。工作区外的路径依赖也由实际的冻结拉取校验。
 独立 crate 已有本地锁时，即使无法确定实际锁路径，普通 `deps` 也保留 `--locked`。
-Rust 尚未安装时，本地锁可以用于预览。实际调用若允许安装工具，osdk 会先准备 Rust，
+Rust 尚未安装时，本地锁可以用于暂定预览。实际调用若允许安装工具，osdk 会先准备 Rust，
 再用该工具链确认生效的锁。
 链接的 Rust 可以通过共享的 rustup 代理执行冻结拉取。`--no-install-tools` 仍禁止获取工具。
 

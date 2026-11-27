@@ -60,11 +60,13 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 迁移：显式 `sources`/`outputs` 路径统一属于声明它的配置文件，根配置声明子项目时需要项目路径前缀（如 `sources = ["apps/api/package.json"]`）；内置默认路径仍属于识别的项目。`sources = []` 去掉默认输入，无法证明 freshness；pnpm 和 uv 的共享安装仍保留必需的成员与锁输入。自动准备工具会应用子项目工具选项和来源设置；共享 workspace 要求有效工具上下文一致。
 
 Cargo 成员可从根配置用 `[deps].roots` 单独声明，启用 `[deps.cargo]` 即可。
-Cargo 决定成员归属。若还没有可用的 Cargo，本地锁可用于预览。允许安装工具的实际调用
+Cargo 决定成员归属。若还没有可用的 Cargo，本地锁可用于暂定预览。允许安装工具的实际调用
 会先准备 Rust，再用该工具链的 Cargo 确认锁归属。确认的成员在成员目录拉取，默认使用工作区根锁，
 也支持 Cargo 1.97 起通过 `resolver.lockfile-path` 或 `CARGO_RESOLVER_LOCKFILE_PATH`
 指定的锁。若 `CARGO_HOME` 为空，配置从有效的 `HOME`（Windows 上是 `USERPROFILE`）
-下的 `.cargo` 读取。新鲜度依据实际生效的锁、Cargo 配置、根清单及成员清单。
+下的 `.cargo` 读取。已知锁路径缺少文件时，osdk 拒绝冻结计划。锁路径未确定时，冻结预览
+仍可显示 `cargo fetch --locked`，实际拉取由 Cargo 校验。新鲜度依据实际生效的锁、
+Cargo 配置、根清单及成员清单。
 工作区外的路径依赖会触发实际的冻结拉取。独立 crate 已有本地锁时，即使无法确定
 实际锁路径，普通 `deps` 也会运行 `cargo fetch --locked`，由 Cargo 校验。
 Cargo 的 `sources = []` 会关闭新鲜度判定。

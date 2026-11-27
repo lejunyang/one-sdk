@@ -536,13 +536,8 @@ osdk run dev --no-deps      # not this time
 
 For `pip-requirements`, osdk resolves the full transitive closure with
 `uv pip install -r`; a top-level `requirements.txt` is not treated as an exact
-lock or synchronized set. For providers with native locks, osdk decides
-frozen-vs-not by looking for the lockfile itself rather than
-delegating it: with a lockfile it installs frozen, without one it falls back to
-a plain install **and says so**. That matters because `yarn@1` and `bun` install
-happily with no lockfile at all, so passing a flag and trusting it would be
-silently wrong on half the matrix. Use `--frozen` to turn that fallback into an
-error:
+lock or synchronized set. Use `--frozen` in CI to require an existing native
+lockfile that the provider can use without changing it.
 
 ```bash
 osdk deps --frozen

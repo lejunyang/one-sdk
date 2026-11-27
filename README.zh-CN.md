@@ -469,11 +469,8 @@ osdk run dev --no-deps      # 这一次不要
 ```
 
 `pip-requirements` 会用 `uv pip install -r` 解析完整传递闭包；顶层
-`requirements.txt` 不会被当作精确 lock 或同步集合。对于有原生 lockfile 的 provider，
-osdk 不把「是否冻结」交给包管理器判断，而是自己先看 lockfile 在不在：有就用
-冻结安装，没有就退回普通安装**并明确告知**。这一点是必要的——`yarn@1` 与 `bun` 在
-缺少 lockfile 时会照常安装而不报错，只靠传参会在半数组合上静默失效。需要严格时用
-`--frozen`，它把这种退回变成错误：
+`requirements.txt` 不会被当作精确 lock 或同步集合。在 CI 中使用 `--frozen` 时，
+需要已有原生锁文件，且包管理器必须能够沿用这份锁完成安装。
 
 ```bash
 osdk deps --frozen
