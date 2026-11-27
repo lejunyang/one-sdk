@@ -97,10 +97,12 @@ Both versions must be installed, managed Node versions that contain npm. osdk
 enumerates the source with `npm ls -g --depth=0 --json --long`, skips npm itself,
 packages already present on the target, and packages declaring
 `hasInstallScript=true` or `gypfile=true`. `--apply` installs exact versions.
-If installation fails, osdk removes packages, launchers, and Unix man-page links
-added by the migration and restores overwritten files and links from the local backup. An `npm link`
-still points to its original project, and packages installed from local tarballs
-keep their original files. If rollback also fails, the error gives the backup path.
+If installation fails, osdk attempts to roll back by restoring overwritten files
+and links from the local backup and removing packages, launchers, and Unix man-page
+links added by the migration. After a successful rollback, `npm link` entries
+still point to their original projects, and packages installed from local tarballs
+keep their original files. If rollback also fails, check the backup path in the
+error message.
 Pause other global npm installs or uninstalls for either Node version during migration.
 
 Even when system Node/npm is currently preferred, `reshim` updates defaults in

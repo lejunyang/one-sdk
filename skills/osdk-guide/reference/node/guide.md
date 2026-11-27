@@ -20,9 +20,10 @@ osdk node migrate-packages --from 20.11.1 --to 22.4.0
 osdk node migrate-packages --from 20.11.1 --to 22.4.0 --apply
 ```
 
-在两个 Node 版本间迁移时，`--apply` 安装目标缺少的精确版本。安装失败会清理本次新增
-的包、命令入口和 Unix 手册链接，按本地备份还原被覆盖的文件和链接。`npm link` 仍指向原项目，本地 tarball
-仍使用原文件。回滚失败时错误会给出备份路径。迁移期间暂停对源和目标的其他全局 npm 安装或卸载。
+在两个 Node 版本间迁移时，`--apply` 安装目标缺少的精确版本。安装失败时，osdk 尝试回滚，
+从本地备份恢复被覆盖的文件和链接，并清理本次新增的包、命令入口和 Unix 手册链接。回滚成功后，
+`npm link` 仍指向原项目，从本地 tarball 安装的包保留原文件。如果回滚也失败，请查看错误消息里的
+备份路径。迁移期间暂停对源和目标的其他全局 npm 安装或卸载。
 
 项目依赖迁移不走该命令，使用 `[deps.npm]` / `[deps.pnpm]` 与 `osdk deps`。Node 安装后
 是否启用 Corepack 由 `[settings.node].corepack` 控制；npm 动态工具的默认 installer
