@@ -627,8 +627,8 @@ For a built-in Cargo project, planning runs
 as the fetch, using Cargo directly from the installed or linked toolchain.
 osdk takes Cargo's configuration variables from the merged fetch environment.
 An empty `CARGO_HOME` falls back to `.cargo` under the effective `HOME`
-(`USERPROFILE` on Windows). Both commands see the same
-`CARGO_RESOLVER_LOCKFILE_PATH`.
+(`USERPROFILE` on Windows). osdk follows Cargo's case-sensitive lookup for
+`CARGO_RESOLVER_LOCKFILE_PATH` in the fetch environment.
 
 Cargo reports the workspace root and member manifests. osdk compares canonical
 paths and uses the root lock for a confirmed member. A lock next to the selected

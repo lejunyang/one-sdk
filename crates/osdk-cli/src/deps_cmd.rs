@@ -8,7 +8,7 @@
 //! the identity -- and leaves resolution and installation to the native tool.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
@@ -1147,26 +1147,16 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                 println!("    Cargo workspace query: {}", program.display());
             }
             let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-            let matches_key = |key: &std::ffi::OsStr, name: &str| {
-                if cfg!(windows) {
-                    key.eq_ignore_ascii_case(std::ffi::OsStr::new(name))
-                } else {
-                    key == name
-                }
-            };
             // Take configuration paths from the same tool/provider overlay
             // as fetch. Keep other provider overrides, including executable
             // hooks, out of the read-only query.
-            let mut probe_env = child_env(&BTreeMap::new(), tools);
-            probe_env.extend(
-                child_env(&self.config.env, tools)
-                    .into_iter()
-                    .filter(|(key, _)| {
-                        ["CARGO_HOME", CARGO_LOCKFILE_ENV, home_key]
-                            .iter()
-                            .any(|name| matches_key(key.as_ref(), name))
-                    }),
-            );
+            let probe_env = child_env(&self.config.env, tools)
+                .into_iter()
+                .filter(|(key, _)| {
+                    ["CARGO_HOME", "RUSTUP_HOME", CARGO_LOCKFILE_ENV, home_key]
+                        .iter()
+                        .any(|name| matches_os_env_key(key.as_ref(), name))
+                });
             let mut command = std::process::Command::new(program);
             command
                 .args(args)
@@ -1176,7 +1166,7 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
             let env_path = |name| {
                 command
                     .get_envs()
-                    .find(|(key, _)| matches_key(key, name))
+                    .find(|(key, _)| matches_os_env_key(key, name))
                     .and_then(|(_, value)| value.map(PathBuf::from))
                     .or_else(|| std::env::var_os(name).map(PathBuf::from))
             };
@@ -1195,7 +1185,7 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                     };
                     home.map(|home| cwd.join(home).join(".cargo"))
                 });
-            let cargo_lockfile_override = env_path(CARGO_LOCKFILE_ENV);
+            let cargo_lockfile_override = cargo_lockfile_env(&command);
             Ok(Some(NativeLockQuery {
                 output: command.output()?,
                 cargo_home,
@@ -1204,6 +1194,37 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
         })()
         .map_err(std::io::Error::other)
     }
+}
+
+fn matches_os_env_key(key: &OsStr, name: &str) -> bool {
+    if cfg!(windows) {
+        key.eq_ignore_ascii_case(OsStr::new(name))
+    } else {
+        key == name
+    }
+}
+
+fn cargo_lockfile_env(command: &std::process::Command) -> Option<PathBuf> {
+    let configured = command
+        .get_envs()
+        .find(|(key, _)| matches_os_env_key(key, CARGO_LOCKFILE_ENV));
+    let inherited =
+        std::env::vars_os().find(|(key, _)| matches_os_env_key(key, CARGO_LOCKFILE_ENV));
+    // Command merges Windows keys case-insensitively and retains the
+    // inherited spelling when replacing a value. Cargo's config lookup then
+    // requires the exact uppercase key in that merged environment.
+    let key = inherited
+        .as_ref()
+        .map(|(key, _)| key.as_os_str())
+        .or_else(|| configured.map(|(key, _)| key))?;
+    if key != CARGO_LOCKFILE_ENV {
+        return None;
+    }
+    let value = match configured {
+        Some((_, value)) => value,
+        None => inherited.as_ref().map(|(_, value)| value.as_os_str()),
+    };
+    value.and_then(OsStr::to_str).map(PathBuf::from)
 }
 
 /// Run the provider's command with the resolved tools on PATH.

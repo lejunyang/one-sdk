@@ -594,6 +594,46 @@ fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
 }
 
 #[test]
+#[cfg(windows)]
+#[cfg_attr(
+    target_env = "gnu",
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_workspace_frozen_uses_exact_lockfile_environment_key() {
+    let fixture = CargoWorkspace::new(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    let alternate = root.join("alternate/Cargo.lock");
+    std::fs::create_dir(alternate.parent().unwrap()).unwrap();
+    std::fs::write(&alternate, &lock).unwrap();
+    let config_path = root.join("osdk.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        config_path,
+        format!(
+            "{config}[deps.cargo.env]\ncargo_resolver_lockfile_path = '../../alternate/Cargo.lock'\n"
+        ),
+    )
+    .unwrap();
+
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    let unchanged = fixture.member(&[]);
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    let missing = fixture.member(&[]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no Cargo.lock in Cargo workspace root")
+    );
+    fixture.assert_locks(None);
+    assert_eq!(std::fs::read(alternate).unwrap(), lock);
+}
+
+#[test]
 #[cfg_attr(
     all(windows, target_env = "gnu"),
     ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"

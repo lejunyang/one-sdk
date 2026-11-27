@@ -506,7 +506,8 @@ provider 都匹配它的清单时，选 workspace 的安装器。这不会改变
 `cargo metadata --no-deps --format-version 1 --offline`。查询直接使用已安装或已链接
 工具链里的 Cargo。osdk 从拉取命令合并后的环境提取 Cargo 配置所需的变量。
 `CARGO_HOME` 为空时，查询使用有效的 `HOME`（Windows 上是 `USERPROFILE`），
-定位该目录下的 `.cargo`。查询也使用拉取命令生效的 `CARGO_RESOLVER_LOCKFILE_PATH`。
+定位该目录下的 `.cargo`。锁路径覆盖按 Cargo 的规则，从拉取环境中查找大小写完全匹配的
+`CARGO_RESOLVER_LOCKFILE_PATH`。
 
 Cargo 返回工作区根和成员清单。osdk 按规范化路径确认成员资格，给确认的成员使用根锁。
 Cargo 确认项目自成工作区时，才使用项目目录的锁。
