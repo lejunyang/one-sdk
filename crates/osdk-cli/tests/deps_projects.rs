@@ -223,21 +223,25 @@ fn cargo_standalone_frozen_rechecks_shared_proxy_when_metadata_fails() {
     let fixture = CargoWorkspace::standalone(native_test_cargo());
     let lock = fixture.generate_lock();
     let proxy = fixture.link_rust_with_shared_cargo();
-    std::fs::write(
-        &proxy,
-        "#!/bin/sh\n[ \"$RUSTUP_AUTO_INSTALL\" = '0' ] || exit 2\n[ \"$1\" != metadata ] || exit 1\nexec \"$(dirname \"$RUSTC\")/cargo\" \"$@\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
-    for _ in 0..2 {
-        let actual = fixture
-            .osdk()
-            .env("RUSTUP_AUTO_INSTALL", "1")
-            .args(["deps", "cargo", "--frozen", "--no-install-tools"])
-            .output()
-            .unwrap();
-        assert!(actual.status.success(), "{actual:?}");
-        assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    for metadata in ["exit 1", "echo 'proxy banner'; exit 0"] {
+        std::fs::write(
+            &proxy,
+            format!(
+                "#!/bin/sh\n[ \"$RUSTUP_AUTO_INSTALL\" = '0' ] || exit 2\nif [ \"$1\" = metadata ]; then\n{metadata}\nfi\nexec \"$(dirname \"$RUSTC\")/cargo\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..2 {
+            let actual = fixture
+                .osdk()
+                .env("RUSTUP_AUTO_INSTALL", "1")
+                .args(["deps", "cargo", "--frozen", "--no-install-tools"])
+                .output()
+                .unwrap();
+            assert!(actual.status.success(), "{metadata}: {actual:?}");
+            assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+        }
     }
     fixture.assert_locks(Some(&lock));
 }

@@ -546,7 +546,7 @@ fn plan_project(
 ) -> anyhow::Result<(RunPlan, Option<NativeLockOwner>)> {
     let native_lock = if project.provider == "cargo" && config.run.is_none() {
         let cwd = deps::effective_cwd(&project.root, config.dir.as_deref());
-        let mut owner = deps::workspace::native_lock_owner(
+        let owner = deps::workspace::native_lock_owner(
             project,
             &cwd,
             &CargoLockProbe {
@@ -558,11 +558,6 @@ fn plan_project(
                 explain: options.explain,
             },
         )?;
-        if owner.status == NativeLockStatus::CargoUnavailable && prepared.is_some() {
-            owner.reason = Some(
-                "the shared Cargo entry could not confirm the workspace in a read-only query; Cargo will check the lock during fetch".into(),
-            );
-        }
         if options.explain {
             if !owner.inputs.is_empty() {
                 println!("    Cargo workspace root: {}", owner.root.display());
@@ -576,9 +571,11 @@ fn plan_project(
         }
         let keep_local_lock = cwd == project.root
             && match owner.status {
-                // The selected project already has a local lock. Keep the
-                // locked fetch when a shared proxy cannot answer the query.
                 NativeLockStatus::CargoUnavailable => true,
+                // The shared proxy can still validate the local lock during
+                // fetch when it cannot provide usable workspace metadata.
+                NativeLockStatus::CargoWorkspaceUnknown => prepared
+                    .is_some_and(|(tools, command)| !cargo_in_toolchain(&command.program, tools)),
                 // Keep the locked command for a confirmed workspace root,
                 // even if its effective lock path cannot be fingerprinted.
                 NativeLockStatus::CargoLockPathUnknown => {
@@ -1213,12 +1210,8 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                     home.map(|home| cwd.join(home).join(".cargo"))
                 });
             let cargo_lockfile_override = cargo_lockfile_env(&command);
-            let output = command.output();
-            if shared && !output.as_ref().is_ok_and(|output| output.status.success()) {
-                return Ok(None);
-            }
             Ok(Some(NativeLockQuery {
-                output: output?,
+                output: command.output()?,
                 cargo_home,
                 cargo_lockfile_override,
             }))

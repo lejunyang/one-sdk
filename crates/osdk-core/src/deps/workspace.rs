@@ -27,10 +27,12 @@ pub struct NativeLockOwner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeLockStatus {
-    /// The tool's answer is conclusive, including membership errors.
+    /// The native lock lookup has a conclusive result.
     Checked,
     /// The configured tool is not available for a read-only query yet.
     CargoUnavailable,
+    /// The query did not establish Cargo workspace membership.
+    CargoWorkspaceUnknown,
     /// Cargo confirmed membership, but the effective lock path is unresolved.
     CargoLockPathUnknown,
 }
@@ -87,6 +89,7 @@ pub fn native_lock_owner(
     // Cargo alone decides whether the lock beside the selected manifest is used.
     owner.lock = None;
     owner.inputs_complete = false;
+    owner.status = NativeLockStatus::CargoWorkspaceUnknown;
 
     let candidates = CARGO_PROGRAM_CANDIDATES.map(str::to_owned);
     let query = match probe.query(&candidates, CARGO_WORKSPACE_QUERY, cwd) {
@@ -151,6 +154,7 @@ impl NativeLockOwner {
         }
 
         self.root.clone_from(&root);
+        self.status = NativeLockStatus::Checked;
         let (config, configured) = match cargo_lock_configuration(cwd, &query, probe) {
             Ok(configuration) => configuration,
             Err(error) => {
@@ -684,7 +688,7 @@ mod tests {
         let owner = native_lock_owner(&member, &member.root, &probe(&[&other])).unwrap();
         assert!(owner.lock.is_none());
         assert!(owner.inputs.is_empty());
-        assert_eq!(owner.status, NativeLockStatus::Checked);
+        assert_eq!(owner.status, NativeLockStatus::CargoWorkspaceUnknown);
         assert!(owner
             .reason
             .unwrap()
