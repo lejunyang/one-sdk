@@ -483,7 +483,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             continue;
         }
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
-        let command = ProviderCommand::resolve(app, &item.plan, &tools)?;
+        let command = ProviderCommand::resolve(app, item, &tools)?;
         if item.plan.frozen
             && item
                 .native_lock
@@ -574,8 +574,9 @@ fn plan_project(
                 NativeLockStatus::CargoUnavailable => true,
                 // The shared proxy can still validate the local lock during
                 // fetch when it cannot provide usable workspace metadata.
-                NativeLockStatus::CargoWorkspaceUnknown => prepared
-                    .is_some_and(|(tools, command)| !cargo_in_toolchain(&command.program, tools)),
+                NativeLockStatus::CargoWorkspaceUnknown => {
+                    prepared.is_some_and(|(_, command)| command.cargo_proxy_toolchain.is_some())
+                }
                 // Keep the locked command for a confirmed workspace root,
                 // even if its effective lock path cannot be fingerprinted.
                 NativeLockStatus::CargoLockPathUnknown => {
@@ -1157,7 +1158,6 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                 path = tool_path(app, tools)?;
                 (&program, &path)
             };
-            let shared = !cargo_in_toolchain(program, tools);
             if self.explain && args[0] == "metadata" {
                 println!("    Cargo workspace query: {}", program.display());
             }
@@ -1184,8 +1184,8 @@ impl deps::workspace::NativeLockProbe for CargoLockProbe<'_> {
                 .current_dir(cwd)
                 .env("PATH", path)
                 .envs(probe_env);
-            if shared {
-                command.env("RUSTUP_AUTO_INSTALL", "0");
+            if let Some((_, prepared)) = self.prepared {
+                prepared.configure_cargo_proxy(&mut command, true);
             }
             let env_path = |name| {
                 command
@@ -1255,14 +1255,16 @@ fn cargo_lockfile_env(command: &std::process::Command) -> Option<PathBuf> {
     value.and_then(OsStr::to_str).map(PathBuf::from)
 }
 
-/// The executable and PATH shared by a prepared provider's probe and install.
+/// The launch settings shared by a prepared provider's probe and install.
 struct ProviderCommand {
     program: PathBuf,
     path: OsString,
+    cargo_proxy_toolchain: Option<String>,
 }
 
 impl ProviderCommand {
-    fn resolve(app: &App, plan: &RunPlan, tools: &[ReadyTool]) -> anyhow::Result<Self> {
+    fn resolve(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<Self> {
+        let plan = &item.plan;
         let program = resolve_program(plan, tools).ok_or_else(|| {
             anyhow!(
                 "could not find `{}` in the install for `{}`",
@@ -1277,7 +1279,27 @@ impl ProviderCommand {
             &program,
             &std::env::split_paths(&path).collect::<Vec<_>>(),
         );
-        Ok(Self { program, path })
+        let cargo_proxy_toolchain = (item.project.provider == "cargo"
+            && item.config.run.is_none()
+            && tools[0].system.is_none()
+            && !cargo_in_toolchain(&program, tools))
+        .then(|| tools[0].version.clone());
+        Ok(Self {
+            program,
+            path,
+            cargo_proxy_toolchain,
+        })
+    }
+
+    fn configure_cargo_proxy(&self, command: &mut std::process::Command, no_install_tools: bool) {
+        if let Some(toolchain) = &self.cargo_proxy_toolchain {
+            // The shared executable selects its toolchain through rustup,
+            // independently of the toolchain bin directories on PATH.
+            command.env("RUSTUP_TOOLCHAIN", toolchain);
+            if no_install_tools {
+                command.env("RUSTUP_AUTO_INSTALL", "0");
+            }
+        }
     }
 }
 
@@ -1313,13 +1335,7 @@ fn run_plan(
         .current_dir(cwd)
         .env("PATH", &prepared.path)
         .envs(&child_env);
-    if no_install_tools
-        && item.project.provider == "cargo"
-        && item.config.run.is_none()
-        && !cargo_in_toolchain(&prepared.program, tools)
-    {
-        command.env("RUSTUP_AUTO_INSTALL", "0");
-    }
+    prepared.configure_cargo_proxy(&mut command, no_install_tools);
 
     println!("{}", display_command(item));
 
@@ -1336,6 +1352,7 @@ fn run_plan(
             .current_dir(cwd)
             .env("PATH", &prepared.path)
             .envs(&child_env);
+        prepared.configure_cargo_proxy(&mut prelude, no_install_tools);
         run_bounded(prelude, item.config.timeout)?;
     }
     run_bounded(command, item.config.timeout)?;

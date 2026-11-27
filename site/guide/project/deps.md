@@ -108,7 +108,8 @@ osdk 用已安装或已链接的 Cargo 确认成员归属，在成员目录运�
 
 尚未安装 Rust 时，本地 `Cargo.lock` 可以用于暂定预览。实际调用若允许安装工具，
 osdk 会先准备 Rust，再用该工具链的 Cargo 确定生效的锁。
-链接的 Rust 若通过共享的 rustup 代理提供 Cargo，实跑仍会用该入口执行冻结拉取。
+链接的 Rust 若通过共享的 rustup 代理提供 Cargo，实跑会用 osdk 选中的工具链执行
+冻结拉取。rustup 可以不设默认工具链。
 独立 crate 已有本地锁时，即使 osdk 无法确定实际锁路径，普通 `deps` 也会保留
 `--locked`，由 Cargo 校验。
 

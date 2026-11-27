@@ -67,6 +67,7 @@ Cargo 决定成员归属。若还没有可用的 Cargo，本地锁可用于暂�
 下的 `.cargo` 读取。已知锁路径缺少文件时，osdk 拒绝冻结计划。锁路径未确定时，冻结预览
 仍可显示 `cargo fetch --locked`，实际拉取由 Cargo 校验。新鲜度依据实际生效的锁、
 Cargo 配置、根清单及成员清单。
+Cargo 由共享 rustup 代理提供时，代理使用 osdk 为该项目选中的工具链。
 工作区外的路径依赖会触发实际的冻结拉取。独立 crate 已有本地锁时，即使无法确定
 实际锁路径，普通 `deps` 也会运行 `cargo fetch --locked`，由 Cargo 校验。
 Cargo 的 `sources = []` 会关闭新鲜度判定。

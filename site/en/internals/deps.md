@@ -643,7 +643,8 @@ cached freshness. Without Cargo or a local lock, a member's frozen plan requires
 installing or linking Rust first.
 Previews query Cargo only in the toolchain directory. If execution resolves
 Cargo to the rustup proxy in the shared bin directory, replanning and fetch
-use the same executable. The read-only query disables rustup auto-install,
+use the same executable and pass the selected toolchain name through
+`RUSTUP_TOOLCHAIN`. The read-only query disables rustup auto-install,
 as does fetch with `--no-install-tools`. If the proxy cannot answer the
 query, a project with a detected local lock still runs `cargo fetch --locked`
 and bypasses the freshness cache.

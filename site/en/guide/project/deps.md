@@ -121,8 +121,8 @@ and the lock path when known.
 If Rust is missing, a local `Cargo.lock` can produce a provisional preview.
 An actual run without `--no-install-tools` can prepare Rust first, then use that
 Cargo to check which lock applies before fetching.
-If linked Rust provides Cargo through the shared rustup proxy, the actual run
-can use that entry point for the locked fetch.
+If linked Rust provides Cargo through the shared rustup proxy, the locked fetch
+uses the toolchain selected by osdk. The rustup default toolchain can be unset.
 For a standalone crate with a local lock, even plain `deps` keeps `--locked`
 when osdk cannot determine the effective path, so Cargo can validate the lock.
 

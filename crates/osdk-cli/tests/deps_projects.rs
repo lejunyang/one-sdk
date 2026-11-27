@@ -217,6 +217,80 @@ fn cargo_standalone_frozen_uses_cargo_from_the_shared_bin() {
 
 #[test]
 #[cfg(unix)]
+fn cargo_standalone_frozen_selects_linked_rust_for_the_real_proxy() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    let lock = fixture.generate_lock();
+    let root = fixture.temp.path();
+    let rustup_home = root.join("state/data/rustup");
+    let toolchains = rustup_home.join("toolchains");
+    std::fs::create_dir_all(&toolchains).unwrap();
+    let host = osdk_core::platform::Platform::current().llvm_triple();
+    let native_toolchain = fixture.cargo.parent().unwrap().parent().unwrap();
+    symlink(native_toolchain, toolchains.join(format!("stable-{host}"))).unwrap();
+
+    let shared_bin = root.join("state/data/cargo/bin");
+    std::fs::create_dir_all(&shared_bin).unwrap();
+    let rustup = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("rustup"))
+        .find(|program| program.is_file())
+        .expect("the real Cargo proxy test requires rustup on PATH");
+    let isolated_rustup = shared_bin.join("rustup");
+    std::fs::copy(rustup, &isolated_rustup).unwrap();
+    let proxy = shared_bin.join("cargo");
+    std::fs::hard_link(isolated_rustup, &proxy).unwrap();
+
+    let linked = root.join("local-rust");
+    std::fs::create_dir_all(linked.join("bin")).unwrap();
+    symlink(native_toolchain.join("lib"), linked.join("lib")).unwrap();
+    symlink(matching_rustc(&fixture.cargo), linked.join("bin/rustc")).unwrap();
+    let registration = fixture
+        .osdk()
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(["rust", "toolchain", "link", "trial-rust"])
+        .arg(&linked)
+        .output()
+        .unwrap();
+    assert!(registration.status.success(), "{registration:?}");
+
+    let unselected = fixture
+        .command(&proxy)
+        .env("RUSTUP_HOME", &rustup_home)
+        .env("CARGO_HOME", shared_bin.parent().unwrap())
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(["fetch", "--locked", "--offline"])
+        .output()
+        .unwrap();
+    assert!(!unselected.status.success(), "{unselected:?}");
+    assert!(String::from_utf8_lossy(&unselected.stderr).contains("no default is configured"));
+
+    let actual = fixture
+        .osdk()
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .args([
+            "deps",
+            "cargo",
+            "--frozen",
+            "--no-install-tools",
+            "--explain",
+        ])
+        .output()
+        .unwrap();
+    assert!(actual.status.success(), "{actual:?}");
+    let stdout = String::from_utf8_lossy(&actual.stdout);
+    assert!(stdout.contains("Cargo workspace root:"), "{stdout}");
+    assert!(
+        stdout.contains("cargo fetch --locked --offline"),
+        "{stdout}"
+    );
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
+#[cfg(unix)]
 fn cargo_standalone_frozen_rechecks_shared_proxy_when_metadata_fails() {
     use std::os::unix::fs::PermissionsExt;
 
