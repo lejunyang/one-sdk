@@ -156,8 +156,9 @@ agents = ["claude-code", "codex"]
 在非交互环境，可用 `--yes` 确认替换，或先移走旧目录再同步。默认单目录复制，多目录自动链接，可用
 `[skills].link_mode` 覆盖。自定义 `endpoint` 尚未实现。缺锁的声明设置该字段时会报错。
 
-已有锁条目继续按锁复现。如果对应声明的 `when` 不匹配当前平台，`sync` 和 `update`
-都会跳过该技能，保留已有安装和锁条目。要应用声明中的 `ref` 或 Agent 改动，运行
+已有锁条目继续按锁复现。如果对应声明的 `when` 排除当前平台，`sync` 和不点名的
+`skills update` 会说明平台要求并跳过该技能，保留已有安装和锁条目。
+点名更新被排除的技能会说明平台要求并退出 1。要应用声明中的 `ref` 或 Agent 改动，运行
 `osdk skills update <名>`。
 要换来源或技能，运行 `osdk skills remove <名>` 后重新同步，也可以显式用 `skills add` 安装。
 从配置去掉一项后，运行 `osdk skills remove <名>` 删除对应锁条目。

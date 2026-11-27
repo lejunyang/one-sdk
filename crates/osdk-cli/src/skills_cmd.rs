@@ -604,19 +604,20 @@ async fn prepare_skill_targets<'a>(
     Ok((changes, unlinks))
 }
 
-fn declaration_applies(app: &App, declaration: &SkillDeclaration) -> bool {
+fn platform_exclusion(app: &App, declaration: &SkillDeclaration) -> Option<String> {
     declaration
         .when
         .as_ref()
-        .is_none_or(|filter| filter.matches(&app.ctx.platform))
+        .filter(|filter| !filter.matches(&app.ctx.platform))
+        .map(|filter| filter.describe())
 }
 
-fn skip_locked_skill(app: &App, name: &str, declaration: &SkillDeclaration) -> bool {
-    if declaration_applies(app, declaration) {
+fn skip_locked_skill(name: &str, reason: Option<String>) -> bool {
+    let Some(reason) = reason else {
         return false;
-    }
+    };
     println!(
-        "skipping locked skill `{name}`: its `when` filter does not match this platform; keeping its lock entry"
+        "skipping locked skill `{name}`: its `when` filter excludes this platform ({reason}); keeping its lock entry"
     );
     true
 }
@@ -707,12 +708,12 @@ async fn sync(app: &App, global: bool) -> Result<()> {
         .iter()
         .filter(|(name, _)| !skills.contains_key(*name))
     {
-        if declaration_applies(app, declaration) {
-            pending.push((name, declaration));
-        } else {
+        if let Some(reason) = platform_exclusion(app, declaration) {
             println!(
-                "skipping declaration `{name}`: its `when` filter does not match this platform"
+                "skipping declaration `{name}`: its `when` filter excludes this platform ({reason})"
             );
+        } else {
+            pending.push((name, declaration));
         }
     }
     if pending.is_empty() && skills.is_empty() {
@@ -764,7 +765,7 @@ async fn sync(app: &App, global: bool) -> Result<()> {
     for (name, entry) in &skills {
         match declarations.get(name) {
             Some(declaration) => {
-                if skip_locked_skill(app, name, declaration) {
+                if skip_locked_skill(name, platform_exclusion(app, declaration)) {
                     continue;
                 }
                 report_declaration_changes(app, name, declaration, entry, flag);
@@ -860,6 +861,19 @@ async fn refetch_staged(
 /// directories. Local skills and GitHub skills that keep their current commit
 /// can still update their agent list.
 async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
+    let exclusion = |name: &str| {
+        app.ctx
+            .config
+            .skills
+            .get(name)
+            .and_then(|declaration| platform_exclusion(app, declaration))
+    };
+    for name in wanted {
+        if let Some(reason) = exclusion(name) {
+            anyhow::bail!("skill `{name}` is not available on this platform ({reason})");
+        }
+    }
+
     let lock_path = lock_path_for(app, global);
     if !lock_path.is_file() {
         println!("No lockfile; nothing to update.");
@@ -882,13 +896,7 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
         let Some(locked) = lock.skills.get(name) else {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
-        if app
-            .ctx
-            .config
-            .skills
-            .get(name)
-            .is_some_and(|declaration| skip_locked_skill(app, name, declaration))
-        {
+        if wanted.is_empty() && skip_locked_skill(name, exclusion(name)) {
             continue;
         }
         let mode = install_mode_for_entry(locked, name, &scope_root, global, fallback_mode)?;

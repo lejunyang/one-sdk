@@ -884,7 +884,8 @@ destination, marks existing paths as overwrites, and asks for confirmation unles
 Declare team skills under `[skills.<name>]` in `osdk.toml`. Run `osdk skills sync`
 to install applicable declarations and record their resolutions alongside existing
 entries in `osdk.lock`. Use `skills update` to refresh a locked GitHub ref or apply
-changes to the Agent list. Both commands honor the declaration's `when` filter.
+changes to the Agent list. `sync` and bulk `update` skip skills excluded by `when`.
+Updating an excluded skill by name reports the platform requirement and exits with status 1.
 `sync` asks before replacing an existing unlocked skill directory. In non-interactive
 sessions, pass `--yes` to replace it or move it aside first.
 Pin a GitHub skill with `ref = "rev:<commit>"` to keep it

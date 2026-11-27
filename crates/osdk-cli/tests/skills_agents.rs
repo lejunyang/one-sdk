@@ -437,6 +437,7 @@ fn skills_sync_filters_platforms_and_uses_default_agents() {
         stdout.contains("skipping declaration `skipped`"),
         "{stdout}"
     );
+    assert!(stdout.contains(&format!("os={other}")), "{stdout}");
     let installed = project.join(".agents/skills/alias/SKILL.md");
     assert_eq!(std::fs::read(&installed).unwrap(), DEMO_SKILL.as_bytes());
     let lock_path = project.join("osdk.lock");
@@ -478,6 +479,7 @@ fn skills_sync_skips_replaying_a_locked_skill_on_another_platform() {
     let stdout = String::from_utf8_lossy(&sync.stdout);
     assert!(stdout.contains("skipping locked skill `demo`"), "{stdout}");
     assert!(stdout.contains("keeping its lock entry"), "{stdout}");
+    assert!(stdout.contains(&format!("os={other}")), "{stdout}");
 }
 
 #[test]
@@ -511,19 +513,34 @@ fn skills_update_respects_platform_filters() {
     )
     .unwrap();
 
-    let named = osdk(root, &project, &["skills", "update", "demo"]);
-    assert!(named.status.success(), "{named:?}");
-    assert!(!project.join(".claude/skills/demo").exists());
-    assert_eq!(std::fs::read(&lock_path).unwrap(), before);
-    let stdout = String::from_utf8_lossy(&named.stdout);
-    assert!(
-        stdout.contains("skipping locked skill `demo`")
-            && stdout.contains("keeping its lock entry"),
-        "{stdout}"
-    );
+    for args in [
+        &["skills", "update", "demo"][..],
+        &["skills", "update", "secondary", "demo"][..],
+    ] {
+        let named = osdk(root, &project, args);
+        assert_eq!(named.status.code(), Some(1), "{named:?}");
+        let stderr = String::from_utf8_lossy(&named.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "skill `demo` is not available on this platform (os={other})"
+            )),
+            "{stderr}"
+        );
+        assert!(!project.join(".claude/skills/demo").exists());
+        assert!(!project.join(".claude/skills/secondary").exists());
+        assert_eq!(std::fs::read(&lock_path).unwrap(), before);
+    }
 
     let bulk = osdk(root, &project, &["skills", "update"]);
     assert!(bulk.status.success(), "{bulk:?}");
+    let stdout = String::from_utf8_lossy(&bulk.stdout);
+    for expected in [
+        "skipping locked skill `demo`",
+        &format!("os={other}"),
+        "keeping its lock entry",
+    ] {
+        assert!(stdout.contains(expected), "{stdout}");
+    }
     assert!(!project.join(".claude/skills/demo").exists());
     let updated = read_lock(&lock_path);
     assert_eq!(updated["skills"]["demo"], original["skills"]["demo"]);
@@ -536,6 +553,13 @@ fn skills_update_respects_platform_filters() {
         updated["skills"]["secondary"]["agents"].as_array().unwrap(),
         &[toml::Value::from("codex"), toml::Value::from("claude-code")]
     );
+
+    std::fs::remove_file(&lock_path).unwrap();
+    let named = osdk(root, &project, &["skills", "update", "demo"]);
+    assert_eq!(named.status.code(), Some(1), "{named:?}");
+    let stderr = String::from_utf8_lossy(&named.stderr);
+    assert!(stderr.contains(&format!("os={other}")), "{stderr}");
+    assert!(!lock_path.exists());
 }
 
 #[test]
