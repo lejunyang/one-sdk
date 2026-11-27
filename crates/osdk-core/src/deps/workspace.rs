@@ -270,17 +270,18 @@ impl CargoConfigInputs {
     fn load(cwd: &Path, cargo_home: &Path) -> Result<Self> {
         // Stack order mirrors Cargo's scalar precedence: cwd before parents,
         // then CARGO_HOME. The extensionless filename wins at each location.
-        let mut pending: Vec<_> = cwd
-            .ancestors()
-            .map(|dir| dir.join(".cargo"))
-            .chain(std::iter::once(cargo_home.to_path_buf()))
-            .filter_map(|dir| {
-                ["config", "config.toml"]
-                    .map(|name| dir.join(name))
-                    .into_iter()
-                    .find(|path| path.is_file())
-            })
-            .collect();
+        let home_id = cargo_config_directory_id(cargo_home)?;
+        let mut home_seen = false;
+        let mut pending = Vec::new();
+        for dir in cwd.ancestors().map(|dir| dir.join(".cargo")) {
+            home_seen |= cargo_config_directory_id(&dir)? == home_id;
+            pending.extend(cargo_config_file(&dir));
+        }
+        // Keep the ancestor spelling for relative includes. Cargo skips the
+        // home-level lookup when an ancestor already visited that directory.
+        if !home_seen {
+            pending.extend(cargo_config_file(cargo_home));
+        }
         pending.reverse();
         let mut visited = HashSet::new();
         let mut result = Self::default();
@@ -321,6 +322,21 @@ impl CargoConfigInputs {
         }
         Ok(result)
     }
+}
+
+fn cargo_config_directory_id(path: &Path) -> Result<PathBuf> {
+    match dunce::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(Error::io(path, error)),
+    }
+}
+
+fn cargo_config_file(directory: &Path) -> Option<PathBuf> {
+    ["config", "config.toml"]
+        .map(|name| directory.join(name))
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 fn read_cargo_toml(path: &Path) -> Result<toml::Table> {

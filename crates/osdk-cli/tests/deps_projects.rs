@@ -604,6 +604,63 @@ fn cargo_workspace_frozen_tracks_lock_under_provider_home() {
 }
 
 #[test]
+#[cfg(unix)]
+fn cargo_workspace_frozen_deduplicates_cargo_home_by_directory() {
+    let fixture = CargoWorkspace::new(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    let shared = root.join("shared/cargo");
+    write(
+        root,
+        "shared/cargo/config.toml",
+        "include = [{ path = '../profile.toml', optional = true }]\n",
+    );
+    // This include would only be found through the CARGO_HOME spelling.
+    write(
+        root,
+        "shared/profile.toml",
+        "[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+    );
+    let alternate = root.join("alternate/Cargo.lock");
+    std::fs::create_dir(alternate.parent().unwrap()).unwrap();
+    std::fs::write(&alternate, &lock).unwrap();
+    std::os::unix::fs::symlink(&shared, root.join(".cargo")).unwrap();
+    let config_path = root.join("osdk.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    let home = toml::Value::String(shared.to_str().unwrap().into());
+    std::fs::write(
+        config_path,
+        format!("{config}[deps.cargo.env]\nCARGO_HOME = {home}\n"),
+    )
+    .unwrap();
+
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    assert!(String::from_utf8_lossy(&first.stdout).contains("cargo fetch --locked"));
+    let unchanged = fixture.member(&[]);
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    let native = fixture
+        .command(&fixture.cargo)
+        .current_dir(root.join("crates/demo"))
+        .env("CARGO_HOME", shared)
+        .args(["fetch", "--locked", "--offline"])
+        .output()
+        .unwrap();
+    assert!(!native.status.success(), "{native:?}");
+    let missing = fixture.member(&[]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no Cargo.lock in Cargo workspace root")
+    );
+    fixture.assert_locks(None);
+    assert_eq!(std::fs::read(alternate).unwrap(), lock);
+}
+
+#[test]
 #[cfg_attr(
     all(windows, target_env = "gnu"),
     ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
