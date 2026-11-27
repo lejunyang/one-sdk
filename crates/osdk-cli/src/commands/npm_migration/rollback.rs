@@ -11,23 +11,11 @@ use osdk_core::store::dirlink;
 
 use super::{modules, npm_command, ManagedNodeTools};
 
-#[cfg(unix)]
-const MAN_DIR: &str = "share/man";
-
-#[cfg(unix)]
-struct ChangedManLink {
-    path: PathBuf,
-    backup: PathBuf,
-    target: PathBuf,
-}
-
 pub(in crate::commands) struct Snapshot {
     prefix: PathBuf,
     bin: PathBuf,
     backup: tempfile::TempDir,
     directory_permissions: BTreeMap<PathBuf, Permissions>,
-    #[cfg(unix)]
-    linked_man_sections: BTreeMap<String, PathBuf>,
 }
 
 impl Snapshot {
@@ -45,8 +33,6 @@ impl Snapshot {
             bin,
             backup,
             directory_permissions: BTreeMap::new(),
-            #[cfg(unix)]
-            linked_man_sections: BTreeMap::new(),
         };
 
         let modules = modules(&snapshot.prefix);
@@ -54,12 +40,9 @@ impl Snapshot {
         snapshot.capture_tree(&modules, "node_modules")?;
         #[cfg(unix)]
         {
-            let man = snapshot.prefix.join(MAN_DIR);
+            let man = snapshot.prefix.join("share/man");
             check_directory_if_present(man.parent().unwrap())?;
             snapshot.capture_tree(&man, "man")?;
-            if man.exists() {
-                snapshot.capture_linked_man_sections(&man)?;
-            }
         }
         check_bin(&snapshot.bin)?;
         let backup_bin = snapshot.backup.path().join("bin");
@@ -82,49 +65,6 @@ impl Snapshot {
                 ));
             }
             self.copy_entry(path, &self.backup.path().join(backup_name))?;
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    fn capture_linked_man_sections(&mut self, man: &Path) -> Result<()> {
-        for entry in fs::read_dir(man)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let Some(section) = name
-                .to_str()
-                .and_then(|name| name.strip_prefix("man"))
-                .filter(|section| {
-                    !section.is_empty() && section.bytes().all(|b| b.is_ascii_digit())
-                })
-            else {
-                continue;
-            };
-            if !entry.file_type()?.is_symlink() {
-                continue;
-            }
-            let link = entry.path();
-            let directory = match fs::canonicalize(&link) {
-                Ok(directory) => directory,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(error).with_context(|| format!("resolving {}", link.display()))
-                }
-            };
-            if !directory.is_dir() {
-                continue;
-            }
-            let backup = self.backup.path().join("linked-man").join(section);
-            fs::create_dir_all(&backup)?;
-            // npm writes direct entries ending in the section number or .<section>.gz.
-            for page in fs::read_dir(&directory)? {
-                let page = page?;
-                if is_man_page(&page.file_name(), section) {
-                    self.copy_entry(&page.path(), &backup.join(page.file_name()))?;
-                }
-            }
-            self.linked_man_sections
-                .insert(section.to_owned(), directory);
         }
         Ok(())
     }
@@ -162,16 +102,13 @@ impl Snapshot {
         tools: &ManagedNodeTools,
         planned: impl IntoIterator<Item = &'a str>,
     ) -> Result<()> {
-        self.verify_paths(&tools.prefix)?;
+        self.verify_prefix(&tools.prefix)?;
         if !real_directory(&self.backup.path().symlink_metadata()?) {
             return Err(anyhow!("Node package backup is not a real directory"));
         }
         let modules = modules(&self.prefix);
         let old_modules = self.backup.path().join("node_modules");
         check_directory_if_present(modules.parent().unwrap())?;
-        let planned: Vec<_> = planned.into_iter().collect();
-        #[cfg(unix)]
-        let changed_man_links = self.changed_man_links(&planned)?;
         if inspect(&modules)?.is_some_and(|meta| real_directory(&meta)) {
             let mut args = vec!["uninstall", "-g", "--offline", "--ignore-scripts"];
             for name in planned {
@@ -185,15 +122,14 @@ impl Snapshot {
                 let _ = npm_command(tools, &args);
             }
         }
-        self.verify_paths(&tools.prefix)?;
+        self.verify_prefix(&tools.prefix)?;
         check_directory_if_present(modules.parent().unwrap())?;
         self.restore_tree(&old_modules, &modules)?;
         #[cfg(unix)]
         {
-            let man = self.prefix.join(MAN_DIR);
+            let man = self.prefix.join("share/man");
             check_directory_if_present(man.parent().unwrap())?;
             self.restore_tree(&self.backup.path().join("man"), &man)?;
-            self.restore_man_links(changed_man_links)?;
         }
 
         check_bin(&self.bin)?;
@@ -214,7 +150,7 @@ impl Snapshot {
         Ok(())
     }
 
-    fn verify_paths(&self, managed_prefix: &Path) -> Result<()> {
+    fn verify_prefix(&self, managed_prefix: &Path) -> Result<()> {
         let resolved = resolve_prefix(managed_prefix)?;
         if resolved != self.prefix {
             return Err(anyhow!(
@@ -223,78 +159,6 @@ impl Snapshot {
                 resolved.display(),
                 self.prefix.display()
             ));
-        }
-        #[cfg(unix)]
-        for (section, directory) in &self.linked_man_sections {
-            let link = self.prefix.join(MAN_DIR).join(format!("man{section}"));
-            let resolved = fs::canonicalize(&link)
-                .with_context(|| format!("resolving npm man section {}", link.display()))?;
-            if resolved != *directory {
-                return Err(anyhow!(
-                    "npm man section {} now resolves to {} instead of {}",
-                    link.display(),
-                    resolved.display(),
-                    directory.display()
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    fn changed_man_links(&self, planned: &[&str]) -> Result<Vec<ChangedManLink>> {
-        // npm builds the relative link from the logical share/man/manN path,
-        // even when that directory is itself a link and the new package is gone.
-        let module_links = modules(Path::new("../../.."));
-        let package_dirs: Vec<_> = planned
-            .iter()
-            .filter(|name| is_npm_install_key(name))
-            .map(|name| module_links.join(name))
-            .collect();
-        let mut links = Vec::new();
-        for (section, directory) in &self.linked_man_sections {
-            let backup = self.backup.path().join("linked-man").join(section);
-            for page in fs::read_dir(directory)? {
-                let page = page?;
-                let name = page.file_name();
-                if !is_man_page(&name, section) || !page.file_type()?.is_symlink() {
-                    continue;
-                }
-                let path = page.path();
-                let target = fs::read_link(&path)?;
-                if package_dirs.iter().any(|directory| {
-                    target.strip_prefix(directory).is_ok_and(|suffix| {
-                        suffix.file_name() == Some(&name)
-                            && suffix
-                                .components()
-                                .all(|part| matches!(part, std::path::Component::Normal(_)))
-                    })
-                }) {
-                    links.push(ChangedManLink {
-                        path,
-                        backup: backup.join(name),
-                        target,
-                    });
-                }
-            }
-        }
-        Ok(links)
-    }
-
-    #[cfg(unix)]
-    fn restore_man_links(&self, links: Vec<ChangedManLink>) -> Result<()> {
-        for link in links {
-            let current = inspect(&link.path)?;
-            if let Some(metadata) = &current {
-                if !metadata.file_type().is_symlink() || fs::read_link(&link.path)? != link.target {
-                    continue;
-                }
-            }
-            if inspect(&link.backup)?.is_some() {
-                self.restore_entry(&link.backup, &link.path)?;
-            } else if let Some(metadata) = current {
-                remove_entry(&link.path, &metadata)?;
-            }
         }
         Ok(())
     }
@@ -358,15 +222,6 @@ impl Snapshot {
     }
 }
 
-#[cfg(unix)]
-fn is_man_page(name: &OsStr, section: &str) -> bool {
-    name.to_str().is_some_and(|name| {
-        let name = name.strip_suffix(".gz").unwrap_or(name);
-        name.rsplit_once('.')
-            .is_some_and(|(_, suffix)| suffix == section)
-    })
-}
-
 fn inspect(path: &Path) -> Result<Option<Metadata>> {
     match path.symlink_metadata() {
         Ok(metadata) => Ok(Some(metadata)),
@@ -417,13 +272,11 @@ fn is_launcher(name: &OsStr, metadata: &Metadata) -> bool {
     !runtime && !real_directory(metadata)
 }
 
-fn is_npm_install_key(name: &str) -> bool {
-    osdk_core::tool::ToolId::dynamic("npm", name)
-        .is_ok_and(|id| id.subject() == name && !name.starts_with('-'))
-}
-
 fn added_package(name: &str, before: &Path, current: &Path) -> Result<bool> {
-    if !is_npm_install_key(name) {
+    let Ok(id) = osdk_core::tool::ToolId::dynamic("npm", name) else {
+        return Ok(false);
+    };
+    if id.subject() != name || name.starts_with('-') {
         return Ok(false);
     }
     if let Some((scope, _)) = name.split_once('/') {
@@ -552,48 +405,6 @@ mod tests {
         assert!(error.contains(&backup.display().to_string()), "{error}");
         assert!(backup.is_dir());
         assert!(unrelated.is_dir());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn node_package_migration_refuses_rollback_after_man_section_retarget() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().unwrap();
-        let prefix = temp.path().join("target");
-        let bin = prefix.join("bin");
-        let section = prefix.join(MAN_DIR).join("man1");
-        let original = temp.path().join("original");
-        let replacement = temp.path().join("replacement");
-        for directory in [&bin, section.parent().unwrap(), &original, &replacement] {
-            fs::create_dir_all(directory).unwrap();
-        }
-        fs::write(original.join("cli.1.gz"), b"original page").unwrap();
-        fs::write(replacement.join("other.1.gz"), b"unrelated page").unwrap();
-        symlink(&original, &section).unwrap();
-        let tools = ManagedNodeTools {
-            npm: bin.join("unused"),
-            bin,
-            prefix,
-        };
-        let snapshot = Snapshot::capture(&tools).unwrap();
-        let backup = snapshot.backup.path().to_owned();
-        fs::remove_file(&section).unwrap();
-        symlink(&replacement, &section).unwrap();
-
-        let error = format!("{:#}", snapshot.restore(&tools, []).unwrap_err());
-        assert!(error.contains("now resolves to"), "{error}");
-        assert!(error.contains(&section.display().to_string()), "{error}");
-        assert!(error.contains(&backup.display().to_string()), "{error}");
-        assert_eq!(fs::read_link(section).unwrap(), replacement);
-        assert_eq!(
-            fs::read(replacement.join("other.1.gz")).unwrap(),
-            b"unrelated page"
-        );
-        assert_eq!(
-            fs::read(backup.join("linked-man/1/cli.1.gz")).unwrap(),
-            b"original page"
-        );
     }
 
     #[test]

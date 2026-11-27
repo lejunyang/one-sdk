@@ -434,12 +434,8 @@ to their original targets once published at the original location.
 Node-to-Node migration (`--to`) also pins prefixes explicitly, independent of
 activation variables and builtin defaults. Before installing, it resolves the
 target prefix and backs up global `node_modules`, launchers, and the Unix
-`share/man` tree inside that directory, on the target volume. On Unix, it also
-backs up the matching man-page entries in the resolved directories of symlinked
-sections such as `man1`. Before restoring, it verifies that the managed prefix
-and these section links still resolve to their original directories.
-In symlinked sections, it restores or removes only man-page links into packages
-planned for installation by this migration.
+`share/man` tree inside that directory, on the target volume. Before restoring,
+it verifies that the managed prefix still resolves to that directory.
 The backup preserves link text and the original junction or symlink type on
 Windows. Junction backups use Rust's Windows path conversion when the backup
 path exceeds `MAX_PATH`. On install failure it finds newly added planned packages

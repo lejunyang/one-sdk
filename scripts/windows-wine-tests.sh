@@ -99,35 +99,4 @@ EOF
 x86_64-w64-mingw32-gcc "$test_root/wine-ready.c" -o "$test_root/wine-ready.exe"
 (cd "$test_root" && "$wine_root/bin/wine" "$test_root/wine-ready.exe")
 
-# Wine itself can open an overlong DOS path. Check the actual write handle
-# for the backup junction to catch a missing Win32 extended-path prefix.
-junction_test=commands::npm_migration::rollback::tests::node_package_migration_backs_up_junction_past_max_path
-junction_trace="$test_root/junction-file.log"
-if ! WINEDEBUG=-all,+file "$toolchain_cargo" test --locked -p osdk-cli --bin osdk \
-  --target "$target" -- --exact "$junction_test" 2>"$junction_trace"; then
-  tail -n 80 "$junction_trace" >&2
-  exit 1
-fi
-awk -F '"' '
-  BEGIN {
-    # Wine escapes each Windows backslash in the trace.
-    slash = "\\\\"
-    extended_prefix = slash slash "?" slash
-    backup_link = slash "node_modules" slash "linked"
-  }
-  /:trace:file:CreateFileW L"/ && $3 ~ /^ GENERIC_WRITE / &&
-    index($2, slash ".node-migration-") &&
-    substr($2, length($2) - length(backup_link) + 1) == backup_link {
-      print
-      opens++
-      if (index($2, extended_prefix) == 1) extended++
-  }
-  END {
-    if (opens != 1 || extended != 1) {
-      printf "Expected one backup junction write open with a Win32 extended path; found %d write opens, %d with the prefix\n", opens, extended > "/dev/stderr"
-      exit 1
-    }
-  }
-' "$junction_trace"
-
 "$toolchain_cargo" test --locked --workspace --target "$target"

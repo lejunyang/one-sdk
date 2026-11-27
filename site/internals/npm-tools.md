@@ -326,9 +326,7 @@ Node 随附 npm（Unix 的 `lib/node_modules/npm`、Windows 的 `node_modules/np
 
 Node 版本间迁移（`--to`）也显式指定 prefix，不受激活变量或 builtin 默认值影响。
 执行前解析目标 prefix，在实际目录内备份全局 `node_modules`、命令入口和 Unix 的 `share/man` 目录。
-Unix 上，符号链接形式的手册章节目录（如 `man1`）也会按实际路径备份相应章节的条目。
-回滚前检查受管 prefix 和这些章节链接是否仍指向备份时的目录。
-对符号链接章节，只恢复或清理指向此次计划安装包的手册入口。
+回滚前检查受管 prefix 是否仍指向原目录。
 备份保留原链接文本，Windows 上也保留 junction 和符号链接各自的类型。
 打开 junction 备份目录时使用 Rust 的 Windows 长路径转换，覆盖备份路径超过 `MAX_PATH` 的情况。
 安装失败后按目录条目识别已落盘的新增包，先尝试离线卸载这些计划内的包，再按快照清除
