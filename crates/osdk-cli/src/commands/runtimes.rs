@@ -2,8 +2,10 @@
 
 use super::*;
 use crate::cli::ModelViewCommand;
-use osdk_core::model::refs::{plan_prune, ModelRefs, ProjectModelRefs, PruneAction, PruneScope};
-use std::collections::BTreeSet;
+use osdk_core::model::refs::{
+    plan_prune, same_model_name, ModelRefs, ProjectModelRefs, PruneAction, PruneEntry, PruneScope,
+};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub fn node(app: &App, command: NodeCommand) -> Result<()> {
@@ -838,7 +840,7 @@ fn model_unuse(
     let plan = if keep_snapshot {
         Vec::new()
     } else {
-        plan_prune(
+        plan_model_prune(
             store,
             &refs,
             &registered,
@@ -875,9 +877,14 @@ fn model_unuse(
         match entry.action {
             PruneAction::Skip {
                 ref reason,
-                owner: None,
+                ref owner,
             } => {
-                println!("kept {}: {reason}", entry.path.display());
+                if !other_projects
+                    .iter()
+                    .any(|project| owner.as_ref() == Some(&project.root))
+                {
+                    println!("kept {}: {reason}", entry.path.display());
+                }
             }
             _ => snapshots_removed += usize::from(entry.remove(store)?),
         }
@@ -1413,7 +1420,7 @@ pub(crate) async fn model_sync(
         }
         // View reconciliation may move an existing symlink. Plan against the
         // same pre-reconciliation view state that dry-run reads.
-        let plan = plan_prune(
+        let plan = plan_model_prune(
             store,
             refs,
             &registered,
@@ -1507,6 +1514,34 @@ pub(crate) async fn model_sync(
         }
     })?;
     Ok(())
+}
+
+fn plan_model_prune(
+    store: &osdk_core::model::ModelStore,
+    project: &ProjectModelRefs,
+    registered: &[ProjectModelRefs],
+    scope: PruneScope<'_>,
+) -> Result<Vec<PruneEntry>> {
+    let mut locks = BTreeMap::new();
+    Ok(plan_prune(
+        store,
+        project,
+        registered,
+        scope,
+        |other, name, manifest| {
+            let models = match locks.entry(other.lock.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(
+                    crate::lockfile::locked_models(&other.lock)
+                        .map_err(|error| osdk_core::error::Error::other(format!("{error:#}")))?,
+                ),
+            };
+            Ok(models.iter().any(|(locked_name, model)| {
+                same_model_name(name, locked_name)
+                    && verify_restored_against_lock(name, model, manifest).is_ok()
+            }))
+        },
+    )?)
 }
 
 /// Require a restored snapshot to match what the lock committed.

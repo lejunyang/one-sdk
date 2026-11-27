@@ -11,7 +11,7 @@
 | `list/show/path/verify` | 检查本地快照；查询命令支持 `--json`；`path --stable` 输出稳定 current 路径 |
 | `remove <NAME>` | 报告仍引用该名称的项目，再删除同名全部快照和视图；保留项目声明、lock 和引用登记 |
 
-`sync --prune` 保留其他项目已登记的快照、本地导入、旧版未登记的快照和视图仍在使用的快照。需拉取或还原的名称留到下次清理。
+`sync --prune` 保留其他已登记项目仍引用的快照，包括切换分支后当前锁中的引用。本地导入、引入项目清理前物化的快照和视图仍在使用的快照也会保留。需拉取或还原的名称留到下次清理。
 用 `sync --prune --dry-run --jsonl` 只读预演，删除事件带 `project`、`snapshot`、`path`。
 预演读取 `planned`，执行读取 `completed`。其他项目仍引用时，`skipped` 事件的 `project` 指向该项目。
 汇总的 `removed` 在预演中表示预计删除数。

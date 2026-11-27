@@ -11,7 +11,10 @@ use crate::lock::FileLock;
 use crate::project::root_id;
 
 use super::view::{ViewKind, ViewState, ViewStore};
-use super::{valid_snapshot_key, validate_model_name, write_json_atomic, ModelStore, ProviderId};
+use super::{
+    valid_snapshot_key, validate_model_name, write_json_atomic, ModelStore, ProviderId,
+    SnapshotManifest,
+};
 
 const SCHEMA: u32 = 1;
 
@@ -280,7 +283,7 @@ pub enum PruneScope<'a> {
 
 // Shared caches can live on case-insensitive filesystems. Err on the side of
 // retaining data for aliases of the same on-disk name.
-pub(crate) fn same_model_name(left: &str, right: &str) -> bool {
+pub fn same_model_name(left: &str, right: &str) -> bool {
     fn component(name: &str) -> &str {
         match name {
             "." | ".." => "_",
@@ -295,14 +298,15 @@ pub fn plan_prune(
     project: &ProjectModelRefs,
     registered: &[ProjectModelRefs],
     scope: PruneScope<'_>,
+    mut lock_references: impl FnMut(&ProjectModelRefs, &str, &SnapshotManifest) -> Result<bool>,
 ) -> Result<Vec<PruneEntry>> {
     if project.retired.is_empty() {
         return Ok(Vec::new());
     }
     let views = ViewStore::new(store.dirs.clone(), store.cas.clone(), store.link_mode);
     let state = ViewState::load(&store.dirs)?;
-    let owners = std::iter::once(project)
-        .chain(registered.iter().filter(|other| other.root != project.root));
+    let other_projects = registered.iter().filter(|other| other.root != project.root);
+    let owners = std::iter::once(project).chain(other_projects.clone());
     let mut plan = Vec::new();
     for (name, keys) in &project.retired {
         if matches!(scope, PruneScope::Unuse { name: target, .. } if target != name) {
@@ -332,40 +336,50 @@ pub fn plan_prune(
             .filter(|entry| keys.contains(&entry.snapshot))
         {
             let is_current = current.as_deref() == Some(entry.snapshot.as_str());
-            let owner = owners.clone().find(|other| {
-                other.models.iter().any(|(other_name, keys)| {
-                    same_model_name(other_name, name) && keys.contains(&entry.snapshot)
-                })
-            });
-            let action = match (entry.manifest, owner) {
-                (Err(error), _) => {
-                    PruneAction::skip(format!("unreadable snapshot manifest: {error}"))
-                }
-                (Ok(manifest), _)
-                    if manifest.schema != 1 || !same_model_name(&manifest.name, name) =>
-                {
+            let action = match entry.manifest {
+                Err(error) => PruneAction::skip(format!("unreadable snapshot manifest: {error}")),
+                Ok(manifest) if manifest.schema != 1 || !same_model_name(&manifest.name, name) => {
                     PruneAction::skip("invalid snapshot manifest identity")
                 }
-                (Ok(manifest), _) if manifest.provider == ProviderId::Local => {
+                Ok(manifest) if manifest.provider == ProviderId::Local => {
                     PruneAction::skip("local import")
                 }
-                (Ok(_), Some(owner)) => {
-                    let root = &owner.root;
-                    PruneAction::Skip {
-                        reason: format!("still referenced by {}", root.display()),
-                        owner: Some(root.clone()),
-                    }
+                Ok(manifest)
+                    if matches!(scope, PruneScope::Sync(_)) && !manifest.prune_eligible =>
+                {
+                    PruneAction::skip("snapshot predates project prune tracking")
                 }
-                (Ok(_), _) if pending_sync => {
+                Ok(_) if pending_sync => {
                     PruneAction::skip("sync changes this model; run prune again after sync")
                 }
-                (Ok(_), _) => {
-                    let path = dunce::canonicalize(&entry.path)
-                        .map_err(|error| Error::io(&entry.path, error))?;
-                    if !is_current && stable_target.as_ref() == Some(&path) {
-                        PruneAction::skip("still used by the stable current link")
+                Ok(manifest) => {
+                    let mut owner = owners.clone().find(|other| {
+                        other.models.iter().any(|(other_name, keys)| {
+                            same_model_name(other_name, name) && keys.contains(&entry.snapshot)
+                        })
+                    });
+                    // A checkout can replace the lock without updating the registry.
+                    if owner.is_none() {
+                        for other in other_projects.clone() {
+                            if lock_references(other, name, &manifest)? {
+                                owner = Some(other);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(owner) = owner {
+                        PruneAction::Skip {
+                            reason: format!("still referenced by {}", owner.root.display()),
+                            owner: Some(owner.root.clone()),
+                        }
                     } else {
-                        PruneAction::RemoveSnapshot
+                        let path = dunce::canonicalize(&entry.path)
+                            .map_err(|error| Error::io(&entry.path, error))?;
+                        if !is_current && stable_target.as_ref() == Some(&path) {
+                            PruneAction::skip("still used by the stable current link")
+                        } else {
+                            PruneAction::RemoveSnapshot
+                        }
                     }
                 }
             };

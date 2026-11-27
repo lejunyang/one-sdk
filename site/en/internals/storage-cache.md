@@ -86,8 +86,11 @@ Explicit `cache clean` keeps its existing download + uv/pip scope. Its download 
 `osdk prune`, post-SDK-uninstall cleanup, and post-model-remove cleanup call this function directly. Uninstall removes the install tree before GC, and model removal does the same for its model tree. The current implementation has **no claim/lease mechanism and acquires no global GC lock**. Although the module comment in [`lock.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) mentions guarding store GC, no GC call site actually uses `FileLock`. It is therefore incorrect to claim that claim GC is globally serialized, or that GC is mutually exclusive with installation/publication of a different version or model.
 
 Model sync registration and snapshot removal share `<data>/model-refs/registry.lock`.
-Project pruning considers only that project's retired keys and stops if a project
-registration is unreadable. Removing the current snapshot requires all snapshots
+Project pruning considers only that project's retired keys. Fresh snapshot
+manifests record `prune_eligible`. For older snapshots the field defaults to false.
+Registering or repairing an older snapshot leaves this protection in place.
+An unreadable registration or a lock that cleanup cannot read stops pruning.
+Removing the current snapshot requires all snapshots
 under the name to be eligible and no view membership. Retained snapshot manifests
 continue to protect CAS objects. A missing or moved project directory does not
 expire its registration.

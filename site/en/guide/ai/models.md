@@ -207,9 +207,11 @@ a private endpoint restores from the lock even after `endpoint` is removed from 
 
 `--prune` applies to whole-project synchronization. It removes snapshots previously
 synced by this project that its current lock no longer references. It preserves
-snapshots registered by other projects, local imports, older unregistered
-snapshots, and snapshots still in use by views. The first sync registers
-verified snapshots for the current lock. Removing a declaration alone can
+local imports, snapshots used by views, and snapshots referenced by other
+registered projects, including through their current locks after a branch switch.
+The first sync registers verified snapshots for the current lock. Snapshots
+materialized before project pruning stay protected after registration.
+Removing a declaration alone can
 leave the snapshot referenced by the lock. If sync needs to pull or restore a
 model, pruning for that name is deferred until the next `--prune`, so a preview
 can list this run's removals without downloading anything.

@@ -224,6 +224,9 @@ pub struct SnapshotManifest {
     pub derived_from: Option<String>,
     pub files: Vec<ModelFile>,
     pub created_at: u64,
+    /// Older snapshots may still be shared by projects that have never registered.
+    #[serde(default)]
+    pub prune_eligible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +368,11 @@ impl ModelStore {
             return self.load_path(&destination);
         }
         self.protect_existing_snapshot(&destination, &files)?;
+        // Repairing an existing snapshot does not establish its provenance.
+        let prune_eligible = !destination.exists()
+            || self
+                .load_path(&destination)
+                .is_ok_and(|installed| installed.manifest.prune_eligible);
 
         let temporary = snapshots.join(format!(".{snapshot}.tmp-{}", std::process::id()));
         if temporary.exists() {
@@ -436,6 +444,7 @@ impl ModelStore {
                 derived_from: identity.derived_from,
                 files: model_files,
                 created_at: crate::source::now_secs(),
+                prune_eligible,
             };
             write_json_atomic(&temporary.join(MODEL_MANIFEST_FILE), &manifest)?;
             std::fs::write(temporary.join(COMPLETE_MARKER), b"")

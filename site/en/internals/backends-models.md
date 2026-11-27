@@ -176,6 +176,9 @@ lock path. The same rule applies to new pulls, lock replays and verified local
 reuse. A single-name sync updates only that name. If a locked model fails to
 restore, its prior registration remains. Superseded keys are tracked separately
 from active references so a later prune can still find them.
+Cleanup also reads the lock paths of other registered projects and matches
+candidates by name, snapshot identity, file paths, sizes, and SHA-256 digests.
+This protects references introduced by a branch switch before the next sync.
 
 `model unuse` releases the selected project's registration for the name.
 For legacy data, an explicit unuse can also match materialized snapshots

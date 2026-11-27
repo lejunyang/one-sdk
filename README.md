@@ -848,7 +848,8 @@ osdk model view path comfyui
 Civitai's `civitai.com` and `civitai.red` front doors are both built-in official sources. Auto mode probes both for the exact requested version, keeps the existing `official` source id for `.com`, and exposes `official-red` for an explicit pin or `--source` override.
 
 `model sync` re-resolves changes to source, variant, semantic metadata, include, or exclude, then replays immutable
-lock entries. `model sync --prune` preserves snapshots still used by other projects and local imports.
+lock entries. `model sync --prune` preserves snapshots still used by other projects, snapshots
+from before project tracking, and local imports.
 `model import NAME PATH` snapshots a local file or directory into CAS without creating a
 project declaration or lock entry; local imports are machine-specific and must be re-imported from their
 original bytes. `model unuse NAME` removes this project's model requirement and cleans up its unused

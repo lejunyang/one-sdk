@@ -20,7 +20,7 @@ osdk prune [--dry-run]
 | `cache env` | 打印所有受支持的下游原生缓存环境映射 |
 | `cache clean` | 删除下载副本及 uv/pip 原生缓存，保留 CAS 与安装 |
 | `prune --dry-run` | 当前只输出演练提示，不计算或列出候选对象 |
-| `model sync --prune` | 清理本项目已弃用且无其他项目或视图使用的远程快照，随后回收无引用的 CAS 对象 |
+| `model sync --prune` | 清理本项目已弃用且无其他项目或视图使用的远程快照，随后回收无引用的 CAS 对象。保留引入项目清理前物化的快照 |
 | `prune` | 以 SDK installs 与模型 snapshots 的 manifest 为根，删除无引用 CAS 对象 |
 
 `cache clean` 不删除 CAS、安装、模型或 remote/source metadata；在 `<cache>/pkg` 中只清 uv/pip，不清其他 manager store。

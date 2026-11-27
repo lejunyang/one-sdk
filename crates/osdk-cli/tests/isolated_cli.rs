@@ -1578,6 +1578,15 @@ fn model_unuse_removes_only_the_named_project_and_lock_entries() {
 }
 
 fn publish_model_fixture(root: &Path, name: &str, file: &str) -> osdk_core::model::InstalledModel {
+    publish_model_fixture_with_bytes(root, name, file, format!("{name}/{file}").as_bytes())
+}
+
+fn publish_model_fixture_with_bytes(
+    root: &Path,
+    name: &str,
+    file: &str,
+    bytes: &[u8],
+) -> osdk_core::model::InstalledModel {
     use osdk_core::model::{DownloadedModelFile, ModelStore, ProviderId, SnapshotIdentity};
     use osdk_core::pipeline::verify::{hash_file, HashAlgo};
 
@@ -1589,8 +1598,7 @@ fn publish_model_fixture(root: &Path, name: &str, file: &str) -> osdk_core::mode
     let cas = std::sync::Arc::new(osdk_core::store::Cas::new(dirs.store.clone()));
     let store = ModelStore::new(dirs, cas, osdk_core::store::link::LinkMode::Copy);
     let source = root.join(file);
-    let bytes = format!("{name}/{file}");
-    std::fs::write(&source, &bytes).unwrap();
+    std::fs::write(&source, bytes).unwrap();
     store
         .publish(
             SnapshotIdentity {
@@ -1641,6 +1649,142 @@ fn model_fixture_command(root: &Path, project: &Path, args: &[&str]) -> Output {
     let output = run_isolated_in(root, project, args);
     assert!(output.status.success(), "osdk {args:?}: {output:?}");
     output
+}
+
+#[test]
+fn model_sync_prune_keeps_a_shared_snapshot_from_before_reference_tracking() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let a = root.join("项目 A");
+    let b = root.join("项目 B");
+    for project in [&a, &b] {
+        std::fs::create_dir(project).unwrap();
+        std::fs::write(project.join("osdk.toml"), "[tools]\n").unwrap();
+    }
+    let legacy = publish_model_fixture(root, "legacy", "legacy.safetensors");
+    let manifest_path = legacy.path.join(".osdk-model.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    // A snapshot written by the old CLI predates publication provenance.
+    manifest.as_object_mut().unwrap().remove("prune_eligible");
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    write_model_fixture_lock(&a, &[&legacy]);
+    write_model_fixture_lock(&b, &[&legacy]);
+    let b_lock = std::fs::read(b.join("osdk.lock")).unwrap();
+    model_fixture_command(root, &a, &["--offline", "model", "sync"]);
+
+    write_model_fixture_lock(&a, &[]);
+    let preview = model_fixture_command(
+        root,
+        &a,
+        &[
+            "--offline",
+            "model",
+            "sync",
+            "--prune",
+            "--dry-run",
+            "--jsonl",
+        ],
+    );
+    let events = String::from_utf8(preview.stdout).unwrap();
+    for line in events.lines() {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(
+            event["status"] != "planned" || event["action"] != "remove",
+            "{events}"
+        );
+    }
+    model_fixture_command(root, &a, &["--offline", "model", "sync", "--prune"]);
+    model_fixture_command(root, &b, &["model", "path", "legacy"]);
+    model_fixture_command(root, &b, &["model", "verify", "legacy"]);
+    assert_eq!(std::fs::read(b.join("osdk.lock")).unwrap(), b_lock);
+    assert_eq!(
+        std::fs::read(legacy.path.join("loras/legacy.safetensors")).unwrap(),
+        b"legacy/legacy.safetensors"
+    );
+    let cas = osdk_core::store::Cas::new(root.join("store"));
+    assert!(cas
+        .object_path(&legacy.manifest.files[0].cas_hash)
+        .is_file());
+}
+
+#[test]
+fn model_sync_prune_checks_a_registered_projects_current_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let a = root.join("项目 A");
+    let b = root.join("项目 B");
+    for project in [&a, &b] {
+        std::fs::create_dir(project).unwrap();
+        std::fs::write(project.join("osdk.toml"), "[tools]\n").unwrap();
+    }
+    let retired =
+        publish_model_fixture_with_bytes(root, "shared", "shared.safetensors", b"retired");
+    write_model_fixture_lock(&a, &[&retired]);
+    let sync = ["--offline", "model", "sync"];
+    model_fixture_command(root, &a, &sync);
+    let shared = publish_model_fixture_with_bytes(root, "shared", "shared.safetensors", b"current");
+    write_model_fixture_lock(&a, &[&shared]);
+    model_fixture_command(root, &a, &sync);
+    let other = publish_model_fixture(root, "other", "other.safetensors");
+    write_model_fixture_lock(&b, &[&other]);
+    model_fixture_command(root, &b, &sync);
+    // B switches lock contents and uses the already materialized shared
+    // snapshot without running sync again.
+    write_model_fixture_lock(&b, &[&shared]);
+    let b_lock = std::fs::read(b.join("osdk.lock")).unwrap();
+    write_model_fixture_lock(&a, &[]);
+    let b_root = dunce::canonicalize(&b).unwrap();
+    for (args, removal_status) in [
+        (
+            &[
+                "--offline",
+                "model",
+                "sync",
+                "--prune",
+                "--dry-run",
+                "--jsonl",
+            ][..],
+            "planned",
+        ),
+        (
+            &["--offline", "model", "sync", "--prune", "--jsonl"][..],
+            "completed",
+        ),
+    ] {
+        let output = model_fixture_command(root, &a, args);
+        let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let removed: Vec<_> = events
+            .iter()
+            .filter(|event| event["status"] == removal_status && event["action"] == "remove")
+            .map(|event| event["snapshot"].as_str().unwrap())
+            .collect();
+        assert_eq!(removed, [retired.snapshot_key()], "{events:?}");
+        assert!(events.iter().any(|event| {
+            event["snapshot"] == shared.snapshot_key()
+                && event["status"] == "skipped"
+                && event["project"] == b_root.display().to_string()
+        }));
+        assert_eq!(retired.path.exists(), removal_status == "planned");
+    }
+    model_fixture_command(root, &b, &["model", "path", "shared"]);
+    model_fixture_command(root, &b, &["model", "verify", "shared"]);
+    assert_eq!(std::fs::read(b.join("osdk.lock")).unwrap(), b_lock);
+    assert_eq!(
+        std::fs::read(shared.path.join("loras/shared.safetensors")).unwrap(),
+        b"current"
+    );
+    let cas = osdk_core::store::Cas::new(root.join("store"));
+    assert!(cas
+        .object_path(&shared.manifest.files[0].cas_hash)
+        .is_file());
+    assert!(!cas
+        .object_path(&retired.manifest.files[0].cas_hash)
+        .exists());
 }
 
 #[test]
