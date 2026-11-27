@@ -152,6 +152,9 @@ osdk env --format json             # 另有 bash、zsh、fish、powershell
 osdk exec -- ./gradlew build       # 不带 --tool：使用当前目录自己的选择
 ```
 
+在 Unix 上，构建命令启动后，CI 可以向 `osdk exec` 的 PID 发送
+`SIGTERM` 或 `SIGINT` 来取消构建命令。
+
 更新全局选择的工具时，显式指定 `@latest`：
 
 ```bash

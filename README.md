@@ -167,6 +167,9 @@ osdk env --format json             # also bash, zsh, fish, powershell
 osdk exec -- ./gradlew build       # without --tool: this directory's own selection
 ```
 
+On Unix, a CI runner can send `SIGTERM` or `SIGINT` to the
+`osdk exec` PID to cancel the build command after it starts.
+
 To update a globally selected tool to the latest release, request `@latest` explicitly:
 
 ```bash

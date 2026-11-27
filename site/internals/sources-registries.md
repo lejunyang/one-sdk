@@ -75,13 +75,13 @@ registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sd
 - 只有纯内置集合按本次 latency 选择最快健康项；
 - URL 会规范化并去重。
 
-选中后只向该子进程注入 manager 原生变量：npm `npm_config_registry`、pnpm 10/11 `npm_config_registry` + `pnpm_config_registry`、Yarn Classic `YARN_REGISTRY`、Yarn Berry `YARN_NPM_REGISTRY_SERVER`、Bun `BUN_CONFIG_REGISTRY`、Deno `NPM_CONFIG_REGISTRY`。
+选中后只向该命令注入 manager 原生变量：npm `npm_config_registry`、pnpm 10/11 `npm_config_registry` + `pnpm_config_registry`、Yarn Classic `YARN_REGISTRY`、Yarn Berry `YARN_NPM_REGISTRY_SERVER`、Bun `BUN_CONFIG_REGISTRY`、Deno `NPM_CONFIG_REGISTRY`。
 
 ## 单次启动与 fail-closed 行为
 
 对实际进入 registry preflight 的 eligible invocation，选中健康候选后 osdk 最多发起一次 manager 启动，且启动后绝不重试；所有候选不健康时不发起启动。进程创建本身仍可能失败。保守透传的调用不会进入这一 fail-closed 预检路径。
 
-控制流上，[`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 先调用 `package_sources::apply`，只有它返回成功后才唯一调用一次 `Command::status()`；直接 shim 路径也在 [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs) 的唯一 `exec` 前执行同一 planner。`RegistryPlan::Unavailable` 在启动前转成错误；manager 启动后的非零退出码直接返回，不尝试另一个 registry，也不重放 lifecycle scripts。Unix 的 `osdk exec` 集成测试覆盖：
+[`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands/install.rs) 在 `package_sources::apply` 成功后只启动一次 manager。Unix 上先刷新 stdout 和 stderr，再用 `CommandExt::exec()` 替换当前进程。Windows 上用 `Command::status()` 启动并等待。直接 shim 路径也在 [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs) 的唯一 `exec` 前执行同一 planner。`RegistryPlan::Unavailable` 在启动前转成错误；调用方直接得到 manager 的退出状态。Unix 的 `osdk exec` 集成测试覆盖：
 
 - [`exec_registry_fallback_injects_only_the_manager_variable_and_runs_once`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs)：首选不可用、后备健康时，每类 manager 的调用 marker 只有一行；
 - [`exec_registry_never_retries_a_failed_manager_command`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs)：manager 启动后退出 42，marker 仍只有一次；

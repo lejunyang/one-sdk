@@ -1024,6 +1024,166 @@ fn exec_exits_with_the_childs_own_code_and_adds_no_error() {
     assert!(!stderr.contains("exited with"), "{stderr}");
 }
 
+#[cfg(unix)]
+struct ExecProcessGroup(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for ExecProcessGroup {
+    fn drop(&mut self) {
+        // Clean up the fixture even if an assertion fails and a child survives
+        // the osdk process. Each invocation has its own process group.
+        unsafe { libc::killpg(self.0.id() as libc::pid_t, libc::SIGKILL) };
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+fn exec_cancels_heartbeat(signal: libc::c_int) {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+    for tool in [None, Some("node@20.0.0"), Some("node")] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let mut command = isolated_command(root, root, &osdk());
+        command.args(["--offline", "exec", "--no-deps"]);
+        let program = match tool {
+            None => root.join("heartbeat"),
+            Some("node") => {
+                let bin = root.join("system/bin");
+                command.env("PATH", &bin);
+                std::fs::create_dir(root.join("config")).unwrap();
+                std::fs::write(
+                    root.join("config/config.toml"),
+                    "[settings.precedence]\ntool_order = ['system']\n",
+                )
+                .unwrap();
+                bin.join("node")
+            }
+            Some(_) => {
+                let install = root.join("installs/node/20.0.0");
+                std::fs::create_dir_all(&install).unwrap();
+                std::fs::write(install.join(".osdk-complete"), "").unwrap();
+                install.join("bin/node")
+            }
+        };
+        write_executable(
+            &program,
+            "#!/bin/sh\n\
+             if [ \"$1\" = --version ]; then printf 'v20.0.0\\n'; exit; fi\n\
+             trap - INT TERM\n\
+             exec > \"$1\"\n\
+             printf '%s\\n' \"$$\"\n\
+             while :; do printf '.\\n'; /bin/sleep 0.02; done\n",
+        );
+        if let Some(tool) = tool {
+            command.args(["--tool", tool]);
+        }
+        let executable = if tool.is_some() {
+            Path::new("node")
+        } else {
+            &program
+        };
+        let heartbeat = root.join("heartbeat.log");
+        std::fs::File::create(&heartbeat).unwrap();
+        let mut entry = ExecProcessGroup(
+            command
+                .arg("--")
+                .arg(executable)
+                .arg(&heartbeat)
+                .stdout(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let pid = entry.0.id();
+        let deadline = Instant::now() + ISOLATED_COMMAND_TIMEOUT;
+        let command_pid = loop {
+            let contents = std::fs::read_to_string(&heartbeat).unwrap();
+            if let Some((pid, _)) = contents
+                .split_once('\n')
+                .filter(|(_, heartbeats)| heartbeats.contains('\n'))
+            {
+                break pid.parse::<u32>().unwrap();
+            }
+            assert_eq!(
+                entry.0.try_wait().unwrap(),
+                None,
+                "{tool:?} exited before its first heartbeat"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "{tool:?} did not write a heartbeat"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        // Signal just the entry PID, as a CI runner might do.
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, signal) }, 0);
+        let deadline = Instant::now() + ISOLATED_COMMAND_TIMEOUT;
+        let status = loop {
+            if let Some(status) = entry.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{tool:?} did not exit after signal {signal}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(signal), "{tool:?}: {status}");
+        let size = std::fs::metadata(&heartbeat).unwrap().len();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            std::fs::metadata(&heartbeat).unwrap().len(),
+            size,
+            "{tool:?}: heartbeat continued after the entry PID exited"
+        );
+        assert_eq!(
+            command_pid, pid,
+            "{tool:?}: command did not take over the entry PID"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_cancels_on_sigterm() {
+    exec_cancels_heartbeat(libc::SIGTERM);
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_cancels_on_sigint() {
+    exec_cancels_heartbeat(libc::SIGINT);
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_preserves_the_commands_terminating_signal() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let output = run_isolated(
+        temporary.path(),
+        &[
+            "--offline",
+            "exec",
+            "--no-deps",
+            "--",
+            "/bin/sh",
+            "-c",
+            "kill -TERM \"$$\"",
+        ],
+    );
+    assert_eq!(
+        output.status.signal(),
+        Some(libc::SIGTERM),
+        "{:?}",
+        output.status
+    );
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+}
+
 #[test]
 fn exec_without_a_tool_runs_in_the_activated_environment() {
     let temporary = tempfile::tempdir().unwrap();
