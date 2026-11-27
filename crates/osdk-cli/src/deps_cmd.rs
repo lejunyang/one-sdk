@@ -770,89 +770,26 @@ async fn ensure_tools_in_context(
         return Ok(ready);
     };
     for required in schema.required_tools {
-        // An installer's version can be pinned by the manifest's
-        // `packageManager` field. A runtime's cannot, so it comes from `[tools]`
-        // or, failing that, whatever is already installed.
-        let pinned = match required.role {
-            ToolRole::Installer => item.choice.version.clone(),
-            ToolRole::Runtime => None,
-        };
-        let spec = match &pinned {
-            Some(version) => format!("{}@{version}", required.id),
-            None => match item
-                .config
-                .project_tools
-                .get(required.id)
-                .or_else(|| app.ctx.config.global_tools.get(required.id))
-            {
-                Some(configured) => format!("{}@{configured}", required.id),
-                None => required.id.to_string(),
-            },
-        };
-        let mut request = ToolRequest::parse(&spec)
-            .with_context(|| format!("parsing deps tool request `{spec}`"))?;
-        crate::commands::inherit_configured_options_from(
-            &mut request,
-            &app.ctx.config.tool_configs,
-            &app.ctx.config.tools,
-            None,
-        );
-        let backend = app.registry.get(&request.backend)?;
-        // Frozen native plans and pinned installer choices retain managed
-        // replay authority. A host executable is never a portable lock entry.
-        if !item.plan.frozen && pinned.is_none() && osdk_core::execution::enabled(&app.ctx) {
-            if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
-                osdk_core::execution::resolve_declared(
-                    &app.ctx,
-                    backend.as_ref(),
-                    &item.project.root,
-                )?
-                .target
-            {
-                ready.push(ReadyTool {
-                    id: required.id.into(),
-                    version: String::new(),
-                    role: required.role,
-                    bin_dirs: vec![target.bin_dir().to_path_buf()],
-                    system: Some(target),
-                    env: BTreeMap::new(),
-                });
+        let (spec, request, backend, installed) = match select_tool(
+            app,
+            required,
+            &item.choice,
+            &item.config,
+            &item.project.root,
+            item.plan.frozen,
+        )? {
+            ToolSelection::System(tool) => {
+                ready.push(tool);
                 continue;
             }
-        }
-        if required.role == ToolRole::Runtime {
-            if let Some(active) = osdk_core::version::resolver::resolve_active_config_declared(
-                required.id,
-                &item.project.root,
-                &app.ctx.config,
-                backend.idiomatic_files(),
-            )? {
-                request.spec = if active.is_range {
-                    osdk_core::version::VersionSpec::parse_range(&active.spec)?
-                } else {
-                    osdk_core::version::VersionSpec::parse(&active.spec)
-                };
-            }
-        }
-        let request = crate::commands::expand_request_alias(app, backend.as_ref(), &request)?;
-
-        // Already installed means nothing is acquired, which is the distinction
-        // `--no-install-tools` draws: it forbids *acquiring* a tool, not using
-        // one the user installed themselves.
-        let resolved = if request.backend.contains(':') {
-            crate::commands::installed_dynamic_match(app, backend.as_ref(), &request)
-        } else {
-            let installed = backend.list_installed(&app.ctx)?;
-            crate::commands::select_installed_version(&request.backend, &request.spec, installed)
-                .ok()
-                .map(|version| {
-                    let mut version = ToolVersion::new(&request.backend, &version);
-                    version.options.extend(request.options.clone());
-                    version
-                })
+            ToolSelection::Managed {
+                spec,
+                request,
+                backend,
+                installed,
+            } => (spec, request, backend, installed),
         };
-
-        let version = match resolved {
+        let version = match installed {
             Some(version) => {
                 backend.ensure_post_install(&app.ctx, &version)?;
                 version
@@ -877,20 +814,12 @@ async fn ensure_tools_in_context(
             }
         };
 
-        let bin_dirs = backend
-            .bin_paths(&app.ctx, &version)
-            .with_context(|| format!("resolving bin directories for {}", version.backend))?;
-        let env = backend
-            .exec_env(&app.ctx, &version)
-            .with_context(|| format!("resolving environment for {}", version.backend))?;
-        ready.push(ReadyTool {
-            id: required.id.to_string(),
-            version: version.version.clone(),
-            role: required.role,
-            bin_dirs,
-            system: None,
-            env,
-        });
+        ready.push(ready_managed_tool(
+            app,
+            backend.as_ref(),
+            required,
+            &version,
+        )?);
     }
     let mut env = item.plan.env.clone();
     env.insert(
@@ -911,6 +840,129 @@ async fn ensure_tools_in_context(
         }
     }
     Ok(ready)
+}
+
+enum ToolSelection {
+    System(ReadyTool),
+    Managed {
+        spec: String,
+        request: ToolRequest,
+        backend: std::sync::Arc<dyn osdk_core::backend::Backend>,
+        installed: Option<ToolVersion>,
+    },
+}
+
+/// Resolve the declared tool without installing it or running post-install work.
+fn select_tool(
+    app: &App,
+    required: &deps::RequiredTool,
+    choice: &InstallerChoice,
+    config: &ProviderConfig,
+    project_root: &Path,
+    frozen: bool,
+) -> anyhow::Result<ToolSelection> {
+    // An installer's version can be pinned by the manifest's
+    // `packageManager` field. A runtime's cannot, so it comes from `[tools]`
+    // or, failing that, whatever is already installed.
+    let pinned = match required.role {
+        ToolRole::Installer => choice.version.clone(),
+        ToolRole::Runtime => None,
+    };
+    let spec = match &pinned {
+        Some(version) => format!("{}@{version}", required.id),
+        None => match config
+            .project_tools
+            .get(required.id)
+            .or_else(|| app.ctx.config.global_tools.get(required.id))
+        {
+            Some(configured) => format!("{}@{configured}", required.id),
+            None => required.id.to_string(),
+        },
+    };
+    let mut request =
+        ToolRequest::parse(&spec).with_context(|| format!("parsing deps tool request `{spec}`"))?;
+    crate::commands::inherit_configured_options_from(
+        &mut request,
+        &app.ctx.config.tool_configs,
+        &app.ctx.config.tools,
+        None,
+    );
+    let backend = app.registry.get(&request.backend)?;
+    // Frozen native plans and pinned installer choices retain managed
+    // replay authority. A host executable is never a portable lock entry.
+    if !frozen && pinned.is_none() && osdk_core::execution::enabled(&app.ctx) {
+        if let Some(osdk_core::execution::ExecutionTarget::System(target)) =
+            osdk_core::execution::resolve_declared(&app.ctx, backend.as_ref(), project_root)?.target
+        {
+            return Ok(ToolSelection::System(ReadyTool {
+                id: required.id.into(),
+                version: String::new(),
+                role: required.role,
+                bin_dirs: vec![target.bin_dir().to_path_buf()],
+                system: Some(target),
+                env: BTreeMap::new(),
+            }));
+        }
+    }
+    if required.role == ToolRole::Runtime {
+        if let Some(active) = osdk_core::version::resolver::resolve_active_config_declared(
+            required.id,
+            project_root,
+            &app.ctx.config,
+            backend.idiomatic_files(),
+        )? {
+            request.spec = if active.is_range {
+                osdk_core::version::VersionSpec::parse_range(&active.spec)?
+            } else {
+                osdk_core::version::VersionSpec::parse(&active.spec)
+            };
+        }
+    }
+    let request = crate::commands::expand_request_alias(app, backend.as_ref(), &request)?;
+
+    // Already installed means nothing is acquired, which is the distinction
+    // `--no-install-tools` draws: it forbids *acquiring* a tool, not using
+    // one the user installed themselves.
+    let resolved = if request.backend.contains(':') {
+        crate::commands::installed_dynamic_match(app, backend.as_ref(), &request)
+    } else {
+        let installed = backend.list_installed(&app.ctx)?;
+        crate::commands::select_installed_version(&request.backend, &request.spec, installed)
+            .ok()
+            .map(|version| {
+                let mut version = ToolVersion::new(&request.backend, &version);
+                version.options.extend(request.options.clone());
+                version
+            })
+    };
+    Ok(ToolSelection::Managed {
+        spec,
+        request,
+        backend,
+        installed: resolved,
+    })
+}
+
+fn ready_managed_tool(
+    app: &App,
+    backend: &dyn osdk_core::backend::Backend,
+    required: &deps::RequiredTool,
+    version: &ToolVersion,
+) -> anyhow::Result<ReadyTool> {
+    let bin_dirs = backend
+        .bin_paths(&app.ctx, version)
+        .with_context(|| format!("resolving bin directories for {}", version.backend))?;
+    let env = backend
+        .exec_env(&app.ctx, version)
+        .with_context(|| format!("resolving environment for {}", version.backend))?;
+    Ok(ReadyTool {
+        id: required.id.to_string(),
+        version: version.version.clone(),
+        role: required.role,
+        bin_dirs,
+        system: None,
+        env,
+    })
 }
 
 /// Run the provider's command with the resolved tools on PATH.
@@ -938,37 +990,7 @@ fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<(
         )
     })?;
 
-    let separator = if cfg!(windows) { ";" } else { ":" };
-    let mut path = OsString::new();
-    for dir in tools
-        .iter()
-        .filter(|t| t.role == ToolRole::Runtime)
-        .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
-        .flat_map(|tool| &tool.bin_dirs)
-    {
-        if !path.is_empty() {
-            path.push(separator);
-        }
-        path.push(dir);
-    }
-    if let Some(inherited) = std::env::var_os("PATH") {
-        if !inherited.is_empty() {
-            path.push(separator);
-            path.push(inherited);
-        }
-    }
-
-    if tools.iter().any(|t| t.system.is_some()) {
-        path = osdk_core::execution::path_with(
-            &app.ctx,
-            tools
-                .iter()
-                .filter(|t| t.role == ToolRole::Runtime)
-                .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
-                .flat_map(|t| t.bin_dirs.clone()),
-        )?
-        .into();
-    }
+    let path = tool_path(app, tools)?;
 
     // A bare name is left to the OS, but Windows `CreateProcess` only tries
     // `.exe`: a custom `run = "pnpm ..."` missed the managed `pnpm.cmd` on the
@@ -1021,6 +1043,41 @@ fn run_plan(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<(
     Ok(())
 }
 
+fn tool_path(app: &App, tools: &[ReadyTool]) -> anyhow::Result<OsString> {
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let mut path = OsString::new();
+    for dir in tools
+        .iter()
+        .filter(|t| t.role == ToolRole::Runtime)
+        .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
+        .flat_map(|tool| &tool.bin_dirs)
+    {
+        if !path.is_empty() {
+            path.push(separator);
+        }
+        path.push(dir);
+    }
+    if let Some(inherited) = std::env::var_os("PATH") {
+        if !inherited.is_empty() {
+            path.push(separator);
+            path.push(inherited);
+        }
+    }
+
+    if tools.iter().any(|t| t.system.is_some()) {
+        return Ok(osdk_core::execution::path_with(
+            &app.ctx,
+            tools
+                .iter()
+                .filter(|t| t.role == ToolRole::Runtime)
+                .chain(tools.iter().filter(|t| t.role != ToolRole::Runtime))
+                .flat_map(|t| t.bin_dirs.clone()),
+        )?
+        .into());
+    }
+    Ok(path)
+}
+
 /// The environment a deps command adds on top of what it inherits.
 ///
 /// Each managed tool contributes what `osdk exec` would give it -- above all
@@ -1060,17 +1117,36 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
     if tools.is_empty() {
         return plan.program_candidates.first().map(PathBuf::from);
     }
+    find_tool_program(&plan.tool, &plan.program_candidates, tools).or_else(|| {
+        plan.program_candidates
+            .first()
+            .filter(|candidate| {
+                **candidate == plan.program
+                    && (cfg!(windows)
+                        || ![".exe", ".cmd", ".bat"]
+                            .iter()
+                            .any(|suffix| candidate.ends_with(suffix)))
+            })
+            .map(PathBuf::from)
+    })
+}
+
+fn find_tool_program(
+    installer: &str,
+    candidates: &[String],
+    tools: &[ReadyTool],
+) -> Option<PathBuf> {
     let installer_first = tools
         .iter()
-        .filter(|tool| tool.role == ToolRole::Installer || tool.id == plan.tool);
+        .filter(|tool| tool.role == ToolRole::Installer || tool.id == installer);
     for tool in installer_first.chain(tools.iter()) {
         if let Some(target) = &tool.system {
-            if tool.id == plan.tool {
+            if tool.id == installer {
                 return Some(target.executable.clone());
             }
             continue;
         }
-        for candidate in &plan.program_candidates {
+        for candidate in candidates {
             if !cfg!(windows)
                 && [".exe", ".cmd", ".bat"]
                     .iter()
@@ -1086,16 +1162,7 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
             }
         }
     }
-    plan.program_candidates
-        .first()
-        .filter(|candidate| {
-            **candidate == plan.program
-                && (cfg!(windows)
-                    || ![".exe", ".cmd", ".bat"]
-                        .iter()
-                        .any(|suffix| candidate.ends_with(suffix)))
-        })
-        .map(PathBuf::from)
+    None
 }
 
 /// Persist what happened: freshness state, then the lock entry.
