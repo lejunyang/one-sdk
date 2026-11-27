@@ -119,6 +119,8 @@ see the workspace root and effective lock.
 If Rust is missing, a local `Cargo.lock` is enough to preview a locked fetch.
 An actual run without `--no-install-tools` can prepare Rust first, then use that
 Cargo to check which lock applies before fetching.
+For a standalone crate with a local lock, even plain `deps` keeps `--locked`
+when osdk cannot determine the effective path, so Cargo can validate the lock.
 
 ::: tip go's toolchain is pinned
 `GOTOOLCHAIN` defaults to `auto`: when `go.mod` asks for a newer Go, go **downloads

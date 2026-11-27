@@ -568,13 +568,17 @@ fn plan_project(
                 println!("    native lock: {reason}");
             }
         }
-        // A discovered lock is enough to preview a locked fetch and to
-        // prepare Rust. The prepared Cargo must confirm ownership before
-        // we can reuse freshness or actually fetch.
-        if owner.status != NativeLockStatus::CargoUnavailable
-            || prepared_tools.is_some()
-            || cwd != project.root
-        {
+        let keep_local_lock = cwd == project.root
+            && match owner.status {
+                NativeLockStatus::CargoUnavailable => prepared_tools.is_none(),
+                // Keep the locked command for a confirmed workspace root,
+                // even if its effective lock path cannot be fingerprinted.
+                NativeLockStatus::CargoLockPathUnknown => {
+                    dunce::canonicalize(&cwd).is_ok_and(|root| root == owner.root)
+                }
+                NativeLockStatus::Checked => false,
+            };
+        if !keep_local_lock {
             project.native_lock.clone_from(&owner.lock);
         }
         Some(owner)
@@ -588,7 +592,8 @@ fn plan_project(
         &resolved_tool_versions(app, config),
     )?;
     if let Some(owner) = &native_lock {
-        if options.frozen && owner.status == NativeLockStatus::CargoLockPathUnknown {
+        if options.frozen && !plan.frozen && owner.status == NativeLockStatus::CargoLockPathUnknown
+        {
             plan.args.push("--locked".into());
             plan.frozen = true;
             plan.downgraded_reason = None;

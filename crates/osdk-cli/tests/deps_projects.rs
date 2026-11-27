@@ -72,6 +72,23 @@ impl CargoWorkspace {
         Self { temp, cargo }
     }
 
+    fn standalone(cargo: PathBuf) -> Self {
+        let fixture = Self::new(cargo);
+        let root = fixture.temp.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = 'standalone'\nversion = '0.1.0'\nedition = '2024'\n",
+        );
+        write(root, "src/lib.rs", "");
+        write(
+            root,
+            "osdk.toml",
+            "[tools]\nrust = '=trial-rust'\n[deps.cargo]\n",
+        );
+        fixture
+    }
+
     fn command(&self, program: &Path) -> Command {
         let root = self.temp.path();
         let mut command = Command::new(program);
@@ -156,6 +173,47 @@ fn cargo_metadata_unavailable_explains_why_a_member_cannot_freeze() {
     );
     assert!(error.contains("osdk install rust"), "{error}");
     fixture.assert_locks(None);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_standalone_preserves_lock_when_config_cannot_be_parsed() {
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    write(
+        root,
+        ".cargo/config.toml",
+        "term = {\n    progress.when = 'never',\n}\n",
+    );
+    let native = fixture.native(&["fetch", "--locked", "--offline"]);
+    assert!(native.status.success(), "{native:?}");
+    let run = || {
+        fixture
+            .osdk()
+            .args(["deps", "cargo", "--no-install-tools"])
+            .output()
+            .unwrap()
+    };
+    for _ in 0..2 {
+        let actual = run();
+        assert!(actual.status.success(), "{actual:?}");
+        assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    }
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    write(root, "Cargo.toml", &manifest.replace("0.1.0", "0.2.0"));
+    let actual = run();
+    let bytes = std::fs::read(root.join("Cargo.lock")).unwrap();
+    assert!(
+        !actual.status.success() && bytes == lock,
+        "expected stale-lock rejection and identical bytes, got {actual:?}, unchanged={}",
+        bytes == lock
+    );
+    assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
 }
 
 #[test]

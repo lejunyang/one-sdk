@@ -522,6 +522,7 @@ Cargo 配置、根清单和成员清单同时参与规划、安装锁内复查�
 如果 metadata 给出的路径依赖超出成员清单覆盖范围，或 Cargo 配置使用了可能引入本地
 依赖的覆盖项，osdk 会执行 `fetch --locked`，由 Cargo 校验。Cargo 已确认工作区归属，
 而 osdk 无法确定实际锁路径时，`--frozen` 同样会跳过缓存并执行 `fetch --locked`。
+所选项目自成工作区且有本地锁时，普通 `deps` 也会保留 `--locked`，由 Cargo 校验。
 Cargo 的 `sources = []` 关闭新鲜度判定。
 
 ## auto 前置：只判新鲜度，绝不深扫

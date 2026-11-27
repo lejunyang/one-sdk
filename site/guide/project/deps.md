@@ -107,6 +107,8 @@ osdk 用已安装或已链接的 Cargo 确认成员归属，在成员目录运�
 
 尚未安装 Rust 时，有本地 `Cargo.lock` 仍可预览冻结拉取。实际调用若允许安装工具，
 osdk 会先准备 Rust，再用该工具链的 Cargo 确定生效的锁。
+独立 crate 已有本地锁时，即使 osdk 无法确定实际锁路径，普通 `deps` 也会保留
+`--locked`，由 Cargo 校验。
 
 ::: tip go 的工具链被钉住
 `GOTOOLCHAIN` 默认是 `auto`——`go.mod` 要求更新的 Go 时，go 会**自己下载**另一个

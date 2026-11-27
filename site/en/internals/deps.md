@@ -653,6 +653,8 @@ workspace, or an override may introduce local dependencies the query cannot
 see, osdk runs `fetch --locked` to let Cargo validate the lock. Once Cargo confirms
 the workspace, an explicit `--frozen` also runs `fetch --locked` without using a
 cached result if osdk cannot establish the effective lock path.
+A standalone crate with a local lock also keeps `--locked` for plain `deps`
+in that case, so Cargo can validate the lock.
 `sources = []` disables freshness for Cargo.
 
 ## The auto gate: freshness only, never a deep scan
