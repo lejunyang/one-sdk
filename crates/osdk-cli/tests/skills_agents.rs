@@ -311,7 +311,7 @@ fn skills_list_and_remove_report_local_unlocked_skills_before_ancestor_entries()
         read_lock(&parent_lock)["skills"]["demo"]["content_hash"]
     );
     std::fs::remove_file(&child_lock).unwrap();
-    let installed = child.join(".agents/skills/demo");
+    let installed = child.join(".agents").join("skills").join("demo");
 
     let list = osdk(root, &child, &["skills", "list"]);
     let remove = osdk(root, &child, &["skills", "remove", "demo"]);
