@@ -183,7 +183,8 @@ This protects references introduced by a branch switch before the next sync.
 `model unuse` releases the selected project's registration for the name.
 For legacy data, an explicit unuse can also match materialized snapshots
 against the lock's identity and file list. Default cleanup checks other
-projects' references. `--keep-snapshot` forgets the name and keeps the bytes.
+projects' references. `--keep-snapshot` records the exact keys to retain before
+releasing the registration. Later cleanups from any project skip those keys.
 Explicit `model remove` reports registrations before deletion and retains them
 for subsequent synchronization.
 

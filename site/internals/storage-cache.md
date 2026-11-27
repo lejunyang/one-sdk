@@ -85,6 +85,8 @@ Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 S
 或清理时遇到无法读取的锁会使清理停止。要删除当前快照，
 同名目录里的快照必须都能清理且无视图成员。保留的快照继续用自己的 manifest
 保护 CAS blob。项目目录暂时不可达或搬迁时，原登记继续保护快照。
+用 `unuse --keep-snapshot` 保留的快照键原子写入同名模型目录内的 `.osdk-kept.json`。
+显式 `model remove` 删除目录时一并清除保留记录。
 
 这会留下实际竞争窗口：GC 的 live-set 扫描与删除之间，另一个进程可能新建引用；安装也可能先产生 CAS 对象、后写 manifest，此时并发 GC 可把尚未被 manifest 声明的对象视为不可达。per-version/per-snapshot 锁无法关闭这个全局窗口。生产文档和运维流程应把并发 `prune`/卸载与安装视为未协调操作。
 

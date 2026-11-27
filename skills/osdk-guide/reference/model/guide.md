@@ -6,12 +6,13 @@
 | --- | --- |
 | `use <NAME> <REFERENCE>` | 受管写入项目声明；支持 `--endpoint`、`--include/--exclude`、`--variant`、`--kind/--family/--derived-from`、`--view/--profile/--map`；`--sync` 立即物化 |
 | `import <NAME> <PATH>` | 导入本地文件/目录为 CAS 不可变快照；支持语义元数据、`--target-path`、`--view comfyui` 与 `--json`，不写声明或 lock |
-| `unuse <NAME>` | 撤销本项目的声明、lock 和引用；清理本项目无人继续引用的快照；保留并报告其他项目仍在用的快照；`--keep-snapshot` 保留字节 |
+| `unuse <NAME>` | 撤销本项目的声明、lock 和引用；清理本项目无人继续引用的快照；保留并报告其他项目仍在用的快照；`--keep-snapshot` 保留对应快照，之后项目清理也会跳过它们 |
 | `sync [NAME]` | 同步单个或全部模型；`--dry-run` 预览；全项目模式下用 `--prune` 清理本项目此前同步、当前锁不再引用的快照；`--jsonl` 输出逐行 schema 1 事件 |
 | `list/show/path/verify` | 检查本地快照；查询命令支持 `--json`；`path --stable` 输出稳定 current 路径 |
 | `remove <NAME>` | 报告仍引用该名称的项目，再删除同名全部快照和视图；保留项目声明、lock 和引用登记 |
 
 `sync --prune` 保留其他已登记项目仍引用的快照，包括切换分支后当前锁中的引用。本地导入、引入项目清理前物化的快照和视图仍在使用的快照也会保留。需拉取或还原的名称留到下次清理。
+用 `--keep-snapshot` 保留的快照即使无人继续引用也会保留。如需删除，显式运行 `model remove NAME`。
 用 `sync --prune --dry-run --jsonl` 只读预演，删除事件带 `project`、`snapshot`、`path`。
 预演读取 `planned`，执行读取 `completed`。其他项目仍引用时，`skipped` 事件的 `project` 指向该项目。
 汇总的 `removed` 在预演中表示预计删除数。

@@ -815,7 +815,7 @@ fn model_unuse(
         .load(&root)?
         .unwrap_or_else(|| ProjectModelRefs::new(root, lock_path.clone()));
     refs.lock = lock_path.clone();
-    let mut registered = registry.load_all()?;
+    let registered = registry.load_all()?;
     let other_projects: Vec<_> = registered
         .iter()
         .filter(|project| project.root != refs.root && project.references_model(name))
@@ -838,6 +838,8 @@ fn model_unuse(
         }
     }
     let plan = if keep_snapshot {
+        // Commit the user's retention choice before releasing any references.
+        refs.keep_retired_snapshots(store, name)?;
         Vec::new()
     } else {
         plan_model_prune(
@@ -887,13 +889,6 @@ fn model_unuse(
                 }
             }
             _ => snapshots_removed += usize::from(entry.remove(store)?),
-        }
-    }
-    if keep_snapshot {
-        for project in &mut registered {
-            if project.root != refs.root && project.forget_kept_snapshots(name, &refs) {
-                registry.put_project(project)?;
-            }
         }
     }
     let references_removed = refs.forget_model(name);

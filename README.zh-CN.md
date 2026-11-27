@@ -755,7 +755,7 @@ Civitai 的 `civitai.com` 与 `civitai.red` 都是内置官方来源。auto 模�
 `model sync --prune` 会保留其他项目仍在用的快照、引入项目跟踪前物化的快照和本地导入。
 `model import NAME PATH` 把本地文件或目录内容寻址写入 CAS，但不创建项目声明或 lock；本地导入只在
 当前机器可用，需要从原始字节重新导入。`model unuse NAME` 撤销本项目依赖并清理本项目不再使用的快照，
-保留其他项目仍在用的快照。`--keep-snapshot` 保留本地字节。`model remove NAME` 会先报告仍在引用的项目，
+保留其他项目仍在用的快照。用 `--keep-snapshot` 保留快照，后续项目清理也会跳过它们。`model remove NAME` 会先报告仍在引用的项目，
 随后按名称删除所有本地快照和视图。
 
 指南：[模型快照](site/guide/ai/models.md)

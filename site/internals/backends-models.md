@@ -152,7 +152,8 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 
 `model unuse` 解除选中项目对该名称的引用。对于早期未登记的数据，显式 unuse
 也可以用锁中的身份与文件清单确认它拥有的快照。默认清理仍检查其他项目引用；
-`--keep-snapshot` 直接忘记该名称并保留字节。显式 `model remove` 在删除前报告仍引用
+`--keep-snapshot` 在解除引用前按快照键记录保留选择，之后所有项目的清理都会跳过这些键。
+显式 `model remove` 在删除前报告仍引用
 该名称的项目，并保留登记供后续同步还原。
 
 机器协议集中在 [`model_output.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/model_output.rs)，与快照、lock 和 view state 的磁盘 schema 分离。`import --json`、`list/show/path/verify` 及只读 view 命令输出单个 schema 1 JSON，`sync --jsonl` 通过统一 emitter 输出逐行事件；人类模式仍使用原文案。所有机器 stdout 写入都经过同一序列化入口，view reconcile 在 JSONL 模式下仍执行但不打印普通报告，错误继续由顶层写 stderr 并返回非零。协议中的绝对路径是本机位置，保留原生分隔符；manifest 相对路径来自跨平台产物，保持 `/`。

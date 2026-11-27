@@ -1,5 +1,6 @@
 //! Model references, immutable snapshot manifests, and local materialization.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub mod source;
 pub mod view;
 
 const MODEL_MANIFEST_FILE: &str = ".osdk-model.json";
+const KEPT_SNAPSHOTS_FILE: &str = ".osdk-kept.json";
 const CURRENT_FILE: &str = "current.json";
 /// Stable directory name resolving to the current snapshot.
 ///
@@ -625,6 +627,37 @@ impl ModelStore {
         }
         snapshots.sort_by(|left, right| left.snapshot.cmp(&right.snapshot));
         Ok(snapshots)
+    }
+
+    fn kept_snapshots(&self, name: &str) -> Result<BTreeSet<String>> {
+        let path = self.model_root(name).join(KEPT_SNAPSHOTS_FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+                Error::other(format!(
+                    "invalid kept snapshots at {}: {error}",
+                    path.display()
+                ))
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(error) => Err(Error::io(&path, error)),
+        }
+    }
+
+    /// The registry lock serializes this with prune and explicit model removal.
+    fn keep_snapshots(&self, name: &str, keys: &BTreeSet<String>) -> Result<()> {
+        let snapshots = self.snapshots(name)?;
+        let mut kept = self.kept_snapshots(name)?;
+        let previous_count = kept.len();
+        kept.extend(
+            snapshots
+                .into_iter()
+                .map(|entry| entry.snapshot)
+                .filter(|key| keys.contains(key)),
+        );
+        if kept.len() > previous_count {
+            write_json_atomic(&self.model_root(name).join(KEPT_SNAPSHOTS_FILE), &kept)?;
+        }
+        Ok(())
     }
 
     /// Remove a single non-current snapshot. Callers serialize changes to the

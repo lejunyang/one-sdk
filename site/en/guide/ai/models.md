@@ -30,7 +30,7 @@ osdk model view doctor <comfyui|hf-cache> [--profile P] [--json]
 `use` edits the project declaration and does not download by default; `--sync` materializes that
 model immediately. `sync NAME` limits work to one model; no argument handles the project.
 `unuse` removes this project's model requirement and preserves snapshots still used by
-other projects. `--keep-snapshot` retains local bytes. `remove` deletes snapshots and
+other projects. `--keep-snapshot` keeps snapshots through future project cleanups. `remove` deletes snapshots and
 views by name while retaining project declarations and locks.
 
 ## Machine-readable output
@@ -207,7 +207,7 @@ a private endpoint restores from the lock even after `endpoint` is removed from 
 
 `--prune` applies to whole-project synchronization. It removes snapshots previously
 synced by this project that its current lock no longer references. It preserves
-local imports, snapshots used by views, and snapshots referenced by other
+local imports, snapshots used by views, snapshots kept with `--keep-snapshot`, and snapshots referenced by other
 registered projects, including through their current locks after a branch switch.
 The first sync registers verified snapshots for the current lock. Snapshots
 materialized before project pruning stay protected after registration.
@@ -229,7 +229,8 @@ the planned count. Preview is read-only.
 from the current project. It cleans up this project's snapshots when they have
 no remaining references. Other projects' snapshots and shared views are kept,
 and their project paths are reported. `--keep-snapshot` releases the registration
-and keeps the bytes for later manual removal.
+and keeps those snapshots even after all other projects release them. Use
+`model remove` to delete them explicitly.
 
 `osdk model remove <name>` reports projects still registered against the name,
 then deletes all local snapshots and views for that name. Use it to explicitly

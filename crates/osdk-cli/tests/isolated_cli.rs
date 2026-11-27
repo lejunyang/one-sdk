@@ -1862,6 +1862,72 @@ fn model_unuse_preserves_shared_references_and_remove_reports_them() {
 }
 
 #[test]
+fn model_unuse_keep_snapshot_survives_the_last_project_releasing_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let a = root.join("项目 A");
+    let b = root.join("项目 B");
+    for project in [&a, &b] {
+        std::fs::create_dir(project).unwrap();
+        std::fs::write(project.join("osdk.toml"), "[tools]\n").unwrap();
+    }
+    let unkept = publish_model_fixture(root, "shared", "unkept.safetensors");
+    write_model_fixture_lock(&a, &[&unkept]);
+    let sync = ["--offline", "model", "sync"];
+    model_fixture_command(root, &a, &sync);
+    let shared = publish_model_fixture(root, "shared", "shared.safetensors");
+    for project in [&a, &b] {
+        write_model_fixture_lock(project, &[&shared]);
+        model_fixture_command(root, project, &sync);
+    }
+    model_fixture_command(root, &b, &["model", "unuse", "shared", "--keep-snapshot"]);
+    write_model_fixture_lock(&a, &[]);
+    let prune = ["--offline", "model", "sync", "--prune", "--jsonl"];
+    let preview = model_fixture_command(
+        root,
+        &a,
+        &[
+            "--offline",
+            "model",
+            "sync",
+            "--prune",
+            "--dry-run",
+            "--jsonl",
+        ],
+    );
+    let events = String::from_utf8(preview.stdout).unwrap();
+    let planned: Vec<_> = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| event["status"] == "planned" && event["action"] == "remove")
+        .collect();
+    assert_eq!(planned.len(), 1, "{events}");
+    assert_eq!(planned[0]["snapshot"], unkept.snapshot_key());
+    model_fixture_command(root, &a, &prune);
+    let cas = osdk_core::store::Cas::new(root.join("store"));
+    assert!(!unkept.path.exists());
+    assert!(!cas.object_path(&unkept.manifest.files[0].cas_hash).exists());
+    assert_eq!(
+        std::fs::read(shared.path.join("loras/shared.safetensors")).unwrap(),
+        b"shared/shared.safetensors"
+    );
+    assert!(cas
+        .object_path(&shared.manifest.files[0].cas_hash)
+        .is_file());
+    model_fixture_command(root, &b, &["model", "verify", "shared"]);
+
+    model_fixture_command(root, &a, &["model", "remove", "shared"]);
+    assert!(!shared.path.exists());
+    let published_again = publish_model_fixture(root, "shared", "shared.safetensors");
+    assert_eq!(published_again.snapshot_key(), shared.snapshot_key());
+    write_model_fixture_lock(&a, &[&published_again]);
+    model_fixture_command(root, &a, &sync);
+    write_model_fixture_lock(&a, &[]);
+    model_fixture_command(root, &a, &prune);
+    assert!(!published_again.path.exists());
+}
+
+#[test]
 fn model_sync_prune_preserves_other_projects_and_prunes_exact_retired_snapshots() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

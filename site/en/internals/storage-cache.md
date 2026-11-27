@@ -94,6 +94,9 @@ Removing the current snapshot requires all snapshots
 under the name to be eligible and no view membership. Retained snapshot manifests
 continue to protect CAS objects. A missing or moved project directory does not
 expire its registration.
+Unuse with `--keep-snapshot` atomically records the kept snapshot keys in
+`.osdk-kept.json` under the model directory. Explicit `model remove` clears
+the record when it removes the directory.
 
 This leaves a real race window: another process can create a reference between GC's live-set scan and deletion, and an installer can create CAS objects before writing its manifest, allowing concurrent GC to regard those objects as unreachable. Per-version and per-snapshot locks do not close that global window. Production guidance should treat concurrent `prune`/removal and installation as uncoordinated operations.
 

@@ -91,22 +91,11 @@ impl ProjectModelRefs {
             .is_some_and(|keys| keys.contains(snapshot))
     }
 
-    /// An explicit keep releases eligible keys from cleanup history, including
-    /// history left by other projects that previously shared those snapshots.
-    pub fn forget_kept_snapshots(&mut self, name: &str, kept: &Self) -> bool {
-        let Some(keys) = kept.retired.get(name) else {
-            return false;
-        };
-        let mut changed = false;
-        self.retired.retain(|other_name, retired| {
-            if same_model_name(name, other_name) {
-                let before = retired.len();
-                retired.retain(|key| !keys.contains(key));
-                changed |= retired.len() != before;
-            }
-            !retired.is_empty()
-        });
-        changed
+    pub fn keep_retired_snapshots(&self, store: &ModelStore, name: &str) -> Result<()> {
+        if let Some(keys) = self.retired.get(name) {
+            store.keep_snapshots(name, keys)?;
+        }
+        Ok(())
     }
 
     pub fn references_model(&self, name: &str) -> bool {
@@ -315,6 +304,7 @@ pub fn plan_prune(
         let pending_sync = matches!(scope, PruneScope::Sync(downloads)
             if downloads.iter().any(|pending| same_model_name(pending, name)));
         let snapshots = store.snapshots(name)?;
+        let kept = store.kept_snapshots(name)?;
         let current = store.current_snapshot(name)?;
         let stable = store.model_root(name).join(super::CURRENT_LINK);
         let stable_target = match dunce::canonicalize(&stable) {
@@ -343,6 +333,9 @@ pub fn plan_prune(
                 }
                 Ok(manifest) if manifest.provider == ProviderId::Local => {
                     PruneAction::skip("local import")
+                }
+                Ok(_) if kept.contains(&entry.snapshot) => {
+                    PruneAction::skip("kept by model unuse --keep-snapshot")
                 }
                 Ok(manifest)
                     if matches!(scope, PruneScope::Sync(_)) && !manifest.prune_eligible =>
