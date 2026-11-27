@@ -259,6 +259,22 @@ pub struct InstalledModel {
     pub path: PathBuf,
 }
 
+impl InstalledModel {
+    pub fn snapshot_key(&self) -> &str {
+        self.path
+            .file_name()
+            .and_then(|key| key.to_str())
+            .expect("snapshot directory has a UTF-8 key")
+    }
+}
+
+#[derive(Debug)]
+pub struct SnapshotEntry {
+    pub snapshot: String,
+    pub path: PathBuf,
+    pub manifest: Result<SnapshotManifest>,
+}
+
 pub struct ModelStore {
     pub(crate) dirs: Dirs,
     cas: Arc<Cas>,
@@ -514,12 +530,91 @@ impl ModelStore {
     }
 
     pub fn current(&self, name: &str) -> Result<InstalledModel> {
+        let marker_path = self.model_root(name).join(CURRENT_FILE);
+        let snapshot = self.current_snapshot(name)?.ok_or_else(|| {
+            Error::io(
+                marker_path,
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            )
+        })?;
+        self.load_path(&self.model_root(name).join("snapshots").join(snapshot))
+    }
+
+    pub fn current_snapshot(&self, name: &str) -> Result<Option<String>> {
         validate_model_name(name)?;
-        let model_root = self.model_root(name);
-        let marker_path = model_root.join(CURRENT_FILE);
-        let bytes = std::fs::read(&marker_path).map_err(|error| Error::io(&marker_path, error))?;
-        let current: CurrentSnapshot = serde_json::from_slice(&bytes)?;
-        self.load_path(&model_root.join("snapshots").join(current.snapshot))
+        let path = self.model_root(name).join(CURRENT_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Error::io(&path, error)),
+        };
+        let pointer: CurrentSnapshot = serde_json::from_slice(&bytes)?;
+        Ok(Some(pointer.snapshot))
+    }
+
+    /// Enumerate published snapshot directories, retaining errors for incomplete
+    /// entries. Publication scratch and rollback directories use hidden names.
+    pub fn snapshots(&self, name: &str) -> Result<Vec<SnapshotEntry>> {
+        validate_model_name(name)?;
+        let root = self.model_root(name).join("snapshots");
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::io(&root, error)),
+        };
+        let mut snapshots = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| Error::io(&root, error))?;
+            let snapshot = entry.file_name().to_string_lossy().into_owned();
+            if snapshot.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|error| Error::io(&path, error))?;
+            let manifest = if kind.is_dir() {
+                self.load_path(&path).map(|installed| installed.manifest)
+            } else {
+                Err(Error::other(format!(
+                    "invalid model snapshot directory: {}",
+                    path.display()
+                )))
+            };
+            snapshots.push(SnapshotEntry {
+                snapshot,
+                path,
+                manifest,
+            });
+        }
+        snapshots.sort_by(|left, right| left.snapshot.cmp(&right.snapshot));
+        Ok(snapshots)
+    }
+
+    /// Remove a single non-current snapshot. Callers serialize changes to the
+    /// model's current pointer while planning and applying removals.
+    pub fn remove_snapshot(&self, name: &str, snapshot: &str) -> Result<bool> {
+        validate_model_name(name)?;
+        if !valid_snapshot_key(snapshot) {
+            return Err(Error::other(format!(
+                "invalid model snapshot key: {snapshot}"
+            )));
+        }
+        let root = self.model_root(name);
+        let lock_path = root.join(".locks").join(format!("{snapshot}.lock"));
+        let path = root.join("snapshots").join(snapshot);
+        if !path.try_exists().map_err(|error| Error::io(&path, error))? {
+            return Ok(false);
+        }
+        let _lock = FileLock::acquire(lock_path)?;
+        if self.current_snapshot(name)?.as_deref() == Some(snapshot) {
+            return Err(Error::other(format!(
+                "cannot remove current snapshot of model {name}"
+            )));
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(Error::io(&path, error)),
+        }
     }
 
     pub fn list(&self) -> Result<Vec<InstalledModel>> {
@@ -774,6 +869,13 @@ pub fn safe_relative_path(value: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+fn valid_snapshot_key(key: &str) -> bool {
+    key.len() == 24
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn snapshot_key(identity: &SnapshotIdentity, files: &[DownloadedModelFile]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(
@@ -1008,6 +1110,36 @@ mod tests {
             std::fs::read(stable_again.join("weights.bin")).unwrap(),
             b"second-bytes",
             "the stable path must resolve to the newest snapshot"
+        );
+
+        let snapshots = first.path.parent().unwrap();
+        std::fs::create_dir(snapshots.join(".rollback-test")).unwrap();
+        std::fs::create_dir(snapshots.join("incomplete")).unwrap();
+        let entries = store.snapshots("fixture").unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(entries
+            .iter()
+            .find(|entry| entry.snapshot == "incomplete")
+            .unwrap()
+            .manifest
+            .is_err());
+        assert_eq!(
+            store.current_snapshot("fixture").unwrap().as_deref(),
+            Some(second.snapshot_key())
+        );
+        assert!(store
+            .remove_snapshot("fixture", second.snapshot_key())
+            .is_err());
+        assert!(store
+            .remove_snapshot("fixture", first.snapshot_key())
+            .unwrap());
+        assert!(!store
+            .remove_snapshot("fixture", first.snapshot_key())
+            .unwrap());
+        assert!(!first.path.exists());
+        assert_eq!(
+            std::fs::read(stable.join("weights.bin")).unwrap(),
+            b"second-bytes"
         );
     }
 
