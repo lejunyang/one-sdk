@@ -189,7 +189,9 @@ Two of the five states are easy to conflate:
 `pkg status` reports the state of valid entries and lists malformed keys as
 `invalid entry` (the `invalid_keys` string array in JSON). It exits `1` for
 invalid keys with or without `--missing`. Each diagnostic shows the original key
-and known package managers. A unique close match is suggested, such as `apt:` for `atp:`.
+and known package managers. When the prefix has a unique close match, the
+diagnostic suggests it. For example, `atp:` calls out the missing package ID
+and suggests `apt:`.
 
 ## Installing what is missing
 

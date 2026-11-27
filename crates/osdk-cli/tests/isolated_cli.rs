@@ -211,11 +211,15 @@ fn pkg_reports_invalid_keys_in_text_and_json() {
     let root = temp.path();
     std::fs::write(
         root.join("osdk.toml"),
-        "[sys.pkg]\n\"atp:libssl-dev\" = \"latest\"\n",
+        "[sys.pkg]\n\"atp:\" = \"latest\"\n\"atp:libssl-dev\" = \"latest\"\n",
     )
     .unwrap();
-    let diagnosis = "`atp:libssl-dev` names an unknown manager `atp`; use one of \
-                     winget, brew, apt, apk, pacman, dnf; did you mean `apt:`?";
+    let diagnoses = [
+        "`atp:` has a manager prefix but no package id; known managers: \
+         winget, brew, apt, apk, pacman, dnf; did you mean `apt:`?",
+        "`atp:libssl-dev` names an unknown manager `atp`; use one of \
+         winget, brew, apt, apk, pacman, dnf; did you mean `apt:`?",
+    ];
     for command in [
         &["status"][..],
         &["status", "--missing"],
@@ -242,20 +246,24 @@ fn pkg_reports_invalid_keys_in_text_and_json() {
                         serde_json::json!({
                             "schema_version": 1,
                             "packages": [],
-                            "invalid_keys": [diagnosis],
+                            "invalid_keys": diagnoses,
                         })
                     );
                 } else {
-                    assert!(stdout.contains(&format!("invalid entry: {diagnosis}")));
+                    for diagnosis in diagnoses {
+                        assert!(stdout.contains(&format!("invalid entry: {diagnosis}")));
+                    }
                 }
                 continue;
             }
-            assert!(stderr.contains(diagnosis), "{args:?}: {stderr}");
+            for diagnosis in diagnoses {
+                assert!(stderr.contains(diagnosis), "{args:?}: {stderr}");
+            }
             if json {
                 let mut expected = serde_json::json!({
                     "refused": {
                         "reason": "invalid-package-keys",
-                        "detail": { "invalid_keys": [diagnosis] },
+                        "detail": { "invalid_keys": diagnoses },
                     },
                 });
                 if command[0] == "apply" {

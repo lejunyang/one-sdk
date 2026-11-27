@@ -260,26 +260,35 @@ impl std::fmt::Display for KeyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let managers = ManagerKind::ALL.map(ManagerKind::id);
         let known = managers.join(", ");
-        match self {
-            Self::MissingManagerPrefix { key } => write!(
-                formatter,
-                "`{key}` needs a manager prefix, for example `winget:{key}`; known managers: {known}"
-            ),
+        let unknown_manager = match self {
+            Self::MissingManagerPrefix { key } => {
+                return write!(
+                    formatter,
+                    "`{key}` needs a manager prefix, for example `winget:{key}`; known managers: {known}"
+                );
+            }
             Self::UnknownManager { manager, key } => {
                 write!(
                     formatter,
                     "`{key}` names an unknown manager `{manager}`; use one of {known}"
                 )?;
-                if let Some(suggestion) = super::suggest::closest(manager, managers, 1) {
-                    write!(formatter, "; did you mean `{suggestion}:`?")?;
-                }
-                Ok(())
+                Some(manager.as_str())
             }
-            Self::EmptyPackageId { key } => write!(
-                formatter,
-                "`{key}` has a manager prefix but no package id; known managers: {known}"
-            ),
+            Self::EmptyPackageId { key } => {
+                write!(
+                    formatter,
+                    "`{key}` has a manager prefix but no package id; known managers: {known}"
+                )?;
+                key.strip_suffix(':')
+                    .filter(|manager| !managers.contains(manager))
+            }
+        };
+        if let Some(suggestion) =
+            unknown_manager.and_then(|manager| super::suggest::closest(manager, managers, 1))
+        {
+            write!(formatter, "; did you mean `{suggestion}:`?")?;
         }
+        Ok(())
     }
 }
 
@@ -478,16 +487,27 @@ mod tests {
 
     #[test]
     fn a_prefix_with_no_package_id_is_rejected() {
-        let error = PackageKey::parse("winget:").unwrap_err();
-        assert_eq!(
-            error,
-            KeyError::EmptyPackageId {
-                key: "winget:".to_owned()
-            }
-        );
-        assert!(error
-            .to_string()
-            .contains("`winget:` has a manager prefix but no package id; known managers: winget, brew, apt, apk, pacman, dnf"));
+        for (key, suggestion) in [
+            ("apt:", ""),
+            ("atp:", "; did you mean `apt:`?"),
+            ("Apt:", "; did you mean `apt:`?"),
+            ("ap:", ""),
+            ("yum:", ""),
+        ] {
+            let error = PackageKey::parse(key).unwrap_err();
+            assert_eq!(
+                error,
+                KeyError::EmptyPackageId {
+                    key: key.to_owned()
+                }
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "`{key}` has a manager prefix but no package id; known managers: winget, brew, apt, apk, pacman, dnf{suggestion}"
+                )
+            );
+        }
     }
 
     #[test]
