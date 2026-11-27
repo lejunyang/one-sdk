@@ -12,7 +12,7 @@ osdk [GLOBAL OPTIONS] <COMMAND> [COMMAND OPTIONS]
 | `-q`, `--quiet` | — | Hide download/install progress; it does not hide normal results or approve deletion |
 | `-j N`, `--jobs N` | `OSDK_JOBS` | Maximum concurrent downloads/installations; CLI `0` does not override config, and execution uses at least 1 |
 | `--model-jobs N` | `OSDK_MODEL_JOBS` | How many models `model sync` downloads at once (default 2); independent of, and multiplied by, `--jobs`, which parallelizes files within one model |
-| `-y`, `--yes` | `OSDK_YES` | Approve uninstall, archive-cache cleanup, and real GC |
+| `-y`, `--yes` | `OSDK_YES` | Approve uninstall, `cache clean`, and real GC |
 | `--source ID` | — | Put source `ID` first while retaining fallbacks; tool requests must use the canonical backend ID (for example, `node`, not `nodejs`) |
 | `--refresh-sources` | — | Force re-probing for `install`, `use`, `upgrade`, and `exec`; `model sync` refreshes only with no explicit endpoint/pin, `auto` selection, and online mode; no effect on `lock`, `outdated`, or `list-remote` |
 | `--source-mode MODE` | `OSDK_SOURCE_MODE` | `auto` (default) validates a mirror set in the environment and ranks it together with the built-in mirrors; `env` uses only that mirror and fails when it is missing or unusable |

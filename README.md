@@ -1158,7 +1158,8 @@ osdk --yes prune
 `cache clean` clears downloaded archives and the managed uv and pip caches.
 Managed uv 0.13.1 or later waits for installs using the same cache. Run
 `osdk cache prune` to reclaim unused uv cache entries, or `osdk prune` to
-reclaim unreferenced shared content.
+reclaim unreferenced shared content. Wait for pip installs to finish before
+running `cache clean`.
 
 
 Download copies default to a 2 GiB retention budget. Larger models still install; oversized copies are removed after success. Set `osdk config set --global download_cache.max_size_bytes 0` to retain none. Inspect with `osdk cache status --json`, preview with `osdk cache trim --dry-run`, and trim with `osdk cache trim`. Models with intact local content and snapshot records can be rebuilt offline after download copies are removed.

@@ -273,7 +273,8 @@ osdk --yes cache clean  # clear the download, uv, and pip caches
 `cache clean` may require downloads on the next install. Managed uv 0.13.1 or later waits
 for installs using the same cache. With managed uv unavailable or between 0.8.19 and 0.13.0,
 a busy cache causes cleanup to exit nonzero. `cache prune` requires managed uv 0.8.19
-or later and has no preview. See [Caches and Cleanup](../maintenance/cache).
+or later and has no preview. Wait for pip installs to finish before running `cache clean`.
+See [Caches and Cleanup](../maintenance/cache).
 
 ::: warning The uv cache directory belongs to uv alone
 Measured: `uv cache prune` removes anything it does not recognise under its own

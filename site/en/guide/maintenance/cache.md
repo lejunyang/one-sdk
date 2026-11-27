@@ -30,6 +30,9 @@ GC refuses to continue when it encounters a corrupt manifest, protecting objects
 For uv cache cleanup, managed uv 0.13.1 or later waits for uv installs using the same cache.
 If managed uv is unavailable or is between 0.8.19 and 0.13.0, `cache clean` tries to acquire uv's cache lock first.
 A busy cache causes a nonzero exit. Retry after installation finishes. `cache prune` requires managed uv 0.8.19 or later.
+Wait for pip installs to finish before running `cache clean`. The shared pip cache has no cleanup lock, and the warning also appears with `--yes`.
+Both commands target osdk-managed paths and preserve alternate directories set via `UV_CACHE_DIR` or `PIP_CACHE_DIR`.
+See the [downstream cache cleanup scope](../../internals/storage-cache#downstream-cache-cleanup-scope) for each manager.
 
 `osdk container cache status` is separate: it queries storage owned by Docker
 Engine or a Buildx builder through supported native aggregate interfaces. See

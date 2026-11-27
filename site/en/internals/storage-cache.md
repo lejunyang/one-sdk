@@ -82,6 +82,25 @@ uv 0.8.19 introduced a shared lock on `<cache>/pkg/uv/.lock` during installation
 
 `cache prune` leaves entry selection to managed uv 0.8.19 or later. Both delegated commands target osdk's uv cache explicitly and ignore uv configuration files and `UV_NO_CACHE`. Native failures surface uv's diagnostics and stop cleanup. Coordination depends on other processes participating in the cache lock and on filesystem support for that lock.
 
+### Downstream cache cleanup scope
+
+| Cache and default location | `cache clean` | `cache prune` | Native command and concurrency evidence |
+| --- | --- | --- | --- |
+| osdk downloads, `<cache>/downloads` | Clean under an exclusive downloads lease | Preserve | osdk installs and pulls hold shared leases |
+| uv, `<cache>/pkg/uv` | Delegate to uv or clear entries under the same lock | Delegate to uv | Lock protocol and version boundaries above |
+| pip, `<cache>/pkg/pip` | Warn, then clear directly | Preserve | pip 26.2.1 `cache purge` unlinks files individually and does not wait for external pip installs. [pip source](https://github.com/pypa/pip/blob/26.2.1/src/pip/_internal/commands/cache.py#L165-L223) |
+| npm, `<cache>/pkg/npm`, `<cache>/npm/v1/cache`, and `<data>/store/npm` | Preserve | Preserve | npm 11.4.2 offers `cache clean --force` and `cache verify`. Its documentation describes cache integrity. Waiting for concurrent installs was not verified. [npm documentation](https://docs.npmjs.com/cli/v11/commands/npm-cache) |
+| pnpm store, `<cache>/pkg/pnpm-store` | Preserve | Preserve | pnpm 10.12.4 offers `store prune`. Cleanup during external installs was not tested. [pnpm documentation](https://pnpm.io/cli/store) |
+| `PNPM_HOME`, `<data>/global/pnpm` in managed execution and `<cache>/pkg/pnpm` in `cache env` | Preserve | Preserve | Installation root for global packages and commands |
+| Cargo, `<cache>/pkg/cargo`, and `<data>/cargo` for Rust shims and exec | Preserve | Preserve | Cargo home holds executables and configuration. `cargo clean` clears build output. [Cargo documentation](https://doc.rust-lang.org/cargo/commands/cargo-clean.html) |
+| Gradle, `<cache>/pkg/gradle` | Preserve | Preserve | Gradle User Home holds configuration, wrappers, and runtime state. Concurrent cleanup was not verified. [Gradle documentation](https://docs.gradle.org/current/userguide/directory_layout.html) |
+| Go, `<cache>/pkg/go-mod` and `<cache>/pkg/go-build` | Preserve | Preserve | `go clean -modcache` and `go clean -cache` clean these separately. Concurrent cleanup was not tested. [Go documentation](https://pkg.go.dev/cmd/go#hdr-Remove_object_files_and_cached_files) |
+| Yarn, Classic cache at `<cache>/pkg/yarn-classic` and managed global folder at `<data>/global/yarn`. Berry follows project configuration. | Preserve | Preserve | Both generations offer `yarn cache clean`. Concurrent cleanup was not tested. [Classic](https://classic.yarnpkg.com/en/docs/cli/cache) · [Berry](https://yarnpkg.com/cli/cache/clean) |
+| Bun, `<cache>/pkg/bun` | Preserve | Preserve | `bun pm cache rm` can remove files that projects using Bun's global store link to. Concurrent cleanup was not tested. [Bun documentation](https://bun.com/docs/pm/cli/pm#cache) |
+| Deno, `<cache>/pkg/deno` | Preserve | Preserve | `deno clean` clears shared execution and compilation caches. Concurrent cleanup was not tested. [Deno documentation](https://docs.deno.com/runtime/reference/cli/clean/) |
+
+Both commands preserve alternate cache directories chosen by users, model-client caches under `<cache>/pkg/models`, and installed content.
+
 ## GC, removal, and the concurrency caveat
 
 [`Cas::gc_roots`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/store/mod.rs#L207) is a mark-and-sweep pass. It recursively scans every `.osdk-manifest.json` under installs and models, collects hashes into a live set, then walks the store and removes regular files outside that set. A corrupt manifest fails the entire GC closed before deletion. Directory traversal errors are skipped. Files whose names end exactly in `.tmp` are opportunistically deleted before liveness checking; other temporary forms such as `.tmp-<pid>` receive no special protection and are handled as ordinary unreferenced files.

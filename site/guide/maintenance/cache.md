@@ -30,6 +30,9 @@ GC 遇到损坏 manifest 会拒绝继续，防止误删仍在使用的对象。
 清理 uv 缓存时，受管 uv 0.13.1 或更新版本会等待占用同一缓存的 uv 安装完成。
 受管 uv 不可用，或版本在 0.8.19 至 0.13.0 之间时，`cache clean` 会先尝试取得 uv 的缓存锁。
 缓存忙时命令以非零状态退出，可在安装结束后重试。`cache prune` 需要受管 uv 0.8.19 或更新版本。
+请在 pip 安装结束后再运行 `cache clean`。共享 pip 缓存没有协调清理的锁，使用 `--yes` 时也会显示风险提示。
+两个命令只清理 osdk 管理的路径，保留通过 `UV_CACHE_DIR` 或 `PIP_CACHE_DIR` 另选的目录。
+各管理器的覆盖范围见[下游缓存清理范围](../../internals/storage-cache#下游缓存清理范围)。
 
 `osdk container cache status` 是另一条路径：它通过受支持的原生聚合接口查询 Docker
 Engine 或 Buildx 构建器自有的存储。详见[容器运行时、Registry 与原生操作](../system/containers)。

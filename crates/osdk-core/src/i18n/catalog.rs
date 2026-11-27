@@ -540,6 +540,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "warn.pip_cache_in_use",
+        (
+            "warning: pip cache {path} has no shared cleanup lock. Run cache clean after pip installs finish.",
+            "警告：pip 缓存 {path} 没有共享清理锁，请在 pip 安装结束后再执行 cache clean。",
+        ),
+    );
+    m.insert(
         "err.uv_cache_busy",
         (
             "uv cache {path} is in use. Retry after uv exits.",

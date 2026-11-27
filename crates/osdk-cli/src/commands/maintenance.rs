@@ -1075,6 +1075,10 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             downloads::validate_disposable_directory(dirs, &dirs.downloads())?;
             pypi::validate_cache(&app.ctx)?;
             downloads::validate_disposable_directory(dirs, &pip)?;
+            let pip_warned = pip.is_dir();
+            if pip_warned {
+                eprintln!("{}", t!("warn.pip_cache_in_use", path = pip.display()));
+            }
             if !app.prompt.confirm(&t!("prompt.cache_clean"))? {
                 println!("{}", t!("msg.cancelled"));
                 return Ok(());
@@ -1085,6 +1089,10 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
                 .map_err(|error| cache_clean_error("err.cache_clean_uv", error))?;
             downloads::validate_disposable_directory(dirs, &pip)
                 .map_err(|error| cache_clean_error("err.cache_clean_pip", error))?;
+            // pip can create its cache while uv is waiting for an install.
+            if !pip_warned && pip.is_dir() {
+                eprintln!("{}", t!("warn.pip_cache_in_use", path = pip.display()));
+            }
             remove_cache_directory(&pip).context(t!("err.cache_clean_pip"))?;
             println!("{}", t!("msg.cache_cleared"));
         }

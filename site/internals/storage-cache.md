@@ -76,6 +76,25 @@ uv 0.8.19 起在安装时持有 `<cache>/pkg/uv/.lock` 的共享锁。原生 `ca
 
 `cache prune` 由受管 uv 0.8.19 或更新版本决定回收哪些条目。两个委托命令都固定使用 osdk 的 uv 缓存目录，忽略 uv 配置文件和 `UV_NO_CACHE`。原生清理失败时会显示 uv 的诊断并退出。协调要求其他进程使用共享缓存锁且文件系统支持该锁。
 
+### 下游缓存清理范围
+
+| 对象与默认位置 | `cache clean` | `cache prune` | 原生命令与并发依据 |
+| --- | --- | --- | --- |
+| osdk 下载副本，`<cache>/downloads` | 独占下载 lease 后清理 | 保留 | osdk 安装/拉取持共享 lease |
+| uv，`<cache>/pkg/uv` | 委托 uv，或持同一锁清内容 | 委托 uv | 锁协议与版本边界见上文 |
+| pip，`<cache>/pkg/pip` | 提示风险后直接清理 | 保留 | pip 26.2.1 的 `cache purge` 逐文件删除，不会等待外部 pip 安装。 [pip 实现](https://github.com/pypa/pip/blob/26.2.1/src/pip/_internal/commands/cache.py#L165-L223) |
+| npm，`<cache>/pkg/npm`、`<cache>/npm/v1/cache`、`<data>/store/npm` | 保留 | 保留 | npm 11.4.2 提供 `cache clean --force` 和 `cache verify`。文档描述缓存完整性，等待并发安装的行为未核验。 [npm 文档](https://docs.npmjs.com/cli/v11/commands/npm-cache) |
+| pnpm store，`<cache>/pkg/pnpm-store` | 保留 | 保留 | pnpm 10.12.4 提供 `store prune`，与外部安装的并发行为未实测。 [pnpm 文档](https://pnpm.io/cli/store) |
+| `PNPM_HOME`，受管执行用 `<data>/global/pnpm`，`cache env` 列出 `<cache>/pkg/pnpm` | 保留 | 保留 | 全局包和命令的安装目录 |
+| Cargo，`<cache>/pkg/cargo`，Rust shim/exec 用 `<data>/cargo` | 保留 | 保留 | home 包含命令和配置。`cargo clean` 清理构建产物。 [Cargo 文档](https://doc.rust-lang.org/cargo/commands/cargo-clean.html) |
+| Gradle，`<cache>/pkg/gradle` | 保留 | 保留 | Gradle User Home 含配置、wrapper 和运行状态。外部清理的并发行为未核验。 [Gradle 文档](https://docs.gradle.org/current/userguide/directory_layout.html) |
+| Go，`<cache>/pkg/go-mod`、`<cache>/pkg/go-build` | 保留 | 保留 | `go clean -modcache` 和 `go clean -cache` 可分别清理。并发清理未实测。 [Go 文档](https://pkg.go.dev/cmd/go#hdr-Remove_object_files_and_cached_files) |
+| Yarn，Classic 缓存在 `<cache>/pkg/yarn-classic`，受管全局目录在 `<data>/global/yarn`。Berry 遵循项目配置。 | 保留 | 保留 | 两代都有 `yarn cache clean`，并发清理未实测。 [Classic](https://classic.yarnpkg.com/en/docs/cli/cache) · [Berry](https://yarnpkg.com/cli/cache/clean) |
+| Bun，`<cache>/pkg/bun` | 保留 | 保留 | `bun pm cache rm` 会删除使用 Bun 全局 store 的项目可能链接到的文件。并发清理未实测。 [Bun 文档](https://bun.com/docs/pm/cli/pm#cache) |
+| Deno，`<cache>/pkg/deno` | 保留 | 保留 | `deno clean` 清理运行和编译所用的共享缓存。并发清理未实测。 [Deno 文档](https://docs.deno.com/runtime/reference/cli/clean/) |
+
+用户通过环境变量另选的缓存目录、模型客户端的 `<cache>/pkg/models` 和已安装内容均保留。
+
 ## GC、卸载与并发 caveat
 
 [`Cas::gc_roots`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/store/mod.rs#L207) 是一次 mark-and-sweep：先递归扫描 installs 与 models 下所有 `.osdk-manifest.json`，把 hash 加入 live set，再遍历 store 删除不在集合中的普通文件。manifest 无法解析时整个 GC fail closed，不删除任何对象；目录遍历错误则被跳过。名称恰好以 `.tmp` 结尾的文件会在 liveness 检查前被尽力删除；`.tmp-<pid>` 等其他临时命名没有特殊保护，会按普通未引用文件处理。

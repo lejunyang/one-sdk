@@ -228,7 +228,8 @@ osdk --yes cache clean  # 清理下载、uv 和 pip 缓存
 
 `cache clean` 可能让下次安装重新下载。受管 uv 0.13.1 或更新版本会等待同一缓存上的安装结束。
 受管 uv 不可用，或版本在 0.8.19 至 0.13.0 之间时，缓存正忙会使清理以非零状态退出。
-`cache prune` 需要受管 uv 0.8.19 或更新版本，无预览模式。详见[缓存与清理](../maintenance/cache)。
+`cache prune` 需要受管 uv 0.8.19 或更新版本，无预览模式。
+使用 pip 时，请在安装结束后再运行 `cache clean`。详见[缓存与清理](../maintenance/cache)。
 
 ::: warning uv 缓存目录归 uv 独占
 实测 `uv cache prune` 会删掉它自己缓存根目录下任何它不认识的东西。不要往

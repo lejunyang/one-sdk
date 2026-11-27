@@ -1011,7 +1011,7 @@ osdk --yes prune
 
 `cache clean` 清理下载归档和受管的 uv、pip 缓存。受管 uv 0.13.1 或更新版本
 会等待使用同一缓存的安装结束。`osdk cache prune` 回收未使用的 uv 缓存，
-`osdk prune` 回收未引用的共享内容。
+`osdk prune` 回收未引用的共享内容。请在 pip 安装结束后再运行 `cache clean`。
 
 
 下载副本默认最多保留 2 GiB；更大的模型仍可安装，成功后清掉超预算下载副本。运行 `osdk config set --global download_cache.max_size_bytes 0` 可成功即删。使用 `osdk cache status --json` 查看、`osdk cache trim --dry-run` 预览和 `osdk cache trim` 回收。本地内容和快照记录完整时，下载副本已删也可离线重建模型。

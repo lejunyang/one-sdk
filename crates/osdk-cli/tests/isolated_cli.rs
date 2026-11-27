@@ -2377,6 +2377,83 @@ fn yes_flag_confirms_cache_clean() {
     );
     assert!(!archive.exists());
     assert!(temp.path().join("cache/downloads").is_dir());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("shared cleanup lock"));
+}
+
+#[test]
+fn cache_clean_warns_for_pip_and_preserves_other_native_cache_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let pip = root.join("cache/pkg/pip");
+    std::fs::create_dir_all(&pip).unwrap();
+    std::fs::write(pip.join("wheel"), b"cached pip wheel").unwrap();
+    let uv = root.join("cache/pkg/uv");
+    std::fs::create_dir_all(&uv).unwrap();
+    std::fs::write(uv.join("wheel"), b"cached uv wheel").unwrap();
+    let protected = [
+        "cache/pkg/npm",
+        "cache/npm/v1/cache",
+        "cache/pkg/pnpm",
+        "cache/pkg/pnpm-store",
+        "cache/pkg/cargo/bin",
+        "data/cargo/bin",
+        "data/cargo/config",
+        "cache/pkg/go-mod",
+        "cache/pkg/go-build",
+        "cache/pkg/gradle",
+        "cache/pkg/yarn",
+        "cache/pkg/yarn-classic",
+        "cache/pkg/bun",
+        "cache/pkg/deno",
+        "cache/pkg/models",
+        "cache/remote",
+        "cache/sources",
+        "data/global/pnpm",
+        "data/global/yarn",
+        "data/models",
+        "data/shims",
+        "data/skills",
+        "config",
+        "store/npm",
+        "installs",
+    ];
+    for directory in protected {
+        let path = root.join(directory);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("keep"), directory).unwrap();
+    }
+
+    let prune = run_isolated(root, &["cache", "prune"]);
+    assert!(prune.status.success(), "{:?}", prune);
+    assert!(String::from_utf8_lossy(&prune.stdout).contains("managed uv is unavailable"));
+    assert!(pip.join("wheel").is_file());
+    assert!(uv.join("wheel").is_file());
+
+    let unconfirmed = run_isolated(root, &["cache", "clean"]);
+    assert!(!unconfirmed.status.success());
+    let stderr = String::from_utf8_lossy(&unconfirmed.stderr);
+    assert!(
+        stderr
+            .lines()
+            .next()
+            .unwrap()
+            .contains("shared cleanup lock"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("rerun with --yes"), "{stderr}");
+    assert!(pip.join("wheel").is_file());
+
+    let output = run_isolated(root, &["--yes", "--lang", "zh", "cache", "clean"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("没有共享清理锁"));
+    assert!(!pip.exists());
+    assert!(!uv.join("wheel").exists());
+    for directory in protected {
+        assert_eq!(
+            std::fs::read_to_string(root.join(directory).join("keep")).unwrap(),
+            directory
+        );
+    }
 }
 
 #[test]
