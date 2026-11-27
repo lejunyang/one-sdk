@@ -1067,31 +1067,23 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             }
         }
         CacheCommand::Clean => {
+            use osdk_core::{backend::pypi, cache::downloads};
+
+            let dirs = &app.ctx.dirs;
+            let pip = osdk_core::cache::downstream_root(&dirs.cache).join("pip");
+            downloads::validate_disposable_directory(dirs, &dirs.downloads())?;
+            let uv = pypi::validate_cache(&app.ctx)?;
+            downloads::validate_disposable_directory(dirs, &pip)?;
             if !app.prompt.confirm(&t!("prompt.cache_clean"))? {
                 println!("{}", t!("msg.cancelled"));
                 return Ok(());
             }
-            osdk_core::cache::downloads::clean(&app.ctx.dirs)?;
-            // The Python installer caches are osdk-managed now, so leaving them
-            // out would make `cache clean` quietly incomplete: osdk would be
-            // the reason they exist while offering no way to reclaim them.
-            //
-            // Only these two directories are touched, never `<cache>/pkg`
-            // wholesale -- that root also holds cargo, gradle and the Go caches,
-            // and cargo's in particular is a shared home containing installed
-            // binaries rather than just downloads.
-            let downstream = osdk_core::cache::downstream_root(&app.ctx.dirs.cache);
-            for name in ["uv", "pip"] {
-                let directory = downstream.join(name);
-                if directory.exists() {
-                    osdk_core::cache::downloads::validate_disposable_directory(
-                        &app.ctx.dirs,
-                        &directory,
-                    )?;
-                    std::fs::remove_dir_all(&directory)
-                        .with_context(|| format!("removing {}", directory.display()))?;
-                }
-            }
+            downloads::clean(dirs).context(t!("err.cache_clean_downloads"))?;
+            remove_cache_directory(&uv).context(t!("err.cache_clean_uv"))?;
+            downloads::validate_disposable_directory(dirs, &pip)
+                .map_err(anyhow::Error::from)
+                .and_then(|()| remove_cache_directory(&pip))
+                .context(t!("err.cache_clean_pip"))?;
             println!("{}", t!("msg.cache_cleared"));
         }
         CacheCommand::Prune => {
@@ -1110,6 +1102,14 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn remove_cache_directory(directory: &std::path::Path) -> Result<()> {
+    match std::fs::remove_dir_all(directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", directory.display())),
+    }
 }
 
 fn print_download_cache_report(

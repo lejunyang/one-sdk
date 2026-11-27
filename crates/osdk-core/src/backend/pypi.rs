@@ -860,6 +860,24 @@ pub struct PruneOutcome {
     pub uv_available: bool,
 }
 
+/// Validate the cache and its root lock before any explicit maintenance.
+#[cfg(feature = "install")]
+pub fn validate_cache(ctx: &Ctx) -> Result<PathBuf> {
+    let root = crate::cache::downstream_root(&ctx.dirs.cache).join("uv");
+    crate::cache::downloads::validate_disposable_directory(&ctx.dirs, &root)?;
+    let lock = root.join(".lock");
+    crate::cache::downloads::safe_path(&ctx.dirs.cache, &lock)?;
+    match std::fs::symlink_metadata(&lock) {
+        Ok(metadata) if !metadata.is_file() => Err(Error::other(format!(
+            "uv cache lock {} must be a regular file",
+            lock.display()
+        ))),
+        Ok(_) => Ok(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(root),
+        Err(error) => Err(Error::io(&lock, error)),
+    }
+}
+
 /// Drop cache entries nothing references, keeping what environments still use.
 ///
 /// This is deliberately not `cache clean`. uv hardlinks each unpacked wheel into
@@ -884,7 +902,7 @@ pub struct PruneOutcome {
 /// under `<cache>/pkg/uv` and expect it to survive.
 #[cfg(feature = "install")]
 pub fn prune_cache(ctx: &Ctx) -> Result<PruneOutcome> {
-    let cache_root = crate::cache::downstream_root(&ctx.dirs.cache).join("uv");
+    let cache_root = validate_cache(ctx)?;
     let mut outcome = PruneOutcome::default();
 
     let Some(uv) = locate_uv(ctx).filter(|candidate| uv_is_spawnable(candidate)) else {

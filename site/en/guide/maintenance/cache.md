@@ -22,8 +22,10 @@ osdk prune [--dry-run]
 | `prune --dry-run` | Currently print a dry-run notice without computing or listing candidate objects |
 | `prune` | Use SDK-install and model-snapshot manifests as roots and remove unreferenced CAS objects |
 
-`cache clean` preserves CAS, installations, models and remote/source metadata. Within `<cache>/pkg`, only uv/pip are cleaned. GC refuses to continue when it encounters a corrupt
-manifest, preventing deletion of objects that may still be referenced.
+`cache clean` preserves CAS, installations, models and remote/source metadata. Within `<cache>/pkg`, only uv/pip are cleaned.
+Cleanup checks its targets before deletion and rejects links, invalid directories and targets that overlap persistent data.
+If a later stage fails, `cache clean` reports which earlier stages completed.
+GC refuses to continue when it encounters a corrupt manifest, protecting objects that may still be referenced.
 
 `osdk container cache status` is separate: it queries storage owned by Docker
 Engine or a Buildx builder through supported native aggregate interfaces. See

@@ -11128,16 +11128,51 @@ fn cache_clean_refuses_a_native_cache_parent_link_to_persistent_models() {
     let model = temp.path().join("data/models/uv/unique-model.gguf");
     std::fs::create_dir_all(model.parent().unwrap()).unwrap();
     std::fs::write(&model, b"unique model data").unwrap();
-    std::fs::create_dir_all(temp.path().join("cache")).unwrap();
+    let archive = temp.path().join("cache/downloads/archive.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::write(&archive, b"cached download").unwrap();
     std::os::unix::fs::symlink(
         temp.path().join("data/models"),
         temp.path().join("cache/pkg"),
     )
     .unwrap();
-    let output = run_isolated(temp.path(), &["--yes", "cache", "clean"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in cache path"));
+    for action in ["clean", "prune"] {
+        let output = run_isolated(temp.path(), &["--yes", "cache", action]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in cache path"));
+    }
     assert_eq!(std::fs::read(&model).unwrap(), b"unique model data");
+    assert_eq!(std::fs::read(&archive).unwrap(), b"cached download");
+}
+
+#[test]
+fn cache_clean_preflights_pip_and_uv_lock_before_removing_downloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let archive = root.join("cache/downloads/archive.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::write(&archive, b"cached download").unwrap();
+    let uv = root.join("cache/pkg/uv");
+    std::fs::create_dir_all(&uv).unwrap();
+    std::fs::write(uv.join("wheel"), b"cached wheel").unwrap();
+    let pip = root.join("cache/pkg/pip");
+    std::fs::write(&pip, b"not a directory").unwrap();
+
+    let output = run_isolated(root, &["--yes", "cache", "clean"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&*pip.to_string_lossy()));
+    assert!(archive.is_file());
+    assert!(uv.join("wheel").is_file());
+
+    std::fs::remove_file(&pip).unwrap();
+    std::fs::create_dir(uv.join(".lock")).unwrap();
+    for action in ["clean", "prune"] {
+        let output = run_isolated(root, &["--yes", "cache", action]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must be a regular file"));
+    }
+    assert!(archive.is_file());
+    assert!(uv.join("wheel").is_file());
 }
 
 #[test]

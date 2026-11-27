@@ -514,8 +514,29 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "msg.cache_cleared",
         (
-            "cleared downloaded archives (CAS store + installs kept)",
-            "已清理下载的归档（保留 CAS 存储区与已安装内容）",
+            "cleared the download, uv and pip caches (CAS and installs kept)",
+            "已清理下载缓存、uv 缓存和 pip 缓存（保留 CAS 和已安装内容）",
+        ),
+    );
+    m.insert(
+        "err.cache_clean_downloads",
+        (
+            "download cache cleanup failed before uv and pip cleanup",
+            "下载缓存清理失败，尚未清理 uv 和 pip 缓存",
+        ),
+    );
+    m.insert(
+        "err.cache_clean_uv",
+        (
+            "download cache cleanup completed. uv cache cleanup failed before pip cleanup",
+            "下载缓存已清理。uv 缓存清理失败，尚未清理 pip 缓存",
+        ),
+    );
+    m.insert(
+        "err.cache_clean_pip",
+        (
+            "download and uv cache cleanup completed. pip cache cleanup failed and may be partial",
+            "下载缓存和 uv 缓存已清理。pip 缓存清理失败，可能已删除部分内容",
         ),
     );
     m.insert(

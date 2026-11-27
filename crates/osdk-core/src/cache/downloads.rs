@@ -192,7 +192,18 @@ fn check_boundaries(dirs: &Dirs) -> Result<()> {
 /// must never resolve through a link or overlap an installed/persistent root.
 pub fn validate_disposable_directory(dirs: &Dirs, path: &Path) -> Result<()> {
     safe_path(&dirs.cache, path)?;
-    let downloads = absolute(path)?;
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(Error::io(
+                path,
+                std::io::Error::from(std::io::ErrorKind::NotADirectory),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::io(path, error)),
+    }
+    let directory = absolute(path)?;
     for protected in [
         dirs.store.clone(),
         dirs.installs.clone(),
@@ -205,10 +216,11 @@ pub fn validate_disposable_directory(dirs: &Dirs, path: &Path) -> Result<()> {
         dirs.data.join("plugins"),
     ] {
         let protected = absolute(&protected)?;
-        if downloads.starts_with(&protected) || protected.starts_with(&downloads) {
-            return Err(Error::other(
-                "download cache overlaps persistent data; maintenance refused",
-            ));
+        if directory.starts_with(&protected) || protected.starts_with(&directory) {
+            return Err(Error::other(format!(
+                "cache directory {} overlaps persistent data",
+                path.display()
+            )));
         }
     }
     Ok(())
