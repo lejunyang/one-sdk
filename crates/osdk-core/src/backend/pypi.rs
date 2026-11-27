@@ -955,6 +955,9 @@ pub fn maintain_cache(ctx: &Ctx, action: UvCacheAction) -> Result<UvCacheOutcome
     }
 
     if let Some(uv) = compatible_cache_uv(ctx, action)? {
+        // uv can change its working directory before resolving the cache path.
+        let cache_root =
+            std::path::absolute(&cache_root).map_err(|error| Error::io(&cache_root, error))?;
         let operation = match action {
             UvCacheAction::Clean => "clean",
             UvCacheAction::Prune => "prune",

@@ -231,8 +231,15 @@ class SourceTests(unittest.TestCase):
         self.assertIn("uv 0.13.1", check.stdout)
 
     def test_cache_clean_waits_for_uv_download(self):
+        self.cache_maintenance_waits_for_uv_download("clean", "UV_WORKING_DIR")
+
+    def test_cache_prune_waits_for_uv_download(self):
+        self.cache_maintenance_waits_for_uv_download("prune", "UV_WORKING_DIRECTORY")
+
+    def cache_maintenance_waits_for_uv_download(self, operation, working_dir_variable):
         root, env = self.state()
         self.bootstrap_uv(root, env)
+        env["OSDK_CACHE_DIR"] = "state/cache"
         module = PAUSED.replace("-", "_")
         payload = hashlib.shake_256(b"osdk-cache-control-20261127").digest(4 * 1024 * 1024)
         fixture = wheel(PAUSED, "1.0.0", "paused-wheel", payload=payload)
@@ -242,9 +249,20 @@ class SourceTests(unittest.TestCase):
 
         cache_env = self.run_osdk(root, env, "cache", "env")
         self.assertEqual(cache_env.returncode, 0, cache_env.stderr)
-        cache = Path(dict(line.split("=", 1) for line in cache_env.stdout.splitlines())["UV_CACHE_DIR"])
+        relative_cache = Path(dict(line.split("=", 1) for line in cache_env.stdout.splitlines())["UV_CACHE_DIR"])
+        self.assertEqual(relative_cache, Path("state/cache/pkg/uv"))
+        cache = root / relative_cache
         self.assertFalse(cache.exists(), "the fixture must reach a fresh uv cache")
         lock = cache / ".lock"
+        target_marker = cache / "stale-bucket/target"
+        other_workdir = root / "uv working directory"
+        other_cache = other_workdir / relative_cache
+        other_marker = other_cache / "stale-bucket/keep"
+        other_marker.parent.mkdir(parents=True)
+        other_marker.write_text("alternate cache")
+        other_lock = other_cache / ".lock"
+        other_lock.touch()
+        other_inode = other_lock.stat().st_ino
         venv = root / "venv"
         subprocess.run([self.python, "-m", "venv", "--without-pip", str(venv)], env=env, check=True, timeout=15)
         venv_python = venv / "bin/python"
@@ -272,28 +290,41 @@ class SourceTests(unittest.TestCase):
                     time.sleep(0.02)
                 with lock.open("rb") as lock_file, self.assertRaises(BlockingIOError):
                     fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                inode = lock.stat().st_ino
+                lock_stat = lock.stat()
+                inode = lock_stat.st_ino
+                lock_id = f"{os.major(lock_stat.st_dev):02x}:{os.minor(lock_stat.st_dev):02x}:{inode}"
+                target_marker.parent.mkdir()
+                target_marker.write_text("target cache")
                 cleaner = subprocess.Popen(
-                    [self.osdk, "--yes", "cache", "clean"], cwd=root,
+                    [self.osdk, "--yes", "cache", operation], cwd=root,
                     env={**env, "UV_CACHE_DIR": str(custom_cache), "UV_NO_CACHE": "true",
-                         "UV_CONFIG_FILE": str(root / "absent-uv.toml")},
+                         "UV_CONFIG_FILE": str(root / "absent-uv.toml"),
+                         working_dir_variable: str(other_workdir)},
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 )
                 deadline = time.monotonic() + 6
                 while not any(
                     fields[1:5] == ["->", "FLOCK", "ADVISORY", "WRITE"]
-                    and fields[-3].endswith(f":{inode}")
+                    and fields[-3] == lock_id
                     for fields in map(str.split, Path("/proc/locks").read_text().splitlines())
                 ):
-                    self.assertIsNone(cleaner.poll(), "cache clean exited before the download was released")
-                    self.assertLess(time.monotonic(), deadline, "cache clean did not wait for the same uv lock")
+                    if cleaner.poll() is not None:
+                        clean_output, _ = cleaner.communicate(timeout=5)
+                        self.fail(
+                            f"cache {operation} exited {cleaner.returncode} before the download was released "
+                            f"(target marker present: {target_marker.exists()}, "
+                            f"alternate marker present: {other_marker.exists()})\n{clean_output}"
+                        )
+                    self.assertLess(time.monotonic(), deadline, f"cache {operation} did not wait for the same uv lock")
                     time.sleep(0.02)
+                self.assertTrue(target_marker.is_file())
+                self.assertTrue(other_marker.is_file())
                 server.release_wheel.set()
                 install_output, _ = installer.communicate(timeout=20)
                 clean_output, _ = cleaner.communicate(timeout=20)
                 self.assertEqual(installer.returncode, 0, install_output)
                 self.assertEqual(cleaner.returncode, 0, clean_output)
-                self.assertIn("running managed uv cache clean", clean_output)
+                self.assertIn(f"running managed uv cache {operation}", clean_output)
             finally:
                 server.release_wheel.set()
                 for child in (installer, cleaner):
@@ -317,10 +348,17 @@ class SourceTests(unittest.TestCase):
                         member,
                     )
         self.assertEqual(lock.stat().st_ino, inode)
-        self.assertLessEqual({entry.name for entry in cache.iterdir()}, {".lock", ".gitignore", "CACHEDIR.TAG"})
+        self.assertFalse(target_marker.exists())
+        if operation == "clean":
+            self.assertLessEqual({entry.name for entry in cache.iterdir()}, {".lock", ".gitignore", "CACHEDIR.TAG"})
+        self.assertEqual(other_lock.stat().st_ino, other_inode)
+        self.assertEqual(set(other_cache.iterdir()), {other_lock, other_marker.parent})
+        self.assertEqual(other_marker.read_text(), "alternate cache")
         self.assertTrue(marker.is_file())
         self.evidence.append({"test": self.id(), "install_stdout": install_output,
-                              "clean_stdout": clean_output, "payload_sha256": hashlib.sha256(payload).hexdigest()})
+                              "maintenance_stdout": clean_output, "working_dir_variable": working_dir_variable,
+                              "target_lock_inode": inode, "alternate_lock_inode": other_inode,
+                              "payload_sha256": hashlib.sha256(payload).hexdigest()})
 
     def installed_origin(self, root):
         bins = list((root / "installs/pypi" / TOP).glob("*/b3-v2-*/bin/source-fixture"))

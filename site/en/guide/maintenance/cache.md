@@ -32,6 +32,7 @@ If managed uv is unavailable or is between 0.8.19 and 0.13.0, `cache clean` trie
 A busy cache causes a nonzero exit. Retry after installation finishes. `cache prune` requires managed uv 0.8.19 or later.
 Wait for pip installs to finish before running `cache clean`. The shared pip cache has no cleanup lock, and the warning also appears with `--yes`.
 Both commands target osdk-managed paths and preserve alternate directories set via `UV_CACHE_DIR` or `PIP_CACHE_DIR`.
+A relative `OSDK_CACHE_DIR` is resolved from the directory where you launch osdk, even when `UV_WORKING_DIR` is set.
 See the [downstream cache cleanup scope](../../internals/storage-cache#downstream-cache-cleanup-scope) for each manager.
 
 `osdk container cache status` is separate: it queries storage owned by Docker

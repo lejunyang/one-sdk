@@ -24,6 +24,7 @@ osdk cache prune
 缓存正忙时以非零状态退出，等安装结束后再重试。`cache prune` 需要受管 uv 0.8.19 或更新版本。
 使用 pip 时，先等安装结束再运行 `cache clean`。pip 没有共享清理锁，`--yes` 仍会显示风险提示。
 两个命令只维护 osdk 管理的路径，保留通过 `UV_CACHE_DIR` 或 `PIP_CACHE_DIR` 另选的目录。
+相对的 `OSDK_CACHE_DIR` 以启动 osdk 时的工作目录为准，即使 uv 设置了 `UV_WORKING_DIR`。
 
 ## 下载副本保留策略
 

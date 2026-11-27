@@ -74,7 +74,7 @@ Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 S
 
 uv 0.8.19 起在安装时持有 `<cache>/pkg/uv/.lock` 的共享锁。原生 `cache clean` 到 0.13.1 才保留缓存根和锁文件，因此 osdk 从 0.13.1 起委托 clean。可执行文件缺失、无法启动，或版本在 0.8.19 至 0.13.0 之间时，osdk 尝试非阻塞独占同一文件，清理条目并保留目录和锁。已知低于 0.8.19 的版本会收到升级提示。 [0.8.18 初始化](https://github.com/astral-sh/uv/blob/0.8.18/crates/uv-cache/src/lib.rs#L314-L352) · [0.8.19 共享锁](https://github.com/astral-sh/uv/blob/0.8.19/crates/uv-cache/src/lib.rs#L397-L413) · [0.13.1 清理](https://github.com/astral-sh/uv/blob/0.13.1/crates/uv-cache/src/lib.rs#L544-L589)
 
-`cache prune` 由受管 uv 0.8.19 或更新版本决定回收哪些条目。两个委托命令都固定使用 osdk 的 uv 缓存目录，忽略 uv 配置文件和 `UV_NO_CACHE`。原生清理失败时会显示 uv 的诊断并退出。协调要求其他进程使用共享缓存锁且文件系统支持该锁。
+`cache prune` 由受管 uv 0.8.19 或更新版本决定回收哪些条目。osdk 在自己的工作目录内将预检通过的 uv 缓存路径转成绝对路径，再通过 `--cache-dir` 和 `UV_CACHE_DIR` 传给 uv。两个委托命令都忽略 uv 配置文件和 `UV_NO_CACHE`。原生清理失败时会显示 uv 的诊断并退出。协调要求其他进程使用共享缓存锁且文件系统支持该锁。
 
 ### 下游缓存清理范围
 

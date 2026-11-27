@@ -80,7 +80,7 @@ Offline model replay scans canonical snapshot paths, cross-checks both manifests
 
 uv 0.8.19 introduced a shared lock on `<cache>/pkg/uv/.lock` during installation. Native clean preserves the cache root and lock file starting in uv 0.13.1, so osdk delegates clean from that version onward. If managed uv cannot launch or is between 0.8.19 and 0.13.0, osdk tries an exclusive lock on the same file without waiting, then removes the entries while preserving the root and lock. A detected version older than 0.8.19 produces an upgrade message. [0.8.18 initialization](https://github.com/astral-sh/uv/blob/0.8.18/crates/uv-cache/src/lib.rs#L314-L352) · [0.8.19 shared lock](https://github.com/astral-sh/uv/blob/0.8.19/crates/uv-cache/src/lib.rs#L397-L413) · [0.13.1 clean](https://github.com/astral-sh/uv/blob/0.13.1/crates/uv-cache/src/lib.rs#L544-L589)
 
-`cache prune` leaves entry selection to managed uv 0.8.19 or later. Both delegated commands target osdk's uv cache explicitly and ignore uv configuration files and `UV_NO_CACHE`. Native failures surface uv's diagnostics and stop cleanup. Coordination depends on other processes participating in the cache lock and on filesystem support for that lock.
+`cache prune` leaves entry selection to managed uv 0.8.19 or later. For both delegated commands, osdk resolves the validated cache path to an absolute path in its own working directory and passes it to uv through `--cache-dir` and `UV_CACHE_DIR`. Both commands ignore uv configuration files and `UV_NO_CACHE`. Native failures surface uv's diagnostics and stop cleanup. Coordination depends on other processes participating in the cache lock and on filesystem support for that lock.
 
 ### Downstream cache cleanup scope
 
