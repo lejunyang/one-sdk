@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise real npm rollback on Linux with two pinned, managed Node releases."""
+"""Exercise real npm rollback on Linux with pinned, managed Node releases."""
 
 import argparse
 from contextlib import contextmanager
@@ -16,7 +16,7 @@ import threading
 import unittest
 
 
-SOURCE, TARGET = "20.19.0", "22.17.0"
+SOURCE, TARGET, LEGACY_TARGET = "20.19.0", "22.17.0", "16.20.2"
 CLI = "osdk-migration-cli"
 MISSING = "osdk-migration-source-only"
 VERSION = "1.0.0"
@@ -142,14 +142,17 @@ class MigrationRollback(unittest.TestCase):
         cls.addClassCleanup(temporary.cleanup)
         cls.root = Path(temporary.name)
         env = isolated_env(cls.root / "seed")
-        run(env, cls.root, cls.osdk, "install", f"node@{SOURCE}", f"node@{TARGET}", timeout=240)
+        bundled_npm = {SOURCE: "10.8.2", TARGET: "10.9.2", LEGACY_TARGET: "8.19.4"}
+        run(env, cls.root, cls.osdk, "install", *(f"node@{version}" for version in bundled_npm), timeout=240)
         cls.nodes = Path(env["OSDK_INSTALL_DIR"]) / "node"
-        for node_version, npm_version in [(SOURCE, "10.8.2"), (TARGET, "10.9.2")]:
+        for node_version, npm_version in bundled_npm.items():
             prefix = cls.nodes / node_version
             assert run(env, cls.root, prefix / "bin/node", "--version").stdout.strip() == f"v{node_version}"
             actual = npm(env, prefix, "--version").stdout.strip()
             assert actual == npm_version, (node_version, actual, npm_version)
-        print(f"managed Node {SOURCE} (npm 10.8.2) -> {TARGET} (npm 10.9.2)", flush=True)
+        print("Managed Node versions: " + ", ".join(
+            f"{version} (npm {npm_version})" for version, npm_version in bundled_npm.items()
+        ), flush=True)
 
     def test_npm_link(self):
         self.verify_failure("npm-link", "LOCAL-BEFORE", "REGISTRY-1.0.0")
@@ -198,6 +201,9 @@ class MigrationRollback(unittest.TestCase):
     def test_forced_manpage_collision(self):
         self.verify_manpage_collision(force=True)
 
+    def test_forced_manpage_collision_with_npm_8(self):
+        self.verify_manpage_collision(force=True, target_version=LEGACY_TARGET)
+
     def test_forced_manpage_collision_in_linked_section(self):
         self.verify_manpage_collision(force=True, section_target="../manual-store/man1")
 
@@ -216,7 +222,7 @@ class MigrationRollback(unittest.TestCase):
         )
 
     def verify_manpage_collision(self, force, section_target=None, incoming_name="osdk-migration-manpage",
-                                 change_original=False):
+                                 change_original=False, target_version=TARGET):
         root = self.root / self._testMethodName
         root.mkdir()
         original, incoming = root / "original", root / "incoming"
@@ -246,7 +252,7 @@ class MigrationRollback(unittest.TestCase):
         incoming_fixture = pack(incoming, root / "incoming.tgz")
         with loopback_registry({incoming_name: incoming_fixture}) as server:
             env = registry_env(root, server.url)
-            source, target = (Path(env["OSDK_INSTALL_DIR"]) / "node" / v for v in (SOURCE, TARGET))
+            source, target = (Path(env["OSDK_INSTALL_DIR"]) / "node" / v for v in (SOURCE, target_version))
             for prefix in (source, target):
                 shutil.copytree(self.nodes / prefix.name, prefix, symlinks=True)
             npm(env | {"npm_config_cache": str(root / "source-cache")}, source,
@@ -287,9 +293,10 @@ class MigrationRollback(unittest.TestCase):
             if force:
                 env["npm_config_force"] = "true"
             failure = run(env, root, self.osdk, "node", "migrate-packages",
-                          "--from", SOURCE, "--to", TARGET, "--apply", code=1)
+                          "--from", SOURCE, "--to", target_version, "--apply", code=1)
             print(json.dumps({
                 "scenario": self._testMethodName, "force": force, "exit": failure.returncode,
+                "target_node": target_version,
                 "incoming_package": incoming_name, "section_target": section_target,
                 "original_link": original_link, "current_link": os.readlink(man / collision),
                 "original_sha256": original_sha256,
@@ -300,7 +307,10 @@ class MigrationRollback(unittest.TestCase):
                 "independent_link": section_target and independent_link.is_symlink(),
                 "stderr": failure.stderr,
             }), flush=True)
-            self.assertIn("npm error code 47" if force else "EEXIST", failure.stderr)
+            if force:
+                self.assertRegex(failure.stderr, r"npm (?:ERR!|error) code 47\b")
+            else:
+                self.assertIn("EEXIST", failure.stderr)
             self.assertIn((f"/tarballs/{incoming_name}.tgz", 200), server.requests)
             if section_target:
                 self.assertEqual(os.readlink(man), section_target)
@@ -314,12 +324,12 @@ class MigrationRollback(unittest.TestCase):
                 self.assertEqual(os.readlink(backup / "man/man1" / collision), original_link)
                 self.assertEqual(os.readlink(independent_link), independent_target)
                 return
-            self.assertIn("restored the target Node package set", failure.stderr)
             self.assertEqual(os.readlink(man / collision), original_link)
             self.assertEqual((man / collision).resolve(strict=True), original_destination)
             self.assertEqual(hashlib.sha256((man / collision).read_bytes()).hexdigest(), original_sha256)
             self.assertFalse(os.path.lexists(man / added))
             self.assertFalse(os.path.lexists(target / MODULES / incoming_name))
+            self.assertIn("restored the target Node package set", failure.stderr)
             if section_target:
                 self.assertEqual(os.readlink(independent_link), independent_target)
 

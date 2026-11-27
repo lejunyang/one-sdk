@@ -99,7 +99,8 @@ packages already present on the target, and packages declaring
 `hasInstallScript=true` or `gypfile=true`. `--apply` installs exact versions.
 If installation fails, osdk attempts to roll back by restoring overwritten files
 and links from the local backup and removing packages and launchers added by the
-migration. On Unix, it rolls back man-page links it can verify that npm wrote.
+migration. On Unix, it rolls back man-page links it can verify that npm wrote,
+including links written by the npm 8 bundled with Node 16.
 An unexplained change to an original man-page entry stops rollback.
 After a successful rollback, `npm link` entries
 still point to their original projects, and packages installed from local tarballs
