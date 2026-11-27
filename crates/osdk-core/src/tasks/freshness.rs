@@ -16,14 +16,16 @@
 //!   task is skipped forever, or -- depending on which side is empty -- runs
 //!   every time. Either way nothing is reported and the config looks fine.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
+use super::args::Values;
 use crate::error::{Error, Result};
 
 /// How a task decides whether its inputs changed.
@@ -63,8 +65,8 @@ impl Decision {
     }
 }
 
-/// The literal directory prefix of a glob, i.e. everything before the first
-/// component containing a metacharacter.
+/// The literal directory prefix of a normalized glob, stopping before any
+/// component that needs glob parsing.
 ///
 /// `crates/**/*.rs` -> `crates`; `src/main.rs` -> `src`; `**/*.rs` -> `` (the
 /// root). Starting the walk here is what keeps a `target/`-adjacent scan from
@@ -72,23 +74,17 @@ impl Decision {
 /// matches, so narrowing the start cannot change the answer.
 pub fn literal_prefix(pattern: &str) -> PathBuf {
     let mut prefix = PathBuf::new();
-    for component in pattern.split(['/', '\\']) {
-        if component.contains(['*', '?', '[', '{']) {
+    // Use the same platform separators as Glob::new. On Unix, stop at any
+    // component containing an escape instead of guessing its literal name.
+    let mut components = pattern.split(std::path::is_separator).peekable();
+    while let Some(component) = components.next() {
+        if component.contains(['*', '?', '[', '{', '\\']) {
             break;
         }
-        // A trailing literal is the file name, not a directory to descend into;
-        // including it is harmless because the walk handles files too, but
-        // stopping before an obvious file keeps the root sensible.
-        prefix.push(component);
-    }
-    // `src/main.rs` should start at `src`, not at the file itself.
-    if pattern
-        .rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|last| !last.contains(['*', '?', '[', '{']))
-        && prefix.extension().is_some()
-    {
-        prefix.pop();
+        // For an obvious file name, start in its parent directory.
+        if components.peek().is_some() || Path::new(component).extension().is_none() {
+            prefix.push(component);
+        }
     }
     prefix
 }
@@ -108,10 +104,10 @@ fn split_patterns(patterns: &[String]) -> Vec<Pattern<'_>> {
                     glob: rest,
                     negated: true,
                 }
-            } else if let Some(rest) = raw.strip_prefix(r"\!") {
+            } else if raw.starts_with(r"\!") {
                 // `\!` escapes a literal leading `!`.
                 Pattern {
-                    glob: rest,
+                    glob: &raw[1..],
                     negated: false,
                 }
             } else {
@@ -124,19 +120,76 @@ fn split_patterns(patterns: &[String]) -> Vec<Pattern<'_>> {
         .collect()
 }
 
-/// Normalize a path for glob matching: relative to `root`, forward slashes, no
-/// `./` prefix.
-///
-/// The `./` part is not cosmetic. A `WalkDir` rooted at `.` yields `./src/x.rs`
-/// while the pattern says `src/*.rs`, so every match fails and freshness turns
-/// into a silent no-op. That exact mismatch is why `matching_is_checked_both_ways`
-/// asserts on both directions.
+fn normalize_glob_segments(pattern: &str) -> Cow<'_, str> {
+    let backslash_escape = !std::path::is_separator('\\');
+    let has_escaped_dot = backslash_escape
+        && (pattern.starts_with(r"\./") || pattern.contains(r"/\./") || pattern.ends_with(r"/\."));
+    let has_windows_separator = !backslash_escape && pattern.contains('\\');
+    if !has_windows_separator
+        && !pattern.starts_with("./")
+        && !pattern.contains("/./")
+        && !pattern.contains("//")
+        && !pattern.ends_with("/.")
+        && !has_escaped_dot
+    {
+        return Cow::Borrowed(pattern);
+    }
+
+    // Separators in a character class or behind a Unix escape belong to glob syntax.
+    // After an optional class negation, the first `]` can be a literal.
+    enum State {
+        Text,
+        Escape,
+        ClassStart,
+        ClassFirst,
+        Class,
+    }
+    let mut state = State::Text;
+    let segments = pattern.split(|ch| {
+        state = match (&state, ch) {
+            (State::Text, ch) if std::path::is_separator(ch) => return true,
+            (State::Text, '\\') if backslash_escape => State::Escape,
+            (State::Text, '[') => State::ClassStart,
+            (State::ClassStart, '!' | '^') => State::ClassFirst,
+            (State::ClassStart | State::ClassFirst, _) => State::Class,
+            (State::Class, ']') => State::Text,
+            (State::Class, _) => State::Class,
+            (State::Text | State::Escape, _) => State::Text,
+        };
+        false
+    });
+
+    let mut normalized = String::with_capacity(pattern.len());
+    if pattern.starts_with(std::path::is_separator) {
+        normalized.push('/');
+    }
+    let mut ends_in_directory = false;
+    for segment in segments {
+        ends_in_directory = matches!(segment, "" | ".") || (backslash_escape && segment == r"\.");
+        if ends_in_directory {
+            continue;
+        }
+        if !normalized.is_empty() && !normalized.ends_with('/') {
+            normalized.push('/');
+        }
+        normalized.push_str(segment);
+    }
+    // A trailing slash or dot segment still denotes a directory.
+    if ends_in_directory && !normalized.is_empty() && !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+    Cow::Owned(normalized)
+}
+
+/// Normalize a candidate relative to `root` for glob matching.
 fn normalize(path: &Path, root: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let text = relative.to_str()?;
-    let text = text.replace('\\', "/");
-    let text = text.strip_prefix("./").unwrap_or(&text).to_string();
-    Some(text)
+    Some(if std::path::MAIN_SEPARATOR == '\\' {
+        text.replace('\\', "/")
+    } else {
+        text.to_owned()
+    })
 }
 
 /// How much of the tree a scan actually touched.
@@ -150,6 +203,111 @@ fn normalize(path: &Path, root: &Path) -> Option<String> {
 pub struct ScanCost {
     /// Directory entries the walker yielded, files and directories alike.
     pub visited: usize,
+}
+
+fn compile_patterns(patterns: &[String], label: &str) -> Result<(Vec<Glob>, GlobSet)> {
+    let mut include = Vec::new();
+    let mut exclude = GlobSetBuilder::new();
+    for pattern in split_patterns(patterns) {
+        let normalized = normalize_glob_segments(pattern.glob);
+        let glob = Glob::new(&normalized).map_err(|error| {
+            Error::config(format!(
+                "{label}: invalid pattern `{}`: {error}",
+                pattern.glob
+            ))
+        })?;
+        if pattern.negated {
+            exclude.add(glob);
+        } else {
+            include.push(glob);
+        }
+    }
+    let exclude = exclude
+        .build()
+        .map_err(|error| Error::config(format!("{label}: {error}")))?;
+    Ok((include, exclude))
+}
+
+/// Visit normalized file and symlink entries until the visitor asks to stop.
+fn scan_files(
+    root: &Path,
+    walk: WalkDir,
+    label: &str,
+    cost: &mut ScanCost,
+    mut stop: impl FnMut(&DirEntry, &str) -> bool,
+) -> Result<bool> {
+    for entry in walk.follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error)
+                if error.depth() == 0
+                    && error
+                        .io_error()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(Error::other(format!("{label}: cannot scan: {error}"))),
+        };
+        cost.visited += 1;
+        if !entry.file_type().is_file() && !entry.path_is_symlink() {
+            continue;
+        }
+        let Some(relative) = normalize(entry.path(), root) else {
+            continue;
+        };
+        if stop(&entry, &relative) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn output_scan_root(root: &Path, prefix: &Path) -> Result<Option<PathBuf>> {
+    // A literal prefix may start below a symlink, bypassing WalkDir's link
+    // settings. Check its parents in order before handing it to the walker.
+    // Build the actual walk path from the checked components, keeping trailing
+    // separators away from the final component's no-follow check in WalkDir.
+    let mut start = root.to_path_buf();
+    let mut components = prefix.components().peekable();
+    while let Some(component) = components.next() {
+        start.push(component);
+        if components.peek().is_none() {
+            break;
+        }
+        match start.symlink_metadata() {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Error::io(&start, error)),
+        }
+    }
+    Ok(Some(start))
+}
+
+/// Every positive output pattern must match a file after exclusions.
+fn outputs_present(
+    root: &Path,
+    patterns: &[String],
+    label: &str,
+    cost: &mut ScanCost,
+) -> Result<bool> {
+    let (include, exclude) = compile_patterns(patterns, label)?;
+    for glob in include {
+        let Some(start) = output_scan_root(root, &literal_prefix(glob.glob()))? else {
+            return Ok(false);
+        };
+        let walk = WalkDir::new(start).follow_root_links(false);
+        let matcher = glob.compile_matcher();
+        if !scan_files(root, walk, label, cost, |entry, relative| {
+            matcher.is_match(relative)
+                && !exclude.is_match(relative)
+                && (entry.file_type().is_file() || entry.path().is_file())
+        })? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Every file under `root` matching `patterns`.
@@ -170,36 +328,20 @@ pub fn resolve_measured(
     if patterns.is_empty() {
         return Ok((Vec::new(), ScanCost::default()));
     }
-    let split = split_patterns(patterns);
+    let (includes, exclude) = compile_patterns(patterns, label)?;
 
+    // Walk only the literal prefixes, deduplicated, instead of the whole tree.
+    let mut roots: Vec<PathBuf> = includes
+        .iter()
+        .map(|glob| root.join(literal_prefix(glob.glob())))
+        .collect();
     let mut include = GlobSetBuilder::new();
-    let mut exclude = GlobSetBuilder::new();
-    for pattern in &split {
-        let glob = Glob::new(pattern.glob).map_err(|error| {
-            Error::config(format!(
-                "{label}: invalid pattern `{}`: {error}",
-                pattern.glob
-            ))
-        })?;
-        if pattern.negated {
-            exclude.add(glob);
-        } else {
-            include.add(glob);
-        }
+    for glob in includes {
+        include.add(glob);
     }
     let include = include
         .build()
         .map_err(|error| Error::config(format!("{label}: {error}")))?;
-    let exclude = exclude
-        .build()
-        .map_err(|error| Error::config(format!("{label}: {error}")))?;
-
-    // Walk only the literal prefixes, deduplicated, instead of the whole tree.
-    let mut roots: Vec<PathBuf> = split
-        .iter()
-        .filter(|pattern| !pattern.negated)
-        .map(|pattern| root.join(literal_prefix(pattern.glob)))
-        .collect();
     roots.sort();
     roots.dedup();
     // A nested prefix is already covered by its ancestor.
@@ -214,29 +356,21 @@ pub fn resolve_measured(
     let mut found = Vec::new();
     let mut cost = ScanCost::default();
     for start in pruned {
-        if !start.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(&start).follow_links(false) {
-            cost.visited += 1;
-            let entry = match entry {
-                Ok(entry) => entry,
-                // An unreadable subtree is not a reason to claim "no inputs";
-                // report it rather than silently narrowing the input set.
-                Err(error) => {
-                    return Err(Error::other(format!("{label}: cannot scan: {error}")));
+        scan_files(
+            root,
+            WalkDir::new(start),
+            label,
+            &mut cost,
+            |entry, relative| {
+                if entry.file_type().is_file()
+                    && include.is_match(relative)
+                    && !exclude.is_match(relative)
+                {
+                    found.push(entry.path().to_path_buf());
                 }
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let Some(relative) = normalize(entry.path(), root) else {
-                continue;
-            };
-            if include.is_match(&relative) && !exclude.is_match(&relative) {
-                found.push(entry.path().to_path_buf());
-            }
-        }
+                false
+            },
+        )?;
     }
     found.sort();
     found.dedup();
@@ -297,6 +431,19 @@ pub fn input_hash(paths: &[PathBuf], definition: &str) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn definition_hash(definition: &str) -> String {
+    blake3::hash(definition.as_bytes()).to_hex().to_string()
+}
+
+fn argument_hash(arguments: Option<&Values>) -> String {
+    // Include the parsed map and the ordered argv array. Joining argv with
+    // spaces would make one argument containing spaces look like several.
+    let empty = Values::default();
+    let encoded = serde_json::to_vec(arguments.unwrap_or(&empty))
+        .expect("task argument strings can always be serialized");
+    blake3::hash(&encoded).to_hex().to_string()
+}
+
 /// Where a project's freshness state belongs inside the cache directory.
 ///
 /// Derived data, so it lives under the managed cache rather than beside
@@ -328,6 +475,12 @@ pub struct TaskState {
     /// Content hash of inputs plus definition, for `freshness = "hash"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    /// Task definition fingerprint for `freshness = "mtime"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_hash: Option<String>,
+    /// Fingerprint of the effective arguments, including an empty invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hash: Option<String>,
     /// Unix **nanoseconds** of the last successful run, as a decimal string.
     ///
     /// Seconds are not enough: file mtimes carry sub-second precision, so a task
@@ -372,6 +525,8 @@ pub struct Inputs<'a> {
     pub freshness: Freshness,
     /// Serialized task definition, so editing commands invalidates the result.
     pub definition: &'a str,
+    /// Parsed arguments for the named task, absent for other tasks in the plan.
+    pub arguments: Option<&'a Values>,
 }
 
 /// Decide whether a task needs to run.
@@ -392,10 +547,40 @@ pub fn decide(inputs: &Inputs<'_>, state: &FreshnessState) -> Result<Decision> {
     )?;
     let previous = state.tasks.get(inputs.name);
 
+    if inputs.freshness == Freshness::Mtime {
+        let Some(recorded_definition) = previous.and_then(|state| state.definition_hash.as_deref())
+        else {
+            return Ok(Decision::Run("no recorded task definition".into()));
+        };
+        if recorded_definition != definition_hash(inputs.definition) {
+            return Ok(Decision::Run("task definition changed".into()));
+        }
+    }
+
+    if let Some(previous) = previous {
+        let Some(recorded_arguments) = previous.argument_hash.as_deref() else {
+            return Ok(Decision::Run("no recorded task arguments".into()));
+        };
+        if recorded_arguments != argument_hash(inputs.arguments) {
+            return Ok(Decision::Run("task arguments changed".into()));
+        }
+    }
+
     if inputs.freshness == Freshness::Hash {
         let hash = input_hash(&sources, inputs.definition)?;
         return Ok(match previous.and_then(|state| state.hash.as_deref()) {
-            Some(recorded) if recorded == hash => Decision::UpToDate,
+            Some(recorded) if recorded == hash => {
+                if outputs_present(
+                    inputs.root,
+                    inputs.outputs,
+                    &format!("task `{}`: outputs", inputs.name),
+                    &mut ScanCost::default(),
+                )? {
+                    Decision::UpToDate
+                } else {
+                    Decision::Run("outputs missing".into())
+                }
+            }
             Some(_) => Decision::Run("inputs changed".into()),
             None => Decision::Run("no recorded run".into()),
         });
@@ -448,16 +633,26 @@ pub fn record(inputs: &Inputs<'_>, state: &mut FreshnessState) -> Result<()> {
         inputs.sources,
         &format!("task `{}`: sources", inputs.name),
     )?;
-    let entry = state.tasks.entry(inputs.name.to_string()).or_default();
-    if inputs.freshness == Freshness::Hash {
-        entry.hash = Some(input_hash(&sources, inputs.definition)?);
-    }
-    entry.ran_at = Some(
+    let (hash, definition_hash) = if inputs.freshness == Freshness::Hash {
+        (Some(input_hash(&sources, inputs.definition)?), None)
+    } else {
+        (None, Some(definition_hash(inputs.definition)))
+    };
+    let ran_at = Some(
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0)
             .to_string(),
+    );
+    state.tasks.insert(
+        inputs.name.to_string(),
+        TaskState {
+            hash,
+            definition_hash,
+            argument_hash: Some(argument_hash(inputs.arguments)),
+            ran_at,
+        },
     );
     Ok(())
 }
@@ -488,6 +683,7 @@ mod tests {
             outputs,
             freshness,
             definition: "run = \"cargo build\"",
+            arguments: None,
         }
     }
 
@@ -497,6 +693,10 @@ mod tests {
         assert_eq!(literal_prefix("src/main.rs"), PathBuf::from("src"));
         assert_eq!(literal_prefix("**/*.rs"), PathBuf::new());
         assert_eq!(literal_prefix("a/b/c/*.txt"), PathBuf::from("a/b/c"));
+        assert_eq!(
+            literal_prefix(r"src/\[slug\]/index.tsx"),
+            PathBuf::from("src")
+        );
     }
 
     /// The 46x lesson, asserted on traversal rather than on the result.
@@ -602,10 +802,28 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         write(root, "a.marker", "");
-        // The pattern has no `./`; the walk yields absolute paths that are
-        // stripped back to `a.marker`.
-        let found = resolve(root, &["**/*.marker".to_string()], "test").unwrap();
-        assert_eq!(found.len(), 1, "{found:?}");
+        for pattern in ["**/*.marker", "./**/*.marker"] {
+            let found = resolve(root, &[pattern.into()], "test").unwrap();
+            assert_eq!(found, [root.join("a.marker")], "{pattern}");
+        }
+    }
+
+    #[test]
+    fn normalizing_path_segments_preserves_glob_character_classes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let hidden = write(root, "dist/.hidden.txt", "");
+        write(root, "dist/xhidden.txt", "");
+
+        for pattern in [
+            "dist/./[/./]hidden.txt",
+            r"dist/./[/\./]hidden.txt",
+            #[cfg(windows)]
+            r"dist\.\[\.\]hidden.txt",
+        ] {
+            let found = resolve(root, &[pattern.into()], "test").unwrap();
+            assert_eq!(found.as_slice(), std::slice::from_ref(&hidden), "{pattern}");
+        }
     }
 
     #[test]
@@ -623,6 +841,12 @@ mod tests {
         .unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].ends_with("keep.rs"));
+
+        let literal = write(root, "!keep.rs", "");
+        assert_eq!(
+            resolve(root, &[r"\!keep.rs".into()], "test").unwrap(),
+            [literal]
+        );
     }
 
     #[test]
@@ -635,14 +859,16 @@ mod tests {
 
         let sources = vec!["src/**/*.rs".to_string()];
         let outputs = vec!["out/**".to_string()];
-        let state = FreshnessState::default();
+        let mut state = FreshnessState::default();
+        let spec = inputs(root, &sources, &outputs, Freshness::Mtime);
+        record(&spec, &mut state).unwrap();
 
-        let decision = decide(&inputs(root, &sources, &outputs, Freshness::Mtime), &state).unwrap();
+        let decision = decide(&spec, &state).unwrap();
         assert_eq!(decision, Decision::UpToDate, "{decision:?}");
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         write(root, "src/a.rs", "fn a() { changed }");
-        let decision = decide(&inputs(root, &sources, &outputs, Freshness::Mtime), &state).unwrap();
+        let decision = decide(&spec, &state).unwrap();
         assert!(decision.should_run(), "{decision:?}");
         assert!(decision.reason().unwrap().contains("newer"), "{decision:?}");
     }
@@ -653,20 +879,208 @@ mod tests {
         let root = temp.path();
         write(root, "src/a.rs", "");
 
-        let decision = decide(
-            &inputs(
-                root,
-                &["src/**/*.rs".to_string()],
-                &["out/**".to_string()],
-                Freshness::Mtime,
-            ),
-            &FreshnessState::default(),
-        )
-        .unwrap();
+        let sources = ["src/**/*.rs".to_string()];
+        let outputs = ["out/**".to_string()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Mtime);
+        let mut state = FreshnessState::default();
+        let output = write(root, "out/bin", "built");
+        record(&spec, &mut state).unwrap();
+
+        std::fs::remove_file(output).unwrap();
+        let decision = decide(&spec, &state).unwrap();
         assert!(decision.should_run());
         assert!(
             decision.reason().unwrap().contains("missing"),
             "{decision:?}"
+        );
+    }
+
+    #[test]
+    fn a_hash_match_requires_every_output_pattern_to_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        write(root, "dist/sidecar.txt", "metadata");
+        write(root, "dist/ignored/result.txt", "excluded");
+        let result = write(root, "dist/actual/result.txt", "fixture");
+        let sources = ["input.txt".into()];
+
+        let outputs = [
+            "dist/sidecar.txt".into(),
+            "dist/*/result.txt".into(),
+            "!dist/ignored/**".into(),
+        ];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+
+        std::fs::remove_file(result).unwrap();
+        assert_eq!(
+            decide(&spec, &state).unwrap(),
+            Decision::Run("outputs missing".into()),
+            "a sidecar and an excluded file cannot satisfy dist/*/result.txt"
+        );
+    }
+
+    #[test]
+    fn checking_output_presence_stops_at_the_first_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for index in 0..200 {
+            write(root, &format!("dist/result-{index}.txt"), "");
+        }
+        let mut cost = ScanCost::default();
+        assert!(outputs_present(root, &["dist/*.txt".into()], "test", &mut cost).unwrap());
+        assert_eq!(cost.visited, 2, "one directory and its first matching file");
+    }
+
+    #[test]
+    fn a_hash_match_accepts_an_output_with_a_dot_slash_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        write(root, "dist/result.txt", "built");
+        let sources = ["input.txt".into()];
+        let outputs = ["./dist/result.txt".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+    }
+
+    #[test]
+    fn a_hash_match_accepts_an_output_with_an_internal_dot_component() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        let sources = ["input.txt".into()];
+
+        for pattern in [
+            "dist/./libs/result.txt",
+            "dist/././libs/result.txt",
+            "dist/libs/./*.txt",
+            "dist/*/./result.txt",
+            "dist//libs//result.txt",
+            #[cfg(unix)]
+            r"dist/\./libs/result.txt",
+            #[cfg(windows)]
+            r"dist\.\libs\result.txt",
+            #[cfg(windows)]
+            r"dist\*\.\result.txt",
+            #[cfg(windows)]
+            r"dist\\libs\/result.txt",
+        ] {
+            let result = write(root, "dist/libs/result.txt", "built");
+            let outputs = [pattern.into()];
+            let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+            let mut state = FreshnessState::default();
+            record(&spec, &mut state).unwrap();
+            assert_eq!(
+                decide(&spec, &state).unwrap(),
+                Decision::UpToDate,
+                "{pattern}"
+            );
+
+            std::fs::remove_file(result).unwrap();
+            assert_eq!(
+                decide(&spec, &state).unwrap(),
+                Decision::Run("outputs missing".into()),
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hash_match_excludes_outputs_using_a_dot_slash_pattern() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        write(root, "dist/ignored/result.txt", "excluded");
+        let result = write(root, "dist/result.txt", "built");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/**".into(), "!./dist/ignored/**".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+
+        std::fs::remove_file(result).unwrap();
+        assert_eq!(
+            decide(&spec, &state).unwrap(),
+            Decision::Run("outputs missing".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hash_match_accepts_only_file_symlinks_with_existing_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        let target = write(root, "dist/libdemo.so.1", "built");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/libdemo.so".into(), "dist/libdemo".into()];
+        for link in &outputs {
+            std::os::unix::fs::symlink("libdemo.so.1", root.join(link)).unwrap();
+        }
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        assert_eq!(decide(&spec, &state).unwrap(), Decision::UpToDate);
+
+        std::fs::remove_file(target).unwrap();
+        assert_eq!(
+            decide(&spec, &state).unwrap(),
+            Decision::Run("outputs missing".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checking_output_presence_does_not_walk_symlinked_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "outside/nested/result.txt", "built");
+        std::fs::create_dir(root.join("dist")).unwrap();
+        std::os::unix::fs::symlink("../outside", root.join("dist/linked")).unwrap();
+
+        for (pattern, max_entries) in [
+            ("dist/**/result.txt", 2),
+            ("dist/linked", 1),
+            ("dist/linked/**/result.txt", 1),
+            ("dist/linked/nested/result.txt", 1),
+            ("dist/linked/./**/result.txt", 1),
+            ("dist/linked/./nested/result.txt", 1),
+            (r"dist/linked/\./nested/result.txt", 1),
+            ("dist/linked//*.txt", 1),
+        ] {
+            let mut cost = ScanCost::default();
+            assert!(
+                !outputs_present(root, &[pattern.into()], "test", &mut cost).unwrap(),
+                "{pattern} reached the target of a directory symlink"
+            );
+            assert!(
+                cost.visited <= max_entries,
+                "{pattern} scanned into the link: {cost:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hash_match_does_not_hide_an_invalid_output_pattern() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "input.txt", "fixture");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/[".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Hash);
+        let mut state = FreshnessState::default();
+        record(&spec, &mut state).unwrap();
+        let error = decide(&spec, &state).unwrap_err().to_string();
+        assert!(
+            error.contains("outputs: invalid pattern `dist/[`"),
+            "{error}"
         );
     }
 
@@ -720,6 +1134,72 @@ mod tests {
             decide(&second, &state).unwrap().should_run(),
             "editing the command must invalidate"
         );
+    }
+
+    #[test]
+    fn changing_the_definition_invalidates_a_mtime_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = write(root, "input.txt", "fixture");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(source)
+            .unwrap()
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        write(root, "dist/result.txt", "previous output");
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/result.txt".into()];
+
+        for outputs in [&outputs[..], &[]] {
+            let mut state = FreshnessState::default();
+            let first = inputs(root, &sources, outputs, Freshness::Mtime);
+            record(&first, &mut state).unwrap();
+            assert_eq!(decide(&first, &state).unwrap(), Decision::UpToDate);
+
+            let second = Inputs {
+                definition: "run = \"cargo build --release\"",
+                ..first
+            };
+            assert_eq!(
+                decide(&second, &state).unwrap(),
+                Decision::Run("task definition changed".into()),
+                "edited command with outputs {outputs:?}"
+            );
+            record(&second, &mut state).unwrap();
+            assert_eq!(decide(&second, &state).unwrap(), Decision::UpToDate);
+        }
+    }
+
+    #[test]
+    fn a_legacy_mtime_record_without_a_definition_fingerprint_reruns() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = write(root, "input.txt", "fixture");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(source)
+            .unwrap()
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        write(root, "dist/result.txt", "previous output");
+        let state_path = write(
+            root,
+            "state.toml",
+            "[tasks.build]\nran_at = \"42000000000\"\n",
+        );
+        let state = FreshnessState::load(&state_path).unwrap();
+        assert_eq!(state.tasks["build"].ran_at.as_deref(), Some("42000000000"));
+
+        let sources = ["input.txt".into()];
+        let outputs = ["dist/result.txt".into()];
+        let spec = inputs(root, &sources, &outputs, Freshness::Mtime);
+        for state in [state, FreshnessState::default()] {
+            assert_eq!(
+                decide(&spec, &state).unwrap(),
+                Decision::Run("no recorded task definition".into())
+            );
+        }
     }
 
     #[test]
@@ -781,6 +1261,8 @@ mod tests {
             "build".into(),
             TaskState {
                 hash: Some("abc".into()),
+                definition_hash: Some("def".into()),
+                argument_hash: Some("arg".into()),
                 ran_at: Some("42000000000".into()),
             },
         );
@@ -788,7 +1270,12 @@ mod tests {
 
         let loaded = FreshnessState::load(&path).unwrap();
         assert_eq!(loaded.tasks["build"].hash.as_deref(), Some("abc"));
+        assert_eq!(
+            loaded.tasks["build"].definition_hash.as_deref(),
+            Some("def")
+        );
         assert_eq!(loaded.tasks["build"].ran_at.as_deref(), Some("42000000000"));
+        assert_eq!(loaded.tasks["build"].argument_hash.as_deref(), Some("arg"));
     }
 
     #[test]

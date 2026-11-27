@@ -67,6 +67,8 @@ Lua 指令、`run` / `sh` / `exec` 启动的子进程都受任务 `timeout` 约�
 | `platform` | `osdk.platform` | `{ os, windows, arch }` |
 | `env(name)` | `osdk.env(name)` | 先读任务环境，再读父进程环境；缺失返回 nil |
 
+`args` 和 `argv` 接收命令行点名任务的实参。作为前置任务或任务组成员执行时，这两张表为空。
+
 `os.getenv` 已重定向到与 `env()` 相同的数据源。短名是便捷别名，`osdk.*` 完整形式
 始终保留；脚本若自己需要同名全局，可使用完整形式并以 `local` 遮蔽短名。
 

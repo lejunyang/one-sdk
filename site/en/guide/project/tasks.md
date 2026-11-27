@@ -610,10 +610,11 @@ $ osdk run deploy -- prod 'x & echo pwned > bad.txt'
 Pipes, redirection and globbing still belong in `run = "..."`, which simply does
 not substitute. To pass arguments, use `argv` or a script file.
 
-Every value is also exported as an environment variable (`osdk_arg_env`,
-`osdk_args`). That path has no escaping problem at all — values enter the child's
-environment block without passing through a parser — so anyone who knows their
-own shell can use them inside a `run` string at their own risk.
+Arguments are also exported as environment variables such as `osdk_arg_env` and
+`osdk_args` for the task named on the command line. Values enter the child's
+environment block verbatim. Prerequisites and members of `{ tasks = [...] }`
+groups receive their own task environment.
+When reading the values in a `run` string, follow the shell's quoting rules.
 
 ## Incremental: skip when inputs have not changed
 
@@ -624,7 +625,8 @@ sources = ["Cargo.toml", "crates/**/*.rs"]
 outputs = ["target/release/osdk.exe"]
 ```
 
-When every `source` is older than every `output`, the task is skipped:
+In the default mode, a previously successful task is skipped when its definition
+and arguments are unchanged and every source is older than every matching output:
 
 ```
 $ osdk run build
@@ -636,15 +638,26 @@ The default comparison is modification time. Three choices:
 | `freshness` | Behaviour | When |
 | --- | --- | --- |
 | `"mtime"` (default) | Compare modification times | Cheap, but `git checkout` and CI cache restores rewrite timestamps |
-| `"hash"` | Compare content hashes | Immune to touched-but-unchanged files, at the cost of reading every input |
+| `"hash"` | Compare input content hashes and check that every positive output pattern matches a non-excluded file | Ignores timestamp-only changes, at the cost of reading every input |
 | `"always"` | Never skip | Opt out of incrementality |
 
-**The task definition counts as an input too**: editing `run` reruns the task
-even when no source file moved.
+Both `mtime` and `hash` compare the task definition with its last successful run.
+Editing `run` triggers a rerun even when the source files are unchanged. If the
+cache lacks the record required by the current mode, such as after clearing the
+cache or upgrading from an older version, the task runs once.
 
-With `outputs` omitted, osdk compares against the last successful run, stored in
-the cache directory rather than in your project, so nobody needs a `.gitignore`
-entry for it.
+Both modes compare the parsed argument values. Using a default and explicitly
+passing the same value are equivalent. Changing a value, the order of remaining
+arguments, or their boundaries triggers a rerun. This applies to the task named
+on the command line. `--dry-run` uses the same argument check.
+
+Even when the hash matches, the task reruns if any positive `outputs` pattern
+has no matching file. Files excluded by a `!` pattern do not count.
+A symlink counts if it points to an existing regular file. A dangling symlink
+counts as missing. The output scan skips symlinked directories.
+
+In `mtime` mode, omitting `outputs` makes osdk compare source modification times
+against the last successful run. The record lives in the cache directory.
 
 ### Two things worth knowing
 
@@ -666,7 +679,21 @@ measured scan rooted at the current directory next to a `target/` tree took
 2,827.91 ms against 61.26 ms from the correct starting point — 46x. Prefer
 patterns with a directory prefix; a bare `**/*.rs` walks everything.
 
-Prefix a pattern with `!` to exclude:
+Use `/` as the path separator in shared configurations. Use `[[]` and `[]]`
+to match literal `[` and `]` in filenames. For example,
+`sources = ['src/**/[[]slug[]].tsx']` tracks files named `[slug].tsx` under
+`src/` on both Unix and Windows. At the project root, use `[[]slug[]].tsx`.
+On Unix, backslashes escape characters, so `src/**/\[slug\].tsx` also works.
+On Windows, backslashes separate path segments.
+
+Prefix a pattern with `!` to exclude. Both positive and exclusion patterns
+allow optional standalone `.` path segments and treat consecutive path separators
+as a single separator.
+For example, `outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` excludes
+temporary libraries in `dist/libs/`.
+On Windows, `!dist\.\libs\*.tmp.so` excludes the same files.
+On Unix, an entire `\.` path segment is equivalent to `.`, so
+`!dist/\./libs/*.tmp.so` excludes the same files.
 
 ```toml
 sources = ["src/**/*.rs", "!src/generated/**"]

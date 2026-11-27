@@ -53,6 +53,21 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 | `freshness` | `mtime`（默认）/ `hash` / `always` |
 | `args` / `options` / `flags` | 声明位置参数、命名选项和布尔 flag |
 
+跨平台的 glob 用 `/` 分隔路径段，用 `[[]` 和 `[]]` 匹配文件名里的字面字符 `[` 和 `]`。
+`sources = ['src/**/[[]slug[]].tsx']` 在 Unix 和 Windows 上都能跟踪 `src/` 下名为
+`[slug].tsx` 的源文件，根目录中的同名文件写作 `[[]slug[]].tsx`。
+Unix 上的反斜杠用于转义字符，也可以写 `src/**/\[slug\].tsx`。Windows 上的反斜杠用于分隔路径段。
+正向模式和排除模式都可以省略独立的 `.` 路径段，连续的路径分隔符等同于一个。
+`outputs = ['dist/./libs/*.so', '!dist/libs/*.tmp.so']` 会排除 `dist/libs/` 中的临时库。
+在 Windows 上，`!dist\.\libs\*.tmp.so` 会排除同一批文件。
+在 Unix 上，完整的 `\.` 路径段也等同于 `.`，如 `!dist/\./libs/*.tmp.so`。
+
+`mtime` 和 `hash` 都比较上次成功运行时的任务定义，改 `run` 或缺少缓存记录会重跑。
+`mtime` 比较源文件与匹配产物的修改时间，省略 `outputs` 时改用上次成功运行的时间。
+哈希命中时，每个正向 `outputs` 模式都必须匹配至少一个未被 `!` 模式排除的文件。
+指向现有普通文件的符号链接也算匹配。断链视为产物缺失，扫描只遍历实际目录。
+两种模式都比较解析后的实参，包括默认值和保留顺序、边界的剩余参数。实参只影响命令行点名的任务。
+
 `argv` 步骤里的 `{{name}}` 与 `{{args}}` 按 argv 边界展开；不要把不可信参数插进 shell
 字符串。Lua 完整 API、短名、exec capture、fs/path/JSON/TOML 见
 `reference/run/lua.md`。

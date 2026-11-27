@@ -120,6 +120,287 @@ fn run_isolated_in(root: &Path, cwd: &Path, args: &[&str]) -> Output {
     run_isolated_in_with_env(root, cwd, args, &[])
 }
 
+#[cfg(feature = "scripts")]
+fn run_freshness_fixture(root: &Path, args: &[&str]) -> String {
+    let output = run_isolated_in_with_env(root, root, args, &[("OSDK_LANG", "en")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    format!("{stdout}\n{stderr}")
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_recreates_a_deleted_output() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
+    std::fs::create_dir(root.join("dist")).unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        r#"
+[tasks.build]
+lua = """
+assert(osdk.fs.write('dist/result.txt', assert(osdk.fs.read('input.txt'))))
+print('TASK_EXECUTED')
+"""
+sources = ["input.txt"]
+outputs = ["dist/result.txt"]
+freshness = "hash"
+"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/result.txt");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
+    let unchanged = run(&["run", "build"]);
+    assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+    assert!(!unchanged.contains("TASK_EXECUTED"), "{unchanged}");
+
+    std::fs::remove_file(&result).unwrap();
+    let preview = run(&["run", "build", "--dry-run"]);
+    assert!(preview.contains("outputs missing"), "{preview}");
+    assert!(!result.exists(), "dry-run must not recreate the output");
+    let rebuilt = run(&["run", "build"]);
+    assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
+    assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_recreates_an_output_when_only_excluded_files_remain() {
+    assert_hash_task_excludes_temporary_output("dist/./libs/*.so", "!dist/libs/*.tmp.so");
+    #[cfg(unix)]
+    assert_hash_task_excludes_temporary_output("dist/./libs/*.so", r"!dist/\./libs/*.tmp.so");
+}
+
+#[cfg(all(windows, feature = "scripts"))]
+#[test]
+fn hash_task_recreates_an_output_with_a_windows_dot_segment_in_the_exclusion() {
+    assert_hash_task_excludes_temporary_output(r"dist\libs\*.so", r"!dist\.\libs\*.tmp.so");
+}
+
+#[cfg(feature = "scripts")]
+fn assert_hash_task_excludes_temporary_output(include: &str, exclusion: &str) {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        format!(
+            r#"
+[tasks.build]
+lua = """
+assert(osdk.fs.write('dist/libs/libdemo.so', assert(osdk.fs.read('input.txt'))))
+assert(osdk.fs.write('dist/libs/libdemo.tmp.so', 'temporary'))
+print('TASK_EXECUTED')
+"""
+sources = ['input.txt']
+outputs = ['{include}', '{exclusion}']
+freshness = 'hash'
+"#,
+        ),
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/libs/libdemo.so");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    let preview = run(&["run", "build", "--dry-run"]);
+    assert!(
+        preview.contains("up to date, would be skipped"),
+        "{include}, {exclusion}: {preview}"
+    );
+    let unchanged = run(&["run", "build"]);
+    assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+    assert!(!unchanged.contains("TASK_EXECUTED"), "{unchanged}");
+
+    std::fs::remove_file(&result).unwrap();
+    assert!(root.join("dist/libs/libdemo.tmp.so").is_file());
+    let preview = run(&["run", "build", "--dry-run"]);
+    assert!(
+        preview.contains("outputs missing"),
+        "{exclusion}: {preview}"
+    );
+    assert!(!result.exists(), "dry-run must not recreate the output");
+    let rebuilt = run(&["run", "build"]);
+    assert!(rebuilt.contains("TASK_EXECUTED"), "{rebuilt}");
+    assert_eq!(std::fs::read(&result).unwrap(), b"fixture\n");
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_rebuilds_when_a_source_with_literal_brackets_changes() {
+    let pattern = "src/**/[[]slug[]].tsx";
+    assert_hash_task_glob_freshness("src/pages/[slug].tsx", pattern, true);
+    assert_hash_task_glob_freshness("src/pages/s.tsx", pattern, false);
+    assert_hash_task_glob_freshness("[slug].tsx", "./[[]slug[]].tsx", true);
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_source_globs_use_backslashes_as_windows_separators() {
+    let windows = cfg!(windows);
+    assert_hash_task_glob_freshness("src/main.rs", r"src\*.rs", windows);
+    assert_hash_task_glob_freshness("src/a.rs", r"src\[ab].rs", windows);
+    assert_hash_task_glob_freshness("src/pages/]index.tsx", r"src\pages\]index.tsx", windows);
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn hash_task_source_globs_use_backslashes_as_unix_escapes() {
+    let unix = cfg!(unix);
+    for (source, pattern) in [
+        ("src[ab].rs", r"src\[ab].rs"),
+        ("src/pages/[slug].tsx", r"src/**/\[slug\].tsx"),
+        ("[slug].tsx", r"\[slug\].tsx"),
+        ("[slug].tsx", r"./\[slug\].tsx"),
+        ("page.[slug].tsx", r"page\.\[slug\].tsx"),
+        ("page-[slug].tsx", r"page-\[slug\]\.tsx"),
+    ] {
+        assert_hash_task_glob_freshness(source, pattern, unix);
+    }
+    if unix {
+        // Windows does not allow a literal `*` in a filename.
+        assert_hash_task_glob_freshness("src*.rs", r"src\*.rs", true);
+    }
+}
+
+#[cfg(feature = "scripts")]
+fn assert_hash_task_glob_freshness(source_path: &str, pattern: &str, tracked: bool) {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let source = root.join(source_path);
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "original").unwrap();
+    // Keep one input matched even when the glob intentionally misses the source.
+    std::fs::write(root.join("manifest.json"), "{}").unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        format!(
+            r#"
+[tasks.build]
+lua = """
+assert(osdk.fs.write('dist/result.txt', assert(osdk.fs.read('{source_path}'))))
+print('TASK_EXECUTED')
+"""
+sources = ['manifest.json', '{pattern}']
+outputs = ["dist/result.txt"]
+freshness = "hash"
+"#
+        ),
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/result.txt");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    assert_eq!(std::fs::read(&result).unwrap(), b"original");
+    let unchanged = run(&["run", "build"]);
+    assert!(unchanged.contains("up to date, skipped"), "{unchanged}");
+    assert!(!unchanged.contains("TASK_EXECUTED"), "{unchanged}");
+
+    std::fs::write(&source, "updated").unwrap();
+    let changed = run(&["run", "build"]);
+    assert_eq!(
+        changed.contains("TASK_EXECUTED"),
+        tracked,
+        "{pattern} tracking {source_path}: {changed}"
+    );
+    assert_eq!(
+        changed.contains("up to date, skipped"),
+        !tracked,
+        "{pattern} tracking {source_path}: {changed}"
+    );
+    let expected = if tracked { "updated" } else { "original" };
+    assert_eq!(std::fs::read(&result).unwrap(), expected.as_bytes());
+}
+
+#[cfg(feature = "scripts")]
+#[test]
+fn task_arguments_drive_hash_freshness_in_run_and_preview() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    std::fs::write(root.join("input.txt"), "fixture\n").unwrap();
+    std::fs::write(
+        root.join("osdk.toml"),
+        r#"
+[tasks.prepare]
+lua = "osdk.fs.write('dist/prepared.txt', osdk.env('osdk_arg_variant') or 'none')"
+sources = ["input.txt"]
+outputs = ["dist/prepared.txt"]
+freshness = "hash"
+
+[tasks.member]
+lua = "osdk.fs.write('dist/member.txt', osdk.args.variant or 'none')"
+sources = ["input.txt"]
+outputs = ["dist/member.txt"]
+freshness = "hash"
+
+[tasks.build]
+lua = """
+assert(osdk.args.variant == osdk.env('osdk_arg_variant'))
+osdk.fs.write('dist/result.txt', osdk.args.variant)
+print('TASK_EXECUTED')
+"""
+depends = ["prepare"]
+run_post = [{ tasks = ["member"] }]
+sources = ["input.txt"]
+outputs = ["dist/result.txt"]
+freshness = "hash"
+
+[tasks.build.options.variant]
+default = "debug"
+choices = ["debug", "release"]
+"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| run_freshness_fixture(root, args);
+    run(&["--yes", "trust", "./osdk.toml"]);
+    let result = root.join("dist/result.txt");
+    assert!(run(&["run", "build"]).contains("TASK_EXECUTED"));
+    assert_eq!(std::fs::read(&result).unwrap(), b"debug");
+
+    let same = run(&["run", "build", "--", "--variant=debug"]);
+    assert!(same.contains("build: up to date, skipped"), "{same}");
+    assert!(!same.contains("TASK_EXECUTED"), "{same}");
+    let preview = run(&["run", "build", "--dry-run", "--", "--variant=release"]);
+    assert!(
+        preview.contains("build:  (task arguments changed)"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("prepare:  (up to date, would be skipped)"),
+        "{preview}"
+    );
+    assert_eq!(std::fs::read(&result).unwrap(), b"debug");
+
+    let changed = run(&["run", "build", "--", "--variant=release"]);
+    assert!(changed.contains("TASK_EXECUTED"), "{changed}");
+    assert!(
+        changed.contains("prepare: up to date, skipped"),
+        "{changed}"
+    );
+    assert_eq!(std::fs::read(&result).unwrap(), b"release");
+    assert_eq!(
+        std::fs::read(root.join("dist/prepared.txt")).unwrap(),
+        b"none"
+    );
+    assert_eq!(
+        std::fs::read(root.join("dist/member.txt")).unwrap(),
+        b"none"
+    );
+    let same = run(&["run", "build", "--", "--variant", "release"]);
+    assert!(same.contains("build: up to date, skipped"), "{same}");
+    assert!(!same.contains("TASK_EXECUTED"), "{same}");
+}
+
 fn run_isolated_in_with_env(
     root: &Path,
     cwd: &Path,

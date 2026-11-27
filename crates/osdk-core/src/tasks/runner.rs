@@ -53,8 +53,32 @@ pub const TASK_ROOT_VAR: &str = "OSDK_TASK_ROOT";
 /// spawning a process per case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
+    /// The resolved name of the requested task.
+    pub root: String,
     /// Tasks in execution order, dependencies first.
     pub steps: Vec<PlannedTask>,
+}
+
+impl Plan {
+    /// Only the task named on the command line records and compares its
+    /// arguments. Dependencies and group members use their own run records
+    /// because they execute without those arguments.
+    pub fn freshness_inputs<'a>(
+        &self,
+        task: &'a PlannedTask,
+        config_root: &'a Path,
+        arguments: &'a super::args::Values,
+    ) -> super::freshness::Inputs<'a> {
+        super::freshness::Inputs {
+            root: config_root,
+            name: &task.name,
+            sources: &task.sources,
+            outputs: &task.outputs,
+            freshness: task.freshness,
+            definition: &task.definition,
+            arguments: (task.name == self.root).then_some(arguments),
+        }
+    }
 }
 
 /// One task's resolved commands.
@@ -187,7 +211,7 @@ fn shell_for(def: &TaskDef, set: &TaskSet) -> Result<Vec<String>> {
 /// Validation happens here, before any process starts: unknown references and
 /// dependency cycles are reported as errors rather than discovered mid-run.
 pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
-    if set.resolve(root).is_none() {
+    let Some(root_name) = set.resolve(root) else {
         // A task filtered out by `when` is not "unknown" -- saying so would send
         // the reader to check their spelling instead of the filter.
         if let Some(reason) = set.exclusion_reason(root) {
@@ -196,7 +220,7 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             )));
         }
         return Err(Error::other(format!("unknown task `{root}`")));
-    }
+    };
 
     let missing = set.unknown_references();
     if let Some((task, reference)) = missing.first() {
@@ -359,7 +383,10 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             commands,
         });
     }
-    Ok(Plan { steps })
+    Ok(Plan {
+        root: root_name.to_owned(),
+        steps,
+    })
 }
 
 /// Environment handed to every task process.
@@ -477,16 +504,15 @@ pub struct ProcessSpawner {
     pub timeout: Option<std::time::Duration>,
     /// Project root, exposed to scripts as `osdk.project_root`.
     pub project_root: PathBuf,
-    /// Argument values exposed as `osdk_arg_*`.
-    ///
-    /// Safe on every shell: these enter the child's environment block verbatim,
-    /// never through a parser -- exactly the guarantee interpolating into a
-    /// `cmd` string cannot make.
-    pub arg_env: BTreeMap<String, String>,
-    /// Parsed argument values, kept separately so Lua sees the original argv
-    /// boundaries instead of reconstructing them from the shell-oriented
-    /// `osdk_args` environment variable.
-    pub arg_values: crate::tasks::args::Values,
+    /// Resolved task name and its parsed arguments, including argv boundaries.
+    pub arguments: (String, super::args::Values),
+}
+
+impl ProcessSpawner {
+    fn arguments_for(&self, task: &str) -> Option<&super::args::Values> {
+        let (name, values) = &self.arguments;
+        (name == task).then_some(values)
+    }
 }
 
 impl Spawner for ProcessSpawner {
@@ -508,8 +534,8 @@ impl Spawner for ProcessSpawner {
             self.env
                 .apply(&mut child, def, task, &self.base_path, &self.project_root);
         }
-        for (key, value) in &self.arg_env {
-            child.env(key, value);
+        if let Some(arguments) = self.arguments_for(task) {
+            child.envs(arguments.env_vars());
         }
         run_command_to_completion(task, program, child, self.timeout)
     }
@@ -527,9 +553,8 @@ impl Spawner for ProcessSpawner {
                 env.insert(key.clone(), value.clone());
             }
         }
-        for (key, value) in &self.arg_env {
-            env.insert(key.clone(), value.clone());
-        }
+        let arguments = self.arguments_for(task).cloned().unwrap_or_default();
+        env.extend(arguments.env_vars());
         let mut entries = self.env.path_prepend.clone();
         entries.extend(std::env::split_paths(&self.base_path));
         if let Ok(joined) = std::env::join_paths(entries) {
@@ -548,8 +573,8 @@ impl Spawner for ProcessSpawner {
             dir: dir.to_path_buf(),
             project_root: self.project_root.clone(),
             name: task.to_string(),
-            args: self.arg_values.named.clone(),
-            argv: self.arg_values.rest.clone(),
+            args: arguments.named,
+            argv: arguments.rest,
             env,
             timeout: self.timeout,
         };
@@ -566,8 +591,8 @@ impl Spawner for ProcessSpawner {
             self.env
                 .apply(&mut child, def, task, &self.base_path, &self.project_root);
         }
-        for (key, value) in &self.arg_env {
-            child.env(key, value);
+        if let Some(arguments) = self.arguments_for(task) {
+            child.envs(arguments.env_vars());
         }
         run_command_to_completion(task, program, child, self.timeout)
     }
@@ -871,19 +896,16 @@ pub fn execute_with_freshness(
 /// previewing.
 pub fn resolve_for_preview(
     plan: &Plan,
-    root: &str,
     values: &crate::tasks::args::Values,
     has_spec: bool,
 ) -> Result<Plan> {
-    let mut steps = Vec::with_capacity(plan.steps.len());
-    for task in &plan.steps {
-        let mut task = task.clone();
-        if task.name == root {
-            task.commands = apply_arguments(&task, values, has_spec)?;
+    let mut previewed = plan.clone();
+    for task in &mut previewed.steps {
+        if task.name == previewed.root {
+            task.commands = apply_arguments(task, values, has_spec)?;
         }
-        steps.push(task);
     }
-    Ok(Plan { steps })
+    Ok(previewed)
 }
 
 /// Execute a plan with argument values and freshness state.
@@ -1064,6 +1086,7 @@ fn execute_group_task(
             Error::config(format!("task `{name}` is missing from its execution plan"))
         })?;
     let mut subplan = plan.clone();
+    subplan.root = name.to_owned();
     for task in &mut subplan.steps {
         task.standalone = false;
     }
@@ -1115,15 +1138,6 @@ fn execute_full_inner(
 ) -> Result<Vec<TaskOutcome>> {
     use crate::tasks::freshness;
 
-    // Arguments belong to the task the user named, which is the last standalone
-    // entry in the plan. A value meant for `deploy` has no business reaching the
-    // `build` it depends on.
-    let root = plan
-        .steps
-        .iter()
-        .rfind(|step| step.standalone)
-        .map(|step| step.name.clone());
-
     let mut outcomes = Vec::new();
     for task in &plan.steps {
         // Present only so a parallel step can find its commands; running it here
@@ -1146,15 +1160,8 @@ fn execute_full_inner(
                 skipped: false,
             }]);
         }
+        let inputs = plan.freshness_inputs(task, config_root, values);
         if let Some(state) = state.as_deref() {
-            let inputs = freshness::Inputs {
-                root: config_root,
-                name: &task.name,
-                sources: &task.sources,
-                outputs: &task.outputs,
-                freshness: task.freshness,
-                definition: &task.definition,
-            };
             if !freshness::decide(&inputs, state)?.should_run() {
                 memo.completed.insert(task.name.clone(), 0);
                 memo.running.remove(&task.name);
@@ -1170,7 +1177,7 @@ fn execute_full_inner(
 
         spawner.set_timeout(task.timeout);
         let dir = resolve_dir(config_root, task.dir.as_deref());
-        let steps = if root.as_deref() == Some(task.name.as_str()) {
+        let steps = if let Some(values) = inputs.arguments {
             apply_arguments(task, values, has_spec)?
         } else {
             task.commands.clone()
@@ -1391,14 +1398,6 @@ fn execute_full_inner(
         // would let the next invocation skip a task that never succeeded.
         if outcome.code == 0 {
             if let Some(state) = state.as_deref_mut() {
-                let inputs = freshness::Inputs {
-                    root: config_root,
-                    name: &task.name,
-                    sources: &task.sources,
-                    outputs: &task.outputs,
-                    freshness: task.freshness,
-                    definition: &task.definition,
-                };
                 freshness::record(&inputs, state)?;
             }
         }
@@ -2053,6 +2052,82 @@ sources = ["src/**/*.rs"]
         assert_eq!(spawner.ran, vec!["compile"]);
     }
 
+    #[test]
+    fn changing_task_arguments_reruns_only_the_named_task() {
+        use crate::tasks::args::Values;
+        use crate::tasks::freshness::{Freshness, FreshnessState};
+
+        for mode in [Freshness::Hash, Freshness::Mtime] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            write_file(root, "input.txt", "fixture");
+            let mut set = set_from(
+                r#"
+[prepare]
+run = "prepare"
+sources = ["input.txt"]
+
+[member]
+run = "member"
+sources = ["input.txt"]
+
+[build]
+run = [{ argv = ["build", "{{variant}}", "{{args}}"] }, { tasks = ["member"] }]
+depends = ["prepare"]
+sources = ["input.txt"]
+"#,
+            );
+            for task in set.tasks.values_mut() {
+                task.freshness = mode;
+            }
+            let built = plan(&set, "build").unwrap();
+            let mut state = FreshnessState::default();
+            let mut run = |variant: &str, rest: &[&str]| {
+                let values = Values {
+                    named: BTreeMap::from([("variant".into(), variant.into())]),
+                    rest: rest.iter().map(|value| (*value).into()).collect(),
+                };
+                let mut spawner = RecordingSpawner::default();
+                let outcomes = execute_full(
+                    &built,
+                    root,
+                    &mut spawner,
+                    &mut Some(&mut state),
+                    &values,
+                    true,
+                )
+                .unwrap();
+                let skipped: Vec<_> = outcomes.iter().map(|outcome| outcome.skipped).collect();
+                (spawner.ran, skipped)
+            };
+
+            let (ran, skipped) = run("debug", &["two words"]);
+            assert_eq!(
+                ran,
+                ["prepare", "build\u{1f}debug\u{1f}two words", "member"]
+            );
+            assert_eq!(skipped, [false, false]);
+
+            let (ran, skipped) = run("debug", &["two words"]);
+            assert!(ran.is_empty(), "{mode:?}: {ran:?}");
+            assert_eq!(skipped, [true, true]);
+
+            let (ran, skipped) = run("release", &["two words"]);
+            assert_eq!(ran, ["build\u{1f}release\u{1f}two words"], "{mode:?}");
+            assert_eq!(skipped, [true, false]);
+
+            let (ran, skipped) = run("release", &["two", "words"]);
+            assert_eq!(ran, ["build\u{1f}release\u{1f}two\u{1f}words"], "{mode:?}");
+            assert_eq!(skipped, [true, false]);
+
+            let member = plan(&set, "member").unwrap();
+            let mut spawner = RecordingSpawner::default();
+            let outcomes =
+                execute_with_freshness(&member, root, &mut spawner, &mut Some(&mut state)).unwrap();
+            assert!(outcomes[0].skipped && spawner.ran.is_empty(), "{mode:?}");
+        }
+    }
+
     /// A failed run must not be recorded, or the next invocation skips a task
     /// that never succeeded -- the worst possible direction for this feature.
     #[test]
@@ -2595,8 +2670,7 @@ shell = "pwsh -Command"
             base_path: std::env::var("PATH").unwrap_or_default(),
             timeout: None,
             project_root: temp.path().to_path_buf(),
-            arg_env: values.env_vars(),
-            arg_values: values,
+            arguments: ("demo".into(), values),
         };
 
         let source = "return osdk.args.mode == 'release build' \
@@ -2642,8 +2716,7 @@ shell = "pwsh -Command"
             base_path: std::env::var("PATH").unwrap_or_default(),
             timeout: None,
             project_root: temp.path().to_path_buf(),
-            arg_env: values.env_vars(),
-            arg_values: values.clone(),
+            arguments: (built.root.clone(), values.clone()),
         };
         let outcomes =
             execute_full(&built, temp.path(), &mut spawner, &mut None, &values, false).unwrap();
