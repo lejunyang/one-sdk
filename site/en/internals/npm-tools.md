@@ -438,6 +438,8 @@ target prefix and backs up global `node_modules`, launchers, and the Unix
 backs up the matching man-page entries in the resolved directories of symlinked
 sections such as `man1`. Before restoring, it verifies that the managed prefix
 and these section links still resolve to their original directories.
+In symlinked sections, it restores or removes only man-page links into packages
+planned for installation by this migration.
 The backup preserves link text and the original junction or symlink type on
 Windows. Junction backups use Rust's Windows path conversion when the backup
 path exceeds `MAX_PATH`. On install failure it finds newly added planned packages

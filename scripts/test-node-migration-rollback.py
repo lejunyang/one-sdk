@@ -102,6 +102,8 @@ class Registry(http.server.BaseHTTPRequestHandler):
             }).encode()
             content_type = "application/json"
         elif path.startswith("/tarballs/") and archive_name != MISSING and archive_name in self.server.packages:
+            if self.server.before_tarball:
+                self.server.before_tarball()
             _, tarball = self.server.packages[archive_name]
             body, content_type = tarball.read_bytes(), "application/octet-stream"
         else:
@@ -122,6 +124,7 @@ def loopback_registry(packages):
         server.packages = packages
         server.url = f"http://127.0.0.1:{server.server_port}"
         server.requests = []
+        server.before_tarball = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -245,6 +248,18 @@ class MigrationRollback(unittest.TestCase):
             original_link = os.readlink(man / collision)
             original_destination = (man / collision).resolve(strict=True)
             self.assertFalse(os.path.lexists(man / added))
+            if linked_section:
+                independent = root / "independent.1"
+                independent.write_text("independent man page", encoding="utf-8")
+                independent_page = section_dir / independent.name
+                independent_link = section_dir / "independent-link.1"
+
+                def install_independent_manpage():
+                    # Write after the snapshot, while the migration waits for npm's tarball.
+                    run(env, root, "install", independent, independent_page)
+                    independent_link.symlink_to(independent)
+
+                server.before_tarball = install_independent_manpage
 
             env["npm_config_cache"] = str(root / "migration-cache")
             if force:
@@ -262,6 +277,8 @@ class MigrationRollback(unittest.TestCase):
             if linked_section:
                 self.assertEqual(os.readlink(man), section_link)
                 self.assertEqual(man.resolve(strict=True), section_dir)
+                self.assertEqual(independent_page.read_text(encoding="utf-8"), "independent man page")
+                self.assertEqual(independent_link.resolve(strict=True), independent)
             self.assertEqual(os.readlink(man / collision), original_link)
             self.assertEqual((man / collision).resolve(strict=True), original_destination)
             self.assertEqual((man / collision).read_text(encoding="utf-8"), "original")

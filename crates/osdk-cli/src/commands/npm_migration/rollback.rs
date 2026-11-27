@@ -14,6 +14,13 @@ use super::{modules, npm_command, ManagedNodeTools};
 #[cfg(unix)]
 const MAN_DIR: &str = "share/man";
 
+#[cfg(unix)]
+struct ChangedManLink {
+    path: PathBuf,
+    backup: PathBuf,
+    target: PathBuf,
+}
+
 pub(in crate::commands) struct Snapshot {
     prefix: PathBuf,
     bin: PathBuf,
@@ -162,6 +169,9 @@ impl Snapshot {
         let modules = modules(&self.prefix);
         let old_modules = self.backup.path().join("node_modules");
         check_directory_if_present(modules.parent().unwrap())?;
+        let planned: Vec<_> = planned.into_iter().collect();
+        #[cfg(unix)]
+        let changed_man_links = self.changed_man_links(&planned)?;
         if inspect(&modules)?.is_some_and(|meta| real_directory(&meta)) {
             let mut args = vec!["uninstall", "-g", "--offline", "--ignore-scripts"];
             for name in planned {
@@ -183,7 +193,7 @@ impl Snapshot {
             let man = self.prefix.join(MAN_DIR);
             check_directory_if_present(man.parent().unwrap())?;
             self.restore_tree(&self.backup.path().join("man"), &man)?;
-            self.restore_linked_man_sections()?;
+            self.restore_man_links(changed_man_links)?;
         }
 
         check_bin(&self.bin)?;
@@ -232,20 +242,58 @@ impl Snapshot {
     }
 
     #[cfg(unix)]
-    fn restore_linked_man_sections(&self) -> Result<()> {
+    fn changed_man_links(&self, planned: &[&str]) -> Result<Vec<ChangedManLink>> {
+        // npm builds the relative link from the logical share/man/manN path,
+        // even when that directory is itself a link and the new package is gone.
+        let module_links = modules(Path::new("../../.."));
+        let package_dirs: Vec<_> = planned
+            .iter()
+            .filter(|name| is_npm_install_key(name))
+            .map(|name| module_links.join(name))
+            .collect();
+        let mut links = Vec::new();
         for (section, directory) in &self.linked_man_sections {
             let backup = self.backup.path().join("linked-man").join(section);
             for page in fs::read_dir(directory)? {
                 let page = page?;
-                if is_man_page(&page.file_name(), section)
-                    && inspect(&backup.join(page.file_name()))?.is_none()
-                {
-                    remove_entry(&page.path(), &page.path().symlink_metadata()?)?;
+                let name = page.file_name();
+                if !is_man_page(&name, section) || !page.file_type()?.is_symlink() {
+                    continue;
+                }
+                let path = page.path();
+                let target = fs::read_link(&path)?;
+                if package_dirs.iter().any(|directory| {
+                    target.strip_prefix(directory).is_ok_and(|suffix| {
+                        suffix.file_name() == Some(&name)
+                            && suffix
+                                .components()
+                                .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    })
+                }) {
+                    links.push(ChangedManLink {
+                        path,
+                        backup: backup.join(name),
+                        target,
+                    });
                 }
             }
-            for page in fs::read_dir(backup)? {
-                let page = page?;
-                self.restore_entry(&page.path(), &directory.join(page.file_name()))?;
+        }
+        Ok(links)
+    }
+
+    #[cfg(unix)]
+    fn restore_man_links(&self, links: Vec<ChangedManLink>) -> Result<()> {
+        for link in links {
+            let current = inspect(&link.path)?;
+            if let Some(metadata) = &current {
+                if !metadata.file_type().is_symlink() || fs::read_link(&link.path)? != link.target {
+                    continue;
+                }
+            }
+            if inspect(&link.backup)?.is_some() {
+                self.restore_entry(&link.backup, &link.path)?;
+            } else if let Some(metadata) = current {
+                remove_entry(&link.path, &metadata)?;
             }
         }
         Ok(())
@@ -369,11 +417,13 @@ fn is_launcher(name: &OsStr, metadata: &Metadata) -> bool {
     !runtime && !real_directory(metadata)
 }
 
+fn is_npm_install_key(name: &str) -> bool {
+    osdk_core::tool::ToolId::dynamic("npm", name)
+        .is_ok_and(|id| id.subject() == name && !name.starts_with('-'))
+}
+
 fn added_package(name: &str, before: &Path, current: &Path) -> Result<bool> {
-    let Ok(id) = osdk_core::tool::ToolId::dynamic("npm", name) else {
-        return Ok(false);
-    };
-    if id.subject() != name || name.starts_with('-') {
+    if !is_npm_install_key(name) {
         return Ok(false);
     }
     if let Some((scope, _)) = name.split_once('/') {
