@@ -61,7 +61,7 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 
 Cargo 成员可从根配置用 `[deps].roots` 单独声明，启用 `[deps.cargo]` 即可。
 已安装或已链接的 Cargo 决定成员归属。确认的成员使用工作区根的 `Cargo.lock`，
-在成员目录拉取。根清单、根锁及各成员清单参与新鲜度判定。
+在成员目录拉取，即使目录中还留有旧锁。根清单、根锁及各成员清单参与新鲜度判定。
 Cargo 的 `sources = []` 会关闭新鲜度判定。
 
 裸 `depends` 名称限定同项目或共享 workspace 内的 provider；跨安装单元使用 `//path:provider`。依赖顺序不会隐式启用未选择的 provider。共享成员的包管理器版本声明冲突会报错。

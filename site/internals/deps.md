@@ -502,11 +502,12 @@ provider 都匹配它的清单时，选 workspace 的安装器。这不会改变
 
 ## Cargo 工作区锁归属
 
-内置 Cargo 项目没有本地 `Cargo.lock` 时，规划阶段在选中的清单目录运行
+内置 Cargo 项目在规划阶段从选中的清单目录运行
 `cargo metadata --no-deps --format-version 1 --offline`。查询直接使用已安装或已链接
 工具链里的 Cargo 和工具环境。provider 环境变量只在实际拉取时应用。
 
 Cargo 返回工作区根和成员清单。osdk 按规范化路径确认成员资格，给确认的成员使用根锁。
+Cargo 确认项目自成工作区时，才使用项目目录的锁。
 计划的执行目录与 `osdk.lock` 归属都在原项目。工作区根可以不单独声明 osdk deps。
 查询失败时，冻结错误会说明探测失败。Cargo 不可用时，先安装或链接工具链再规划冻结拉取。
 非冻结调用仍可在准备好工具后退回不带 `--locked` 的拉取。

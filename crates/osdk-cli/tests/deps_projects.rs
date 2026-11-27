@@ -246,6 +246,100 @@ fn cargo_workspace_member_frozen_uses_the_native_root_lock() {
 }
 
 #[test]
+fn cargo_workspace_member_ignores_a_leftover_local_lock() {
+    let cargo = PathBuf::from(env!("CARGO"));
+    if cfg!(windows) && cargo.extension().is_none() {
+        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
+        return;
+    }
+    for remove_root_lock in [true, false] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        let root = fixture.temp.path();
+        let member_lock = root.join("crates/demo/Cargo.lock");
+        fixture.link_rust();
+        let lock = fixture.generate_lock();
+        std::fs::write(&member_lock, &lock).unwrap();
+        let first = fixture.member(&[]);
+        assert!(first.status.success(), "{first:?}");
+        let unchanged = fixture.member(&[]);
+        assert!(unchanged.status.success(), "{unchanged:?}");
+        assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+
+        let root_lock = root.join("Cargo.lock");
+        let reason = if remove_root_lock {
+            std::fs::remove_file(&root_lock).unwrap();
+            let preview = fixture.member(&["--dry-run"]);
+            assert!(!preview.status.success(), "{preview:?}");
+            "no Cargo.lock in Cargo workspace root"
+        } else {
+            write(
+                root,
+                "crates/other/Cargo.toml",
+                "[package]\nname = 'other'\nversion = '0.2.0'\nedition = '2024'\n",
+            );
+            "lock file"
+        };
+        let actual = fixture.member(&[]);
+        assert!(!actual.status.success(), "{actual:?}");
+        let stderr = String::from_utf8_lossy(&actual.stderr);
+        assert!(
+            stderr.contains(reason) && stderr.contains("--locked"),
+            "{stderr}"
+        );
+        if remove_root_lock {
+            assert!(!root_lock.exists());
+        } else {
+            assert_eq!(std::fs::read(&root_lock).unwrap(), lock);
+        }
+        assert_eq!(std::fs::read(&member_lock).unwrap(), lock);
+    }
+}
+
+#[test]
+fn cargo_requires_native_membership_even_with_a_local_lock() {
+    let cargo = PathBuf::from(env!("CARGO"));
+    if cfg!(windows) && cargo.extension().is_none() {
+        eprintln!("skipping native Cargo fixture: cross-built under a Unix Cargo");
+        return;
+    }
+    let fixture = CargoWorkspace::new(cargo);
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let workspace = "[workspace]\nmembers = ['crates/other']\nresolver = '3'\n";
+    write(
+        root,
+        "Cargo.toml",
+        &format!("{workspace}exclude = ['crates/demo']\n"),
+    );
+    let root_lock = fixture.generate_lock();
+    let native = fixture.native(&[
+        "generate-lockfile",
+        "--offline",
+        "--manifest-path",
+        "crates/demo/Cargo.toml",
+    ]);
+    assert!(native.status.success(), "{native:?}");
+    let member_lock = root.join("crates/demo/Cargo.lock");
+    let local = std::fs::read(&member_lock).unwrap();
+    let excluded = fixture.member(&[]);
+    assert!(excluded.status.success(), "{excluded:?}");
+    assert!(String::from_utf8_lossy(&excluded.stdout).contains("cargo fetch --locked"));
+
+    write(root, "Cargo.toml", workspace);
+    for extra in [&[][..], &["--dry-run"][..]] {
+        let unlisted = fixture.member(extra);
+        assert!(!unlisted.status.success(), "{unlisted:?}");
+        let stderr = String::from_utf8_lossy(&unlisted.stderr);
+        assert!(
+            stderr.contains("current package believes it's in a workspace"),
+            "{stderr}"
+        );
+    }
+    assert_eq!(std::fs::read(root.join("Cargo.lock")).unwrap(), root_lock);
+    assert_eq!(std::fs::read(member_lock).unwrap(), local);
+}
+
+#[test]
 fn removed_installer_is_rejected_in_root_project_and_inherited_configuration() {
     for config in [
         "[deps.npm]\ninstaller='npm'\n",

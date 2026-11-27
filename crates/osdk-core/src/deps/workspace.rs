@@ -51,9 +51,11 @@ pub fn native_lock_owner(
         inputs: Vec::new(),
         reason: None,
     };
-    if project.provider != "cargo" || owner.lock.is_some() {
+    if project.provider != "cargo" {
         return Ok(owner);
     }
+    // Cargo alone decides whether the lock beside the selected manifest is used.
+    owner.lock = None;
 
     let candidates = CARGO_PROGRAM_CANDIDATES.map(str::to_owned);
     let metadata = match probe.query(&candidates, CARGO_WORKSPACE_QUERY, &project.root) {
@@ -89,19 +91,13 @@ impl NativeLockOwner {
     ) -> Result<()> {
         let canonicalize = |path: &Path| dunce::canonicalize(path).map_err(|e| Error::io(path, e));
         let root = canonicalize(&metadata.workspace_root)?;
-        if root == canonicalize(&project.root)? {
-            self.reason = Some(format!(
-                "no Cargo.lock in {}; Cargo uses this directory as its workspace root",
-                project.root.display()
-            ));
-            return Ok(());
-        }
         let manifests = metadata
             .packages
             .iter()
             .map(|package| canonicalize(&package.manifest_path))
             .collect::<Result<Vec<_>>>()?;
-        if !manifests.contains(&canonicalize(&project.manifest)?) {
+        let is_root = root == canonicalize(&project.root)?;
+        if !is_root && !manifests.contains(&canonicalize(&project.manifest)?) {
             self.reason = Some(
                 "Cargo metadata does not list the selected manifest as a workspace member".into(),
             );
@@ -113,6 +109,11 @@ impl NativeLockOwner {
         self.inputs.extend([root.join("Cargo.toml"), lock.clone()]);
         if lock.is_file() {
             self.lock = Some(lock);
+        } else if is_root {
+            self.reason = Some(format!(
+                "no Cargo.lock in {}; Cargo uses this directory as its workspace root",
+                root.display()
+            ));
         } else {
             self.reason = Some(format!(
                 "no Cargo.lock in Cargo workspace root {}",

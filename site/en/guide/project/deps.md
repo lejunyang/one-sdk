@@ -40,8 +40,8 @@ osdk deps --explain         # also explain each freshness decision
 them if not. So after cloning a project, `osdk run dev` just works.
 
 That check is cheap: it compares manifest hashes and **does not scan installed
-files**. On a hit it skips the dependency install. Checking a Cargo member
-without a local lock still asks Cargo which workspace owns it. Use
+files**. On a hit it skips the dependency install. osdk checks membership with
+Cargo even if the member directory still has its own lockfile. Use
 `osdk deps --verify` for deep verification.
 
 Three cases never trigger it:
@@ -104,8 +104,9 @@ osdk deps //crates/demo:cargo --frozen --no-install-tools
 
 osdk uses the installed or linked Cargo to check workspace membership and uses
 the workspace root's `Cargo.lock` for `cargo fetch --locked` in the member
-directory. The same plan appears with `--dry-run`. An excluded or unlisted
-crate cannot use the parent workspace's lock. If the root lock is missing,
+directory. The same plan appears with `--dry-run`. Cargo ignores a leftover lock in
+a member directory. An excluded crate can use its own lock, while Cargo rejects
+an unlisted crate. If the root lock is missing,
 osdk rejects the frozen plan. If it is stale, Cargo rejects the fetch and leaves
 the lock unchanged. Use `--list --all --explain` to see the detected root and lock.
 

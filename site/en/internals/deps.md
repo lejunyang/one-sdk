@@ -622,14 +622,16 @@ could not run `cargo --version` -- exactly the `[sys.pkg]` accident.
 
 ## Cargo workspace lock ownership
 
-For a built-in Cargo project with no local `Cargo.lock`, planning runs
+For a built-in Cargo project, planning runs
 `cargo metadata --no-deps --format-version 1 --offline` in the selected
 manifest's directory. It uses Cargo directly from the selected, already
 installed or linked toolchain. The query uses the tool's environment. Provider
 environment overrides are applied to the actual fetch.
 
 Cargo reports the workspace root and member manifests. osdk compares canonical
-paths and uses the root lock for a confirmed member. The plan keeps the member's
+paths and uses the root lock for a confirmed member. A lock next to the selected
+manifest is used only if Cargo identifies that directory as the workspace root.
+The plan keeps the member's
 working directory and `osdk.lock` ownership. The workspace root does not need a
 separate osdk deps declaration. If the native query fails, the frozen diagnostic
 reports the failure. If Cargo is unavailable, install or link it before
