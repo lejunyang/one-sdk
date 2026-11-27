@@ -92,13 +92,13 @@ Candidate selection is intentionally precise:
 - Only a purely built-in set chooses the lowest-latency healthy endpoint.
 - URLs are normalized and deduplicated.
 
-The selected URL is injected only into the single child process using its native variable: npm `npm_config_registry`, pnpm 10/11 `npm_config_registry` + `pnpm_config_registry`, Yarn Classic `YARN_REGISTRY`, Yarn Berry `YARN_NPM_REGISTRY_SERVER`, Bun `BUN_CONFIG_REGISTRY`, or Deno `NPM_CONFIG_REGISTRY`.
+The selected URL is injected only into the requested command using its native variable: npm `npm_config_registry`, pnpm 10/11 `npm_config_registry` + `pnpm_config_registry`, Yarn Classic `YARN_REGISTRY`, Yarn Berry `YARN_NPM_REGISTRY_SERVER`, Bun `BUN_CONFIG_REGISTRY`, or Deno `NPM_CONFIG_REGISTRY`.
 
 ## Single-launch and fail-closed behavior
 
 For an eligible invocation that actually enters registry preflight, osdk makes at most one manager launch attempt after selecting a healthy candidate and never retries after launch; if every candidate is unhealthy, no launch is attempted. Process creation itself can still fail. Conservative pass-through invocations do not enter this fail-closed preflight path.
 
-In the control flow, [`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) calls `package_sources::apply` before its single `Command::status()` call. The direct-shim path likewise invokes the same planner before the sole `exec` in [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs). `RegistryPlan::Unavailable` becomes an error before startup. A non-zero exit after manager startup is returned directly, without selecting another registry or replaying lifecycle scripts. Unix `osdk exec` integration tests cover:
+[`exec_cmd`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands/install.rs) launches the manager once after `package_sources::apply` succeeds. On Unix it flushes stdout and stderr, then replaces the current process with `CommandExt::exec()`. On Windows it launches the manager and waits with `Command::status()`. The direct-shim path runs the same planner before the sole `exec` in [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs). `RegistryPlan::Unavailable` becomes an error before startup. The caller observes the manager's exit status directly. Unix `osdk exec` integration tests cover:
 
 - [`exec_registry_fallback_injects_only_the_manager_variable_and_runs_once`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs): with an unhealthy primary and healthy fallback, each manager writes exactly one call marker;
 - [`exec_registry_never_retries_a_failed_manager_command`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs): a manager exiting 42 still writes one marker only;

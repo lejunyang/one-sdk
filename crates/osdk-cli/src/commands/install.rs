@@ -425,9 +425,8 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
     Ok(())
 }
 
-/// Returns the child's exit status so `main` exits with the child's own code,
-/// the way `mise exec` and `npx` do: a script that checks `$?` after
-/// `osdk exec -- cargo test` must see the test runner's code, not osdk's.
+/// Run the requested command with its own exit status. On Unix the command
+/// takes over the osdk process. On Windows `main` propagates the child's code.
 pub async fn exec_cmd(
     app: &mut App,
     tools: Vec<String>,
@@ -499,12 +498,9 @@ pub async fn exec_cmd(
         resolve_native_global_for_exec(app, &managed_program, &hosts, &managed_paths, &mut env)?
             .unwrap_or(managed_program);
     apply_package_registry_plan(app, &resolved, program, args, &mut env).await?;
-    let status = command_for_program(&managed_program)
-        .args(&managed_args)
-        .envs(env)
-        .status()
-        .with_context(|| format!("running {}", managed_program.display()))?;
-    Ok(Some(status))
+    let mut child = command_for_program(&managed_program);
+    child.args(&managed_args).envs(env);
+    exec_foreground(&mut child, &managed_program).map(Some)
 }
 
 /// `osdk exec -- <command>` without `--tool`: run under the directory's own
@@ -535,12 +531,8 @@ fn exec_in_project_environment(app: &App, command: &[String]) -> Result<std::pro
             None => child.env_remove(key),
         };
     }
-    let status = child
-        .args(args)
-        .envs(&env)
-        .status()
-        .with_context(|| format!("running {}", program.display()))?;
-    Ok(status)
+    child.args(args).envs(&env);
+    exec_foreground(&mut child, &program)
 }
 
 pub(crate) fn resolve_managed_launcher_alias(
@@ -754,6 +746,29 @@ pub(crate) fn command_for_program(program: &std::path::Path) -> std::process::Co
         return command;
     }
     std::process::Command::new(program)
+}
+
+pub(super) fn exec_foreground(
+    command: &mut std::process::Command,
+    program: &std::path::Path,
+) -> Result<std::process::ExitStatus> {
+    #[cfg(unix)]
+    let status = {
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+
+        std::io::stdout()
+            .flush()
+            .context("flushing stdout before exec")?;
+        std::io::stderr()
+            .flush()
+            .context("flushing stderr before exec")?;
+        // The caller can signal the command directly through osdk's PID.
+        Err(command.exec())
+    };
+    #[cfg(not(unix))]
+    let status = command.status();
+    status.with_context(|| format!("running {}", program.display()))
 }
 
 pub(crate) async fn apply_package_registry_plan(

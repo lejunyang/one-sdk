@@ -227,11 +227,7 @@ pub(super) async fn try_exec(
                 .map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v))),
         );
     }
-    let status = command_for_program(&executable)
-        .args(final_args)
-        .env_clear()
-        .envs(child_env)
-        .status()
-        .with_context(|| format!("running {}", executable.display()))?;
-    Ok(Some(status))
+    let mut child = command_for_program(&executable);
+    child.args(final_args).env_clear().envs(child_env);
+    super::install::exec_foreground(&mut child, &executable).map(Some)
 }

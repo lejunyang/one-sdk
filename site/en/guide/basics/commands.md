@@ -154,8 +154,8 @@ osdk exec [(-t|--tool TOOL[@VERSION])...] -- COMMAND [ARG ...]
 ```
 
 `-t/--tool` is repeatable. osdk installs the requested versions, then exposes
-their bins and environment to one child process. It neither changes project pins
-nor reads the lock.
+their bins and environment to the requested command. It neither changes project
+pins nor reads the lock.
 
 Without any `--tool`, the command runs with the environment an activated shell
 would have in this directory, and nothing is installed. This is the entry point
@@ -180,9 +180,15 @@ osdk exec -t java -- ./gradlew build   # uses the project's pinned JDK
 
 `pnpx` routes to managed `pnpm dlx` and `bunx` to managed `bun x`; omitting the
 corresponding backend is an error. A package-manager invocation may run registry
-preflight before startup. osdk exits with the child's own exit code and adds no
+preflight before startup. osdk passes through the command's exit code and adds no
 error line of its own, so `osdk exec -- cargo test; echo $?` sees the test runner's
 code.
+
+On Unix, the command takes over the `osdk exec` PID when it starts. A `SIGTERM`
+or `SIGINT` sent to that PID goes directly to the command. If a signal
+terminates the command, the caller observes that signal, which shells typically
+report as `128 + signal number`. On Windows, osdk waits for the command and
+returns its exit code.
 
 ## Version aliases
 

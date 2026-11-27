@@ -128,7 +128,7 @@ osdk reshim
 osdk exec [(-t|--tool TOOL[@VERSION])...] -- COMMAND [ARG ...]
 ```
 
-`-t/--tool` 可重复。osdk 先安装指定版本，再把 backend bin 和环境加入单个子进程；
+`-t/--tool` 可重复。osdk 先安装指定版本，再把 backend bin 和环境提供给指定命令；
 不修改项目 pin，也不读取 lock。
 
 一个 `--tool` 都不带时，命令以激活的 shell 在当前目录下会有的环境运行，不安装任何
@@ -152,6 +152,10 @@ osdk exec -t java -- ./gradlew build   # 用项目 pin 的 JDK，无需重复写
 `pnpx` 路由到受管 `pnpm dlx`，`bunx` 路由到受管 `bun x`；未声明对应 backend
 会报错。包管理器调用可能在启动前执行 Registry 预检。osdk 以子命令自己的退出码
 退出，不额外打印错误，因此 `osdk exec -- cargo test; echo $?` 看到的就是测试进程的退出码。
+
+在 Unix 上，命令启动后沿用 `osdk exec` 的 PID。只向这个 PID 发送 `SIGTERM` 或
+`SIGINT` 时，信号直接送达命令。如果命令被信号终止，调用方可读到终止信号，shell
+通常用 `128 + 信号编号` 表示退出状态。在 Windows 上，osdk 等待命令退出并返回其退出码。
 
 ## 版本别名
 
