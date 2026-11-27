@@ -223,7 +223,14 @@ fn cargo_lock_configuration(
         .map(|path| cwd.join(path))
         .or_else(|| config.lockfile.take());
     let configured = match override_path {
-        Some(path) if cargo_supports_lockfile_override(cwd, probe)? => Some(path),
+        Some(path) if cargo_supports_lockfile_override(cwd, probe)? => {
+            // Cargo opens Cargo.lock in the configured path's parent directory.
+            // Rebuild the filename so a trailing separator has the same meaning.
+            let directory = path.parent().ok_or_else(|| {
+                Error::config("configured Cargo lockfile has no parent directory")
+            })?;
+            Some(directory.join("Cargo.lock"))
+        }
         _ => None,
     };
     Ok((config, configured))

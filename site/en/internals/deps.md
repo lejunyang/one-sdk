@@ -644,7 +644,9 @@ installing or linking Rust first.
 
 osdk resolves the lock path using Cargo's configuration precedence, including
 ancestor and included files and `CARGO_HOME`. Cargo 1.97 and later support
-`resolver.lockfile-path` as an override. The effective lock, Cargo configuration,
+`resolver.lockfile-path` as an override. Cargo opens `Cargo.lock` in the configured
+path's parent directory, so a trailing separator still tracks the same lock.
+The effective lock, Cargo configuration,
 root manifest and member manifests feed the plan, the check under the install
 lock and the success record. If metadata lists a local dependency outside the
 workspace, or an override may introduce local dependencies the query cannot

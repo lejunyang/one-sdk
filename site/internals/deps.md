@@ -516,7 +516,8 @@ Cargo 确认项目自成工作区时，才使用项目目录的锁。
 复用新鲜度缓存。Cargo 和本地锁均不可用时，成员的冻结计划需要先安装或链接 Rust。
 
 osdk 按 Cargo 配置的优先级解析锁路径，包含工作目录的祖先配置、`CARGO_HOME`
-和引入的配置。Cargo 1.97 起允许用 `resolver.lockfile-path` 覆盖根锁。实际生效的锁、
+和引入的配置。Cargo 1.97 起允许用 `resolver.lockfile-path` 覆盖根锁。Cargo 在配置路径的
+父目录打开 `Cargo.lock`，因此带尾分隔符的配置也会跟踪同一锁文件。实际生效的锁、
 Cargo 配置、根清单和成员清单同时参与规划、安装锁内复查和成功记录的新鲜度判定。
 如果 metadata 给出的路径依赖超出成员清单覆盖范围，或 Cargo 配置使用了可能引入本地
 依赖的覆盖项，osdk 会执行 `fetch --locked`，由 Cargo 校验。Cargo 已确认工作区归属，

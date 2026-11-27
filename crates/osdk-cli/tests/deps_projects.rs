@@ -557,7 +557,7 @@ fn cargo_workspace_frozen_tracks_lock_under_provider_home() {
     write(
         root,
         "provider-home/.cargo/config.toml",
-        "[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+        "[resolver]\nlockfile-path = 'alternate/Cargo.lock/'\n",
     );
     let configured_lock = home.join("alternate/Cargo.lock");
     std::fs::create_dir_all(configured_lock.parent().unwrap()).unwrap();
@@ -575,8 +575,13 @@ fn cargo_workspace_frozen_tracks_lock_under_provider_home() {
     let native_first = native();
     assert!(native_first.status.success(), "{native_first:?}");
 
+    let preview = fixture.member(&["--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+
     let first = fixture.member(&[]);
     assert!(first.status.success(), "{first:?}");
+    assert!(String::from_utf8_lossy(&first.stdout).contains("cargo fetch --locked"));
     let unchanged = fixture.member(&[]);
     assert!(unchanged.status.success(), "{unchanged:?}");
     assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
