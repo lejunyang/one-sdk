@@ -153,7 +153,7 @@ System packages
   Git.Git              ok               requested latest (installed 2.46.0)
   Some.MacTool         not for this os  requested latest (installed -)
   This.Is.Absent       missing          requested latest (installed -)
-  invalid entry: `broken-no-prefix` needs a manager prefix, for example `winget:broken-no-prefix`
+  invalid entry: `atp:libssl-dev` names an unknown manager `atp`; use one of winget, brew, apt, apk, pacman, dnf; did you mean `apt:`?
 ```
 
 五种状态各有不同含义，其中两种容易混淆：

@@ -31,6 +31,16 @@ pub enum ManagerKind {
 }
 
 impl ManagerKind {
+    /// Managers that may prefix a package key, in diagnostic display order.
+    pub const ALL: [Self; 6] = [
+        Self::Winget,
+        Self::Homebrew,
+        Self::Distro(DistroManager::Apt),
+        Self::Distro(DistroManager::Apk),
+        Self::Distro(DistroManager::Pacman),
+        Self::Distro(DistroManager::Dnf),
+    ];
+
     /// The name used in configuration keys and in reports.
     pub const fn id(self) -> &'static str {
         match self {
@@ -220,20 +230,13 @@ impl PackageKey {
                 key: key.to_owned(),
             });
         }
-        let manager = match manager {
-            "winget" => ManagerKind::Winget,
-            "brew" => ManagerKind::Homebrew,
-            "apt" => ManagerKind::Distro(DistroManager::Apt),
-            "apk" => ManagerKind::Distro(DistroManager::Apk),
-            "pacman" => ManagerKind::Distro(DistroManager::Pacman),
-            "dnf" => ManagerKind::Distro(DistroManager::Dnf),
-            other => {
-                return Err(KeyError::UnknownManager {
-                    manager: other.to_owned(),
-                    key: key.to_owned(),
-                })
-            }
-        };
+        let manager = ManagerKind::ALL
+            .into_iter()
+            .find(|kind| kind.id() == manager)
+            .ok_or_else(|| KeyError::UnknownManager {
+                manager: manager.to_owned(),
+                key: key.to_owned(),
+            })?;
         Ok(Self {
             manager,
             id: id.to_owned(),
@@ -255,19 +258,27 @@ pub enum KeyError {
 
 impl std::fmt::Display for KeyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let managers = ManagerKind::ALL.map(ManagerKind::id);
+        let known = managers.join(", ");
         match self {
             Self::MissingManagerPrefix { key } => write!(
                 formatter,
-                "`{key}` needs a manager prefix, for example `winget:{key}`"
+                "`{key}` needs a manager prefix, for example `winget:{key}`; known managers: {known}"
             ),
-            Self::UnknownManager { manager, key } => write!(
-                formatter,
-                "`{key}` names an unknown manager `{manager}`; use one of \
-                 winget, brew, apt, apk, pacman, dnf"
-            ),
-            Self::EmptyPackageId { key } => {
-                write!(formatter, "`{key}` has a manager prefix but no package id")
+            Self::UnknownManager { manager, key } => {
+                write!(
+                    formatter,
+                    "`{key}` names an unknown manager `{manager}`; use one of {known}"
+                )?;
+                if let Some(suggestion) = super::suggest::closest(manager, managers, 1) {
+                    write!(formatter, "; did you mean `{suggestion}:`?")?;
+                }
+                Ok(())
             }
+            Self::EmptyPackageId { key } => write!(
+                formatter,
+                "`{key}` has a manager prefix but no package id; known managers: {known}"
+            ),
         }
     }
 }
@@ -433,16 +444,27 @@ mod tests {
             }
         );
         // The message must show the corrected form, not just state a rule.
-        assert!(error.to_string().contains("winget:ripgrep"));
+        let message = error.to_string();
+        assert!(message.contains("winget:ripgrep"));
+        assert!(message.contains("known managers: winget, brew, apt, apk, pacman, dnf"));
     }
 
     #[test]
-    fn an_unknown_manager_names_the_valid_ones() {
-        let error = PackageKey::parse("chocolatey:git").unwrap_err();
-
-        let message = error.to_string();
-        assert!(message.contains("chocolatey"));
-        assert!(message.contains("winget"), "got: {message}");
+    fn an_unknown_manager_names_the_valid_ones_and_suggests_only_a_unique_match() {
+        for (key, suggests_apt) in [
+            ("atp:libssl-dev", true),
+            ("Apt:gcc", true),
+            ("ap:gcc", false),
+            ("yum:gcc", false),
+        ] {
+            let message = PackageKey::parse(key).unwrap_err().to_string();
+            assert!(message.contains(&format!("`{key}`")), "{message}");
+            assert!(message.contains("use one of winget, brew, apt, apk, pacman, dnf"));
+            assert_eq!(message.contains("did you mean"), suggests_apt, "{message}");
+            if suggests_apt {
+                assert!(message.ends_with("did you mean `apt:`?"), "{message}");
+            }
+        }
     }
 
     #[test]
@@ -456,12 +478,16 @@ mod tests {
 
     #[test]
     fn a_prefix_with_no_package_id_is_rejected() {
+        let error = PackageKey::parse("winget:").unwrap_err();
         assert_eq!(
-            PackageKey::parse("winget:").unwrap_err(),
+            error,
             KeyError::EmptyPackageId {
                 key: "winget:".to_owned()
             }
         );
+        assert!(error
+            .to_string()
+            .contains("`winget:` has a manager prefix but no package id; known managers: winget, brew, apt, apk, pacman, dnf"));
     }
 
     #[test]
