@@ -621,14 +621,15 @@ fn platform_exclusion(app: &App, declaration: &SkillDeclaration) -> Option<Strin
         .map(|filter| filter.describe())
 }
 
-fn skip_locked_skill(name: &str, reason: Option<String>) -> bool {
-    let Some(reason) = reason else {
-        return false;
-    };
+fn skipped_skill_message(subject: &str, name: &str, reason: &str) -> String {
+    format!("skipping {subject} `{name}`: its `when` filter excludes this platform ({reason})")
+}
+
+fn report_skipped_locked(name: &str, reason: &str) {
     println!(
-        "skipping locked skill `{name}`: its `when` filter excludes this platform ({reason}); keeping its lock entry"
+        "{}; keeping its lock entry",
+        skipped_skill_message("locked skill", name, reason)
     );
-    true
 }
 
 async fn prepare_declared_skill(
@@ -718,9 +719,7 @@ async fn sync(app: &App, global: bool) -> Result<()> {
         .filter(|(name, _)| !skills.contains_key(*name))
     {
         if let Some(reason) = platform_exclusion(app, declaration) {
-            println!(
-                "skipping declaration `{name}`: its `when` filter excludes this platform ({reason})"
-            );
+            println!("{}", skipped_skill_message("declaration", name, &reason));
         } else {
             pending.push((name, declaration));
         }
@@ -775,7 +774,8 @@ async fn sync(app: &App, global: bool) -> Result<()> {
     for (name, entry) in &skills {
         match declarations.get(name) {
             Some(declaration) => {
-                if skip_locked_skill(name, platform_exclusion(app, declaration)) {
+                if let Some(reason) = platform_exclusion(app, declaration) {
+                    report_skipped_locked(name, &reason);
                     continue;
                 }
                 report_declaration_changes(app, name, declaration, entry, flag);
@@ -890,25 +890,29 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
         return Ok(());
     }
     let mut lock = lockfile::load(&lock_path)?;
-    let names: Vec<String> = if wanted.is_empty() {
-        lock.skills.keys().cloned().collect()
+    let candidates: Vec<_> = if wanted.is_empty() {
+        lock.skills
+            .keys()
+            .map(|name| (name.clone(), exclusion(name)))
+            .collect()
     } else {
-        wanted.to_vec()
+        wanted.iter().map(|name| (name.clone(), None)).collect()
     };
-    if names.is_empty() {
+    if candidates.is_empty() {
         println!("No skills in the lock to update.");
         return Ok(());
     }
 
     let scope_root = scope_root(app, global)?;
     let fallback_mode = link_mode(app, false);
-    for name in &names {
+    for (name, reason) in &candidates {
+        if let Some(reason) = reason {
+            report_skipped_locked(name, reason);
+            continue;
+        }
         let Some(locked) = lock.skills.get(name) else {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
-        if wanted.is_empty() && skip_locked_skill(name, exclusion(name)) {
-            continue;
-        }
         let mode = install_mode_for_entry(locked, name, &scope_root, global, fallback_mode)?;
         let mut entry = locked.clone();
         let (replacement, message) = resolve_skill_update(app, name, &mut entry, mode).await?;
