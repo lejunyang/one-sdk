@@ -376,6 +376,64 @@ fn skills_sync_skips_replaying_a_locked_skill_on_another_platform() {
 }
 
 #[test]
+fn skills_update_respects_platform_filters() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = local_project(
+        root,
+        &format!(
+            "{DEMO_DECLARATION}\n[skills.secondary]\nsource = \"./fixture/demo\"\n\
+             skill = \"demo\"\nagents = [\"codex\"]\n"
+        ),
+    );
+    let sync = osdk(root, &project, &["skills", "sync"]);
+    assert!(sync.status.success(), "{sync:?}");
+    let lock_path = project.join("osdk.lock");
+    let before = std::fs::read(&lock_path).unwrap();
+    let original = read_lock(&lock_path);
+    assert_demo_installed(&project, &original);
+
+    let current = std::env::consts::OS;
+    let other = if cfg!(windows) { "linux" } else { "windows" };
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[skills.demo]\nsource = \"./fixture/demo\"\nagents = [\"codex\", \"claude-code\"]\n\
+             when = {{ os = [\"{other}\"] }}\n\n\
+             [skills.secondary]\nsource = \"./fixture/demo\"\nskill = \"demo\"\n\
+             agents = [\"codex\", \"claude-code\"]\nwhen = {{ os = [\"{current}\"] }}\n"
+        ),
+    )
+    .unwrap();
+
+    let named = osdk(root, &project, &["skills", "update", "demo"]);
+    assert!(named.status.success(), "{named:?}");
+    assert!(!project.join(".claude/skills/demo").exists());
+    assert_eq!(std::fs::read(&lock_path).unwrap(), before);
+    let stdout = String::from_utf8_lossy(&named.stdout);
+    assert!(
+        stdout.contains("skipping locked skill `demo`")
+            && stdout.contains("keeping its lock entry"),
+        "{stdout}"
+    );
+
+    let bulk = osdk(root, &project, &["skills", "update"]);
+    assert!(bulk.status.success(), "{bulk:?}");
+    assert!(!project.join(".claude/skills/demo").exists());
+    let updated = read_lock(&lock_path);
+    assert_eq!(updated["skills"]["demo"], original["skills"]["demo"]);
+    assert_demo_installed(&project, &updated);
+    assert_eq!(
+        std::fs::read(project.join(".claude/skills/secondary/SKILL.md")).unwrap(),
+        DEMO_SKILL.as_bytes()
+    );
+    assert_eq!(
+        updated["skills"]["secondary"]["agents"].as_array().unwrap(),
+        &[toml::Value::from("codex"), toml::Value::from("claude-code")]
+    );
+}
+
+#[test]
 fn skills_sync_reports_missing_agents_in_a_non_interactive_session() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

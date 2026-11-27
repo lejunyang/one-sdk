@@ -591,6 +591,16 @@ fn declaration_applies(app: &App, declaration: &SkillDeclaration) -> bool {
         .is_none_or(|filter| filter.matches(&app.ctx.platform))
 }
 
+fn skip_locked_skill(app: &App, name: &str, declaration: &SkillDeclaration) -> bool {
+    if declaration_applies(app, declaration) {
+        return false;
+    }
+    println!(
+        "skipping locked skill `{name}`: its `when` filter does not match this platform; keeping its lock entry"
+    );
+    true
+}
+
 async fn prepare_declared_skill(
     app: &App,
     name: &str,
@@ -731,10 +741,7 @@ async fn sync(app: &App, global: bool) -> Result<()> {
     for (name, entry) in &skills {
         match declarations.get(name) {
             Some(declaration) => {
-                if !declaration_applies(app, declaration) {
-                    println!(
-                        "skipping locked skill `{name}`: its `when` filter does not match this platform; keeping its lock entry"
-                    );
+                if skip_locked_skill(app, name, declaration) {
                     continue;
                 }
                 report_declaration_changes(app, name, declaration, entry, flag);
@@ -852,6 +859,15 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
         let Some(locked) = lock.skills.get(name) else {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
+        if app
+            .ctx
+            .config
+            .skills
+            .get(name)
+            .is_some_and(|declaration| skip_locked_skill(app, name, declaration))
+        {
+            continue;
+        }
         let mode = install_mode_for_entry(locked, name, &scope_root, global, fallback_mode)?;
         let mut entry = locked.clone();
         let (replacement, message) = resolve_skill_update(app, name, &mut entry, mode).await?;

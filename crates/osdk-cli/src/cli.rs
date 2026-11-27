@@ -1243,6 +1243,8 @@ pub enum SkillsCommand {
     /// branch) and rewrites the lock. Set `rev:<commit>` to pin a skill, or
     /// change it to select another commit at the next update. A bare commit
     /// stored as an installation snapshot follows the default branch.
+    /// Skills whose declaration's `when` filter excludes the current platform
+    /// are skipped, keeping their lock entries and any existing installations.
     Update {
         /// Skills to update by name; omit to update all.
         skills: Vec<String>,

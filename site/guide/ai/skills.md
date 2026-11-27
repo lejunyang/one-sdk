@@ -156,8 +156,9 @@ agents = ["claude-code", "codex"]
 `--yes` 确认。默认单目录复制，多目录自动链接，可用
 `[skills].link_mode` 覆盖。自定义 `endpoint` 尚未实现。缺锁的声明设置该字段时会报错。
 
-已有锁条目继续按锁复现。如果对应声明的 `when` 不匹配当前平台，同步会跳过安装，
-保留锁条目供其他平台使用。要应用声明中的 `ref` 或 Agent 改动，运行 `osdk skills update <名>`。
+已有锁条目继续按锁复现。如果对应声明的 `when` 不匹配当前平台，`sync` 和 `update`
+都会跳过该技能，保留已有安装和锁条目。要应用声明中的 `ref` 或 Agent 改动，运行
+`osdk skills update <名>`。
 要换来源或技能，运行 `osdk skills remove <名>` 后重新同步，也可以显式用 `skills add` 安装。
 从配置去掉一项后，运行 `osdk skills remove <名>` 删除对应锁条目。
 
