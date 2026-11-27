@@ -316,6 +316,12 @@ usable mirror, no confirmation, a wrong fingerprint, a changed host, a failed
 command -- always exits non-zero. Otherwise a script reads "nothing happened" as
 success, which is the hardest class of defect to notice.
 
+The package commands share the `[sys.pkg]` key parser. `pkg status` queries
+valid entries and prints the report before exiting `1` on invalid keys.
+`pkg plan` and `pkg apply` validate all package keys before querying the host.
+Invalid keys produce a refusal with diagnostics in JSON. An empty plan can
+exit `0` under `pkg plan --detailed-exitcode` once the keys pass validation.
+
 ## Why Linux detection is read-only, and how that is verified
 
 ### The stance follows from three facts, not from caution

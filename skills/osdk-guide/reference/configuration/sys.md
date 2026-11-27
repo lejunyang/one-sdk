@@ -19,8 +19,10 @@ mirrors = true
 "brew:git" = { version = "latest", when = { os = "macos" } }
 ```
 
-键必须是 `<manager>:<package>`；manager 支持范围取决于宿主。osdk 不做跨 manager
-包名映射，每个平台应声明真实包名。`version` 是安装时愿望，不是可复现 lock。
+键必须是 `<manager>:<package>`。已知前缀为 `winget:`、`brew:`、`apt:`、`apk:`、
+`pacman:`、`dnf:`，各管理器的可用范围取决于宿主。每个平台应声明自己的真实包名。
+`version` 是安装时愿望，不是可复现 lock。包键写错时，`pkg status`、`pkg plan`、
+`pkg apply` 返回 `1`，诊断会显示原始键和已知管理器。拼写有唯一近似候选时会给出提示。
 
 对象支持 `version` 与 `when = { os, arch }`，`os` / `arch` 可为单值或数组；未知键直接报错。
 旧写法（`os`/`arch` 直接写在条目上）仍可读取但不能与 `when` 混用，`osdk config migrate` 会改写为 `when`。只有

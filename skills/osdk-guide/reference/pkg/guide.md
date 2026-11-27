@@ -5,8 +5,8 @@
 | 子命令 | 参数 | 语义 |
 | --- | --- | --- |
 | `doctor` | `--json` | 查看可用 manager 及状态 |
-| `status` | `--missing`、`--json` | 比较声明；`--missing` 有缺包时退出非零 |
-| `plan` | `--json`、`--detailed-exitcode` | 不安装；会变化时可退出 2 |
+| `status` | `--missing`、`--json` | 报告合法条目的状态。无效键返回 1。`--missing` 有缺包时也返回 1 |
+| `plan` | `--json`、`--detailed-exitcode` | 预览计划。带 `--detailed-exitcode` 时有待办返回 2，无待办返回 0。出错返回 1 |
 | `apply` | `--dry-run`、`--yes`、`--json` | 安装缺失包；已有包即使版本不同也保留 |
 | `mirrors test` | `--manager winget`、`--json` | 测速，不改配置 |
 | `mirrors apply` | `--manager winget`、`--dry-run`、`--accept-plan <FP>`、`--json` | 修改机器级源，需管理员权限 |
@@ -18,6 +18,11 @@ osdk pkg plan --detailed-exitcode
 osdk pkg apply --yes
 osdk pkg mirrors test --manager winget
 ```
+
+`status` 的 JSON 保留 `invalid_keys` 字符串数组。`plan` 和 `apply`（含 `--dry-run`）在
+查询包管理器之前校验包键，发现无效键即返回 `1`。拒绝时的 JSON 包含
+`refused.reason: "invalid-package-keys"` 和 `refused.detail.invalid_keys`。`apply` 另有
+`applied: false`。项目有本机适用的包声明时，`apply` 会先检查信任。
 
 首次无人值守镜像 apply 要传刚生成的 plan fingerprint；fingerprint 绑定当时的源状态。
 声明格式与平台过滤见 `reference/configuration/sys.md`。容器运行时不放进 `sys.pkg`。

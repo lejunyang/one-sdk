@@ -1390,6 +1390,7 @@ pub enum PkgCommand {
     /// Report the host against package entries in `[sys.pkg]`.
     ///
     /// Read-only: it queries what is installed and compares, installing nothing.
+    /// Invalid package keys are reported and cause exit 1.
     Status {
         /// Exit non-zero when a requested package is absent. For CI.
         #[arg(long)]
@@ -1400,11 +1401,13 @@ pub enum PkgCommand {
     },
 
     /// Show which packages would be installed, without installing them.
+    ///
+    /// Invalid package keys cause exit 1 before any package manager is queried.
     Plan {
         /// Emit the plan as JSON.
         #[arg(long)]
         json: bool,
-        /// Exit 2 when the plan would change something, 0 when it would not.
+        /// Exit 2 when the plan would change something, 0 when it would not, or 1 on error.
         ///
         /// For pipelines that branch on whether work is pending.
         #[arg(long)]
@@ -1416,6 +1419,7 @@ pub enum PkgCommand {
     /// The only package command that changes the system. Packages already
     /// present are left exactly as they are -- including at another version,
     /// since the configured version is a wish for install time, not a lock.
+    /// Invalid package keys cause exit 1 before any package manager is queried.
     Apply {
         /// Print what would be installed and exit.
         #[arg(long)]

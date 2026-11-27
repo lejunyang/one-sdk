@@ -205,6 +205,141 @@ fn write_executable(path: &Path, contents: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[test]
+fn pkg_reports_invalid_keys_in_text_and_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("osdk.toml"),
+        "[sys.pkg]\n\"atp:libssl-dev\" = \"latest\"\n",
+    )
+    .unwrap();
+    let diagnosis = "`atp:libssl-dev` names an unknown manager `atp`; use one of \
+                     winget, brew, apt, apk, pacman, dnf; did you mean `apt:`?";
+    for command in [
+        &["status"][..],
+        &["status", "--missing"],
+        &["plan"],
+        &["plan", "--detailed-exitcode"],
+        &["apply", "--dry-run"],
+        &["apply", "--yes"],
+    ] {
+        for json in [false, true] {
+            let mut args = vec!["pkg"];
+            args.extend_from_slice(command);
+            if json {
+                args.push("--json");
+            }
+            let output = run_isolated(root, &args);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+            assert!(stderr.contains("[sys.pkg]"), "{args:?}: {stderr}");
+            if command[0] == "status" {
+                if json {
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "packages": [],
+                            "invalid_keys": [diagnosis],
+                        })
+                    );
+                } else {
+                    assert!(stdout.contains(&format!("invalid entry: {diagnosis}")));
+                }
+                continue;
+            }
+            assert!(stderr.contains(diagnosis), "{args:?}: {stderr}");
+            if json {
+                let mut expected = serde_json::json!({
+                    "refused": {
+                        "reason": "invalid-package-keys",
+                        "detail": { "invalid_keys": [diagnosis] },
+                    },
+                });
+                if command[0] == "apply" {
+                    expected["applied"] = false.into();
+                }
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+                    expected,
+                    "{args:?}"
+                );
+            } else {
+                assert!(stdout.is_empty(), "{args:?}: {stdout}");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pkg_plan_distinguishes_bad_keys_missing_packages_and_installed_packages() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("bin");
+    let query = root.join("query.log");
+    let env = [
+        ("PATH", bin.to_str().unwrap()),
+        ("QUERY_LOG", query.to_str().unwrap()),
+    ];
+    let header = "[sys.pkg]\n\"apt:libssl-dev\" = \"latest\"\n";
+    for (extra_key, query_result, expected_exit) in [
+        ("\"atp:libssl-dev\" = \"latest\"\n", "exit 1", 1),
+        ("", "exit 1", 2),
+        ("", "printf '3.0.0\\n'", 0),
+    ] {
+        std::fs::write(root.join("osdk.toml"), format!("{header}{extra_key}")).unwrap();
+        write_executable(
+            &bin.join("dpkg-query"),
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$QUERY_LOG\"\n{query_result}\n"),
+        );
+        for json in [false, true] {
+            std::fs::write(&query, "").unwrap();
+            let mut args = vec!["pkg", "plan", "--detailed-exitcode"];
+            if json {
+                args.push("--json");
+            }
+            let output = run_isolated_in_with_env(root, root, &args, &env);
+            assert_eq!(output.status.code(), Some(expected_exit), "{output:?}");
+            let queries = std::fs::read_to_string(&query).unwrap();
+            if expected_exit == 1 {
+                assert!(queries.is_empty(), "{queries}");
+                continue;
+            }
+            assert_eq!(queries, "-W -f=${Version} libssl-dev\n");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            if json {
+                let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                if expected_exit == 2 {
+                    let installs = plan["installs"].as_array().unwrap();
+                    assert_eq!(installs.len(), 1);
+                    assert_eq!(installs[0]["id"], "libssl-dev");
+                    assert_eq!(installs[0]["version"], "latest");
+                    assert_eq!(plan["skipped"], serde_json::json!([]));
+                } else {
+                    assert_eq!(
+                        plan,
+                        serde_json::json!({
+                            "installs": [],
+                            "skipped": [{"id": "libssl-dev", "reason": "already-satisfied"}],
+                        })
+                    );
+                }
+            } else {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let expected = if expected_exit == 2 {
+                    "apt-get install -y libssl-dev"
+                } else {
+                    "already installed"
+                };
+                assert!(stdout.contains(expected), "{stdout}");
+            }
+        }
+    }
+}
+
 #[cfg(not(windows))]
 fn accept_fixture_connection(listener: &TcpListener, context: &str) -> TcpStream {
     listener.set_nonblocking(true).unwrap();

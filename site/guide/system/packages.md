@@ -162,19 +162,25 @@ System packages
 - **manager unavailable**：管理器本身查不到，因此**无法判断**这个包在不在。这不等于
   「包不存在」——把它当缺失会让你去装一个可能已经装了的东西。
 
-写错的键会作为 `invalid entry` 列出而**不是被忽略**：它代表一个你以为被管理的包，
-静默跳过就会让「没有缺失」变成假话。
+`pkg status` 会报告合法条目的状态，同时将无效键列为 `invalid entry`（JSON 中是
+`invalid_keys` 字符串数组）。发现无效键就返回 `1`，有没有 `--missing` 都一样。
+诊断会显示原始键和已知管理器。拼写只有一个接近的候选时会给出提示，例如 `atp:` 会提示 `apt:`。
 
 ## 安装缺失的包
 
 ```bash
 osdk pkg plan                      # 只看要装什么
-osdk pkg plan --detailed-exitcode  # 有待办返回 2，无待办返回 0
+osdk pkg plan --detailed-exitcode  # 有待办返回 2，无待办返回 0，出错返回 1
 osdk pkg apply --dry-run
 osdk pkg apply --yes               # 唯一会装东西的命令
 ```
 
-计划会把每个请求都交代清楚——要装的、以及**为什么其余的不装**，不需要你从省略里推断：
+`pkg plan` 和 `pkg apply`（含 `--dry-run`）遇到无效包键时返回 `1`，并在查询包管理器前停止。
+`--json` 会输出 `refused.reason: "invalid-package-keys"` 和
+`refused.detail.invalid_keys`，`pkg apply` 还会输出 `applied: false`。
+项目有适用于本机的包声明时，`pkg apply` 会先检查项目是否受信任。
+
+合法请求会进入计划，列出要安装的包和其余包被跳过的原因。
 
 ```text
 Would install:
