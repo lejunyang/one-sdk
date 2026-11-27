@@ -22,7 +22,7 @@ pub(in crate::commands) struct Snapshot {
     backup: tempfile::TempDir,
     directory_permissions: BTreeMap<PathBuf, Permissions>,
     #[cfg(unix)]
-    man_sections: BTreeMap<String, man::SectionDirectory>,
+    man_sections: BTreeMap<String, man::SectionSnapshot>,
 }
 
 impl Snapshot {
@@ -93,9 +93,9 @@ impl Snapshot {
     pub(in crate::commands) fn restore<'a>(
         self,
         tools: &ManagedNodeTools,
-        planned: impl IntoIterator<Item = &'a str>,
+        _planned: impl IntoIterator<Item = &'a str>,
     ) -> Result<()> {
-        if let Err(error) = self.restore_paths(tools, planned) {
+        if let Err(error) = self.restore_paths(tools, _planned) {
             let backup = self.backup.keep();
             return Err(error.context(format!("Node package backup kept at {}", backup.display())));
         }
@@ -105,7 +105,7 @@ impl Snapshot {
     fn restore_paths<'a>(
         &self,
         tools: &ManagedNodeTools,
-        planned: impl IntoIterator<Item = &'a str>,
+        _planned: impl IntoIterator<Item = &'a str>,
     ) -> Result<()> {
         self.verify_prefix(&tools.prefix)?;
         if !real_directory(&self.backup.path().symlink_metadata()?) {
@@ -118,13 +118,13 @@ impl Snapshot {
         {
             // npm uninstall removes manifest-declared man paths without checking
             // who owns the live entry. Restore the snapshot directly on Unix.
-            self.restore_manpages(planned)?;
+            self.restore_manpages()?;
         }
         #[cfg(windows)]
         {
             if inspect(&modules)?.is_some_and(|meta| real_directory(&meta)) {
                 let mut args = vec!["uninstall", "-g", "--offline", "--ignore-scripts"];
-                for name in planned {
+                for name in _planned {
                     if added_package(name, &old_modules, &modules)? {
                         args.push(name);
                     }

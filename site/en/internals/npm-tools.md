@@ -440,9 +440,12 @@ that the managed prefix still resolves to that directory.
 The backup preserves link text and the original junction or symlink type on
 Windows. Junction backups use Rust's Windows path conversion when the backup
 path exceeds `MAX_PATH`. On install failure, Windows tries an offline npm
-uninstall of newly added planned packages. Unix verifies the man section
-destinations and only removes or restores man links that point to packages
-in the migration plan, preserving unrelated concurrent writes.
+uninstall of newly added planned packages. On Unix, osdk records successful
+man-page symlink writes by the target npm process before npm can roll back its
+package tree. The rollback compares those records with the snapshot and checks
+the actual section directory and the link's device, inode, change time and
+target. It restores overwritten entries and removes added links whose writes
+it can verify. An unexplained change to an original entry stops the rollback.
 The rollback then uses the backup to clean up leftover packages and launchers,
 including packages with incomplete manifests. It restores original files and
 links where they changed and reports the original install error. Failed rollback

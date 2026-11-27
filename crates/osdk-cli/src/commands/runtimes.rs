@@ -1800,7 +1800,13 @@ pub(crate) fn migrate_node_packages(app: &App, from: &str, to: &str, apply: bool
 
     let snapshot = super::npm_migration::rollback::Snapshot::capture(&target)?;
     let specs: Vec<String> = planned.iter().map(NpmPackage::spec).collect();
-    if let Err(error) = npm_install_global(&target, &specs) {
+    let mut args = vec!["install", "-g"];
+    args.extend(specs.iter().map(String::as_str));
+    if let Err(error) = npm_command_with(&target, &args, |_command| {
+        #[cfg(unix)]
+        snapshot.observe_man_installs(_command, &target.prefix)?;
+        Ok(())
+    }) {
         return match snapshot.restore(&target, planned.iter().map(|package| package.name.as_str()))
         {
             Ok(()) => Err(error.context(t!("err.node_migrate_rolled_back"))),
@@ -1904,13 +1910,15 @@ pub(crate) fn list_global_npm_packages(tools: &ManagedNodeTools) -> Result<Vec<N
     Ok(packages)
 }
 
-pub(crate) fn npm_install_global(tools: &ManagedNodeTools, specs: &[String]) -> Result<()> {
-    let mut args = vec!["install", "-g"];
-    args.extend(specs.iter().map(String::as_str));
-    npm_command(tools, &args).map(|_| ())
+pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std::process::Output> {
+    npm_command_with(tools, args, |_| Ok(()))
 }
 
-pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std::process::Output> {
+fn npm_command_with(
+    tools: &ManagedNodeTools,
+    args: &[&str],
+    configure: impl FnOnce(&mut std::process::Command) -> Result<()>,
+) -> Result<std::process::Output> {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let mut paths = vec![tools.bin.clone()];
     paths.extend(std::env::split_paths(&inherited));
@@ -1922,6 +1930,7 @@ pub(crate) fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std
     } else {
         std::process::Command::new(&tools.npm)
     };
+    configure(&mut command)?;
     let output = command
         .args(args)
         // This workflow inspects version-local packages deliberately, even

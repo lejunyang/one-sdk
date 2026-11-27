@@ -1,19 +1,49 @@
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
-use std::fs;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, Metadata};
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
-use osdk_core::pipeline::validate_safe_filename;
+use serde::Deserialize;
 
-use super::{check_directory_if_present, inspect, modules, Snapshot};
+use super::{check_directory_if_present, inspect, Snapshot};
 
 const MAN: &str = "share/man";
+const JOURNAL: &str = "man-writes.jsonl";
+const PRELOAD: &str = "record-man-links.cjs";
+
+pub(super) struct SectionSnapshot {
+    directory: SectionDirectory,
+    pages: BTreeMap<OsString, String>,
+}
+
+#[derive(Deserialize)]
+struct LinkWrite {
+    path: PathBuf,
+    target: PathBuf,
+    identity: String,
+}
+
+impl LinkWrite {
+    fn is_current(&self, metadata: Option<&Metadata>) -> Result<bool> {
+        if metadata.is_some_and(|entry| entry.is_symlink() && identity(entry) == self.identity) {
+            return Ok(fs::read_link(&self.path)?.as_os_str() == self.target.as_os_str());
+        }
+        Ok(false)
+    }
+}
+
+fn identity(metadata: &Metadata) -> String {
+    let changed_ns =
+        i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
+    format!("{}:{}:{}", metadata.dev(), metadata.ino(), changed_ns)
+}
 
 #[derive(PartialEq, Eq)]
-pub(super) struct SectionDirectory {
+struct SectionDirectory {
     path: PathBuf,
     device: u64,
     inode: u64,
@@ -39,105 +69,138 @@ impl SectionDirectory {
 
 impl Snapshot {
     pub(super) fn capture_manpages(&mut self) -> Result<()> {
-        let sections = man_sections(&self.prefix)?;
-        for (section, directory) in &sections {
-            let backup = self.backup.path().join("man").join(section);
+        fs::File::create(self.backup.path().join(JOURNAL))?;
+        for (section, directory) in man_sections(&self.prefix)? {
+            let backup = self.backup.path().join("man").join(&section);
             fs::create_dir_all(&backup)?;
+            let mut pages = BTreeMap::new();
             for page in fs::read_dir(&directory.path)? {
                 let page = page?;
-                if is_man_page(&page.file_name(), section) {
-                    self.copy_entry(&page.path(), &backup.join(page.file_name()))?;
+                let name = page.file_name();
+                if is_man_page(&name, &section) {
+                    let stamp = identity(&page.path().symlink_metadata()?);
+                    self.copy_entry(&page.path(), &backup.join(&name))?;
+                    pages.insert(name, stamp);
                 }
             }
+            self.man_sections
+                .insert(section, SectionSnapshot { directory, pages });
         }
-        self.man_sections = sections;
         Ok(())
     }
 
-    pub(super) fn restore_manpages<'a>(
+    pub(in crate::commands) fn observe_man_installs(
         &self,
-        planned: impl IntoIterator<Item = &'a str>,
+        command: &mut Command,
+        prefix: &Path,
     ) -> Result<()> {
-        let package_dirs = planned
-            .into_iter()
-            .map(man_link_package_dir)
-            .collect::<Result<Vec<_>>>()?;
+        let preload = self.backup.path().join(PRELOAD);
+        fs::write(&preload, include_bytes!("record-man-links.cjs"))?;
+        let path = preload
+            .to_str()
+            .context("npm man journal path is not UTF-8")?;
+        let path = path.replace('\\', r"\\").replace('"', r#"\""#);
+        let mut options = OsString::from(format!("--require=\"{path}\""));
+        let original = std::env::var_os("NODE_OPTIONS");
+        if let Some(original) = &original {
+            options.push(" ");
+            options.push(original);
+        }
+        command
+            .env("NODE_OPTIONS", options)
+            .env("OSDK_NPM_MAN_JOURNAL", self.backup.path().join(JOURNAL))
+            .env("OSDK_NPM_MAN_PREFIX", prefix)
+            .env("OSDK_NPM_MAN_PARENT", std::process::id().to_string());
+        if let Some(original) = original {
+            command.env("OSDK_NPM_ORIGINAL_NODE_OPTIONS", original);
+        } else {
+            command.env_remove("OSDK_NPM_ORIGINAL_NODE_OPTIONS");
+        }
+        Ok(())
+    }
+
+    pub(super) fn restore_manpages(&self) -> Result<()> {
         let sections = man_sections(&self.prefix)?;
-        for (name, directory) in &self.man_sections {
-            if sections.get(name) != Some(directory) {
+        for (name, before) in &self.man_sections {
+            if sections.get(name) != Some(&before.directory) {
                 return Err(anyhow!(
                     "npm man section {} no longer points to the snapshotted directory {}",
                     self.prefix.join(MAN).join(name).display(),
-                    directory.path.display()
+                    before.directory.path.display()
                 ));
             }
         }
 
-        for (section, directory) in sections {
-            let logical = self.prefix.join(MAN).join(&section);
-            let backup = self.backup.path().join("man").join(&section);
-            if self.man_sections.contains_key(&section) {
-                for page in fs::read_dir(&backup)? {
-                    let original = directory.path.join(page?.file_name());
-                    if inspect(&original)?.is_none() {
-                        return Err(anyhow!(
-                            "cannot attribute the missing npm man page {} to this migration",
-                            original.display()
-                        ));
-                    }
-                }
-            } else if directory.path != logical {
-                // npm creates real section directories. A new link to another
-                // directory leaves us without a baseline for those entries.
+        let journal = fs::read_to_string(self.backup.path().join(JOURNAL))?;
+        let mut writes = BTreeMap::new();
+        for line in journal.lines() {
+            let write: LinkWrite =
+                serde_json::from_str(line).context("reading npm man link journal")?;
+            writes.insert(write.path.clone(), write);
+        }
+
+        let mut plan = Vec::new();
+        for (section, directory) in &sections {
+            let logical = self.prefix.join(MAN).join(section);
+            let before = self.man_sections.get(section);
+            if before.is_none() && directory.path != logical {
                 return Err(anyhow!(
                     "npm man section {} became a link to an unsnapshotted directory",
                     logical.display()
                 ));
             }
 
-            let mut changed_links = Vec::new();
-            for page in fs::read_dir(&directory.path)? {
-                let page = page?;
-                let name = page.file_name();
-                if !is_man_page(&name, &section) || !page.file_type()?.is_symlink() {
-                    continue;
+            if let Some(before) = before {
+                let backup = self.backup.path().join("man").join(section);
+                for (name, stamp) in &before.pages {
+                    let path = directory.path.join(name);
+                    let current = inspect(&path)?;
+                    if current
+                        .as_ref()
+                        .is_some_and(|entry| identity(entry) == *stamp)
+                    {
+                        continue;
+                    }
+                    let write = match writes.get(&path) {
+                        Some(write) if write.is_current(current.as_ref())? => write,
+                        _ => {
+                            return Err(anyhow!(
+                                "cannot attribute the change to npm man page {} to this migration",
+                                path.display()
+                            ))
+                        }
+                    };
+                    plan.push((logical.clone(), directory, write, Some(backup.join(name))));
                 }
-                let path = page.path();
-                let target = fs::read_link(&path)?;
-                if !package_dirs.iter().any(|package| {
-                    target.strip_prefix(package).is_ok_and(|file| {
-                        file.file_name() == Some(&name)
-                            && file
-                                .components()
-                                .all(|part| matches!(part, Component::Normal(_)))
-                    })
-                }) {
-                    continue;
-                }
-                changed_links.push((path, name, target));
             }
 
-            if !changed_links.is_empty() && SectionDirectory::resolve(&logical)? != Some(directory)
+            for write in writes.values() {
+                let Some(name) = write.path.file_name() else {
+                    continue;
+                };
+                if write.path.parent() == Some(directory.path.as_path())
+                    && is_man_page(name, section)
+                    && !before.is_some_and(|before| before.pages.contains_key(name))
+                    && write.is_current(inspect(&write.path)?.as_ref())?
+                {
+                    plan.push((logical.clone(), directory, write, None));
+                }
+            }
+        }
+
+        for (logical, directory, write, original) in plan {
+            if SectionDirectory::resolve(&logical)?.as_ref() != Some(directory)
+                || !write.is_current(inspect(&write.path)?.as_ref())?
             {
                 return Err(anyhow!(
-                    "npm man section {} changed while preparing rollback",
-                    logical.display()
+                    "npm man page {} changed while preparing rollback",
+                    write.path.display()
                 ));
             }
-            for (path, name, target) in changed_links {
-                if fs::read_link(&path)? != target {
-                    return Err(anyhow!(
-                        "npm man page {} changed while preparing rollback",
-                        path.display()
-                    ));
-                }
-                let original = backup.join(&name);
-                if inspect(&original)?.is_some() {
-                    self.restore_entry(&original, &path)?;
-                } else {
-                    fs::remove_file(&path)
-                        .with_context(|| format!("unlinking {}", path.display()))?;
-                }
+            fs::remove_file(&write.path)
+                .with_context(|| format!("unlinking {}", write.path.display()))?;
+            if let Some(original) = original {
+                self.restore_entry(&original, &write.path)?;
             }
         }
         Ok(())
@@ -174,23 +237,6 @@ fn is_man_page(name: &OsStr, section: &str) -> bool {
         name.rsplit_once('.')
             .is_some_and(|(_, suffix)| suffix == &section["man".len()..])
     })
-}
-
-fn man_link_package_dir(name: &str) -> Result<PathBuf> {
-    if let Some((scope, leaf)) = name.split_once('/') {
-        if !scope.starts_with('@') {
-            return Err(anyhow!("invalid scoped npm installation key {name:?}"));
-        }
-        validate_safe_filename("npm scope", scope)?;
-        validate_safe_filename("npm package", leaf)?;
-    } else {
-        validate_safe_filename("npm package", name)?;
-    }
-
-    // npm computes this relative to the logical share/man/manN path, even
-    // when that section is a symlink. Match the original installation key
-    // byte-for-byte, including case, without resolving the possibly dead link.
-    Ok(modules(Path::new("../../..")).join(name))
 }
 
 #[cfg(test)]
