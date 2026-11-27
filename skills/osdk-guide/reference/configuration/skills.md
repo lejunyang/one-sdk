@@ -31,12 +31,12 @@ when = { os = ["linux", "macos"] }
   `skills update`，需要联网获取新提交的归档。旧配置的裸 40 位 commit 仍按安装快照处理。
   换来源或技能时，用 `osdk skills remove <名>` 后重新同步，或显式调用 `skills add`。
 - `agents` 为空时回退到 `[skills].default_agents`，再为空时检测已安装的 Agent。仅检测到
-  一个时自动选中，多个或零个时使用交互选择或传 `--yes`。在 CI 中也可以明确配置 Agent。
+  一个时自动选中。需要人工选择时，CI 或无终端的 `sync` 会退出 1 并提示配置这两个字段之一。
+  可传 `--yes` 接受推荐目标。
 - `link_mode` 可覆盖安装方式。`sync` 默认单目录复制、多目录自动链接。`add` 的 `--copy`
   优先于配置。`add` 在写盘前确认，`sync` 在替换任何已有但未锁定的技能目录前确认。
   `CI` 为非空值时按 CI 运行，`false`（不区分大小写）和 `0` 除外。CI 或无终端时可传
   `--yes` 确认替换，或先移走旧目录。
-  非交互环境可传 `--yes` 确认。
 - `scope` 是未传 `-g` 时的默认范围。`project` 使用项目目录和项目锁。`global` 使用用户级
   Agent 目录和用户配置目录下的 `osdk.lock`。`skills path` 读取配置指定的范围。未配置时，
   它先查项目锁，再查用户锁。

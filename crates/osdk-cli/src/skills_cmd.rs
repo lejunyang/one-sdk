@@ -269,7 +269,9 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
     }
 
     let scope_root = scope_root(app, args.global)?;
-    let targets = resolve_agents(app, &args.agents, &scope_root, args.global)?;
+    let targets = resolve_agents(app, &args.agents, &scope_root, args.global).context(
+        "selecting target agents for `skills add`; pass -a/--agent to choose explicitly",
+    )?;
     let target_dirs = agent_dirs_by_path(&targets, &scope_root, args.global)?;
     let mode = add_link_mode(app, args.copy, target_dirs.len())?;
     let installation = SkillInstallation::prepare(source, targets, target_dirs, mode, None)?;
@@ -1379,9 +1381,8 @@ fn resolve_agent_ids(
     }
     if !prompt.is_interactive() {
         anyhow::bail!(
-            "no target agent in this non-interactive session: pass -a/--agent \
-             (e.g. -a claude-code), set [skills].default_agents in osdk.toml, \
-             or pass --yes to accept detected agents"
+            "no target agent in this non-interactive session: set [skills].default_agents \
+             in osdk.toml or pass --yes to accept the recommended targets"
         );
     }
 

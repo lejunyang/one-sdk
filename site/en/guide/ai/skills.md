@@ -183,8 +183,11 @@ collection, `skill` selects a directory and defaults to the declaration name.
 Relative local paths are resolved from the config file that declares `source`.
 For an external project config, they are relative to the actual project root.
 `ref` applies to GitHub sources. An empty `agents` list falls back to
-`[skills].default_agents` and then to agent detection. In CI, set agents in the
-config or pass `--yes` to accept detection. `sync` prints a summary for first-time
+`[skills].default_agents` and then to agent detection. A single detected Agent
+is selected automatically. If a choice is still needed in CI or without a
+terminal, `sync` exits immediately with status 1 and asks you to set `agents`
+or `[skills].default_agents`. Pass `--yes` to accept the recommended targets.
+`sync` prints a summary for first-time
 installs and asks before replacing any existing unlocked skill directory, even when
 the file contents match. A nonempty `CI` value enables CI mode, except `false`
 (case-insensitive) and `0`. In CI or without a terminal, pass `--yes` to replace

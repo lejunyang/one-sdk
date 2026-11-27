@@ -553,6 +553,25 @@ fn skills_sync_preserves_unlocked_executable_scripts_without_confirmation() {
     assert!(String::from_utf8_lossy(&cancelled.stdout).contains("Installation cancelled."));
     assert_preserved();
 
+    // The shared Codex directory alone does not identify a detected Agent.
+    let config = project.join("osdk.toml");
+    std::fs::write(&config, "[skills.demo]\nsource = \"./fixture/demo\"\n").unwrap();
+    let unresolved = run_in_terminal("woodpecker", &sync_args, None);
+    assert_eq!(unresolved.status.code(), Some(1), "{unresolved:?}");
+    let stderr = String::from_utf8_lossy(&unresolved.stderr);
+    for expected in [
+        "non-interactive",
+        "[skills.demo]",
+        "`agents`",
+        "[skills].default_agents",
+    ] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    assert!(!stderr.contains("Select the agents"), "{stderr}");
+    assert!(!stderr.contains("-a/--agent"), "{stderr}");
+    assert_preserved();
+    std::fs::write(config, DEMO_DECLARATION).unwrap();
+
     let confirmed = run_in_terminal("woodpecker", &["--yes", "skills", "sync"], None);
     assert!(confirmed.status.success(), "{confirmed:?}");
     assert_demo_installed(&project, &read_lock(&lock));
@@ -753,7 +772,7 @@ fn skills_sync_reports_missing_agents_in_a_non_interactive_session() {
     let root = temp.path();
     let project = local_project(root, "[skills.demo]\nsource = \"./fixture/demo\"\n");
     let sync = osdk(root, &project, &["skills", "sync"]);
-    assert!(!sync.status.success(), "{sync:?}");
+    assert_eq!(sync.status.code(), Some(1), "{sync:?}");
     let stderr = String::from_utf8_lossy(&sync.stderr);
     for expected in [
         "[skills.demo]",

@@ -151,7 +151,9 @@ agents = ["claude-code", "codex"]
 声明名用作锁键和安装目录名。来源包含多个技能时，`skill` 选择其中一个目录，省略时按声明名查找。
 本地相对路径以声明该 `source` 的配置文件所在目录为基准，外置项目配置以实际项目根目录为基准。
 `ref` 仅用于 GitHub 来源。声明的 `agents` 为空时用
-`[skills].default_agents`，再为空则检测已安装的 Agent。CI 可以声明 Agent 或传 `--yes` 接受检测结果。
+`[skills].default_agents`，再为空则检测已安装的 Agent。只检测到一个时自动选择。
+在 CI 或无终端时，如果仍需选择，`sync` 会立即退出 1，并提示配置 `agents` 或
+`[skills].default_agents`。也可传 `--yes` 接受推荐目标。
 `sync` 首次安装会打印摘要。替换任何已有但未锁定的技能目录都需要确认，即使文件内容相同。
 `CI` 为非空值时按 CI 运行，`false`（不区分大小写）和 `0` 除外。CI 或无终端时，
 可用 `--yes` 确认替换，或先移走旧目录再同步。

@@ -783,6 +783,8 @@ osdk skills remove web-design-guidelines
 适用的缺锁声明，并将结果追加到 `osdk.lock`。用 `skills update` 更新已锁定的 GitHub ref 或
 应用 Agent 列表变更。`sync` 和批量 `update` 会跳过 `when` 排除的技能。
 点名更新被排除的技能会说明平台要求并退出 1。
+在 CI 或无终端时，如果需要选择 Agent，请配置 `agents` 或 `[skills].default_agents`，
+也可传 `--yes` 接受推荐目标。
 `sync` 替换已有但未锁定的技能目录前需要确认。在 CI 或没有终端时，可传 `--yes` 确认替换，或先移走旧目录。
 要在更新时仍固定到同一 GitHub commit，配置 `ref = "rev:<commit>"`。
 要更换固定 commit，修改 `ref` 后联网运行 `skills update`。
