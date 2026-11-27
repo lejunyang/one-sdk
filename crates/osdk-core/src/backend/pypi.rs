@@ -878,6 +878,67 @@ pub fn validate_cache(ctx: &Ctx) -> Result<PathBuf> {
     }
 }
 
+/// Clear entries under the same exclusive root lock that uv uses.
+#[cfg(feature = "install")]
+pub fn clean_cache_contents(ctx: &Ctx) -> Result<()> {
+    use std::fs::{self, OpenOptions, TryLockError};
+    use std::io::ErrorKind;
+
+    let root = validate_cache(ctx)?;
+    if !root.try_exists().map_err(|error| Error::io(&root, error))? {
+        return Ok(());
+    }
+    let path = root.join(".lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| Error::io(&path, error))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(Error::other(crate::t!(
+                "err.uv_cache_busy",
+                path = root.display()
+            )));
+        }
+        Err(TryLockError::Error(error)) => return Err(Error::io(&path, error)),
+    }
+
+    // Keep the root and lock in place so waiting uv processes and new arrivals
+    // continue to lock the same file.
+    for entry in fs::read_dir(&root).map_err(|error| Error::io(&root, error))? {
+        let entry = entry.map_err(|error| Error::io(&root, error))?;
+        if entry.file_name() == ".lock" {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| Error::io(&path, error))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTypeExt;
+            if kind.is_symlink_dir() {
+                fs::remove_dir(&path).map_err(|error| Error::io(&path, error))?;
+                continue;
+            }
+        }
+        let removed = if kind.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => {}
+            // uv can unlink one of its temporary files as it finishes.
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(&path, error)),
+        }
+    }
+    Ok(())
+}
+
 /// Drop cache entries nothing references, keeping what environments still use.
 ///
 /// This is deliberately not `cache clean`. uv hardlinks each unpacked wheel into

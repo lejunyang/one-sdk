@@ -1072,18 +1072,19 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             let dirs = &app.ctx.dirs;
             let pip = osdk_core::cache::downstream_root(&dirs.cache).join("pip");
             downloads::validate_disposable_directory(dirs, &dirs.downloads())?;
-            let uv = pypi::validate_cache(&app.ctx)?;
+            pypi::validate_cache(&app.ctx)?;
             downloads::validate_disposable_directory(dirs, &pip)?;
             if !app.prompt.confirm(&t!("prompt.cache_clean"))? {
                 println!("{}", t!("msg.cancelled"));
                 return Ok(());
             }
-            downloads::clean(dirs).context(t!("err.cache_clean_downloads"))?;
-            remove_cache_directory(&uv).context(t!("err.cache_clean_uv"))?;
+            downloads::clean(dirs)
+                .map_err(|error| cache_clean_error("err.cache_clean_downloads", error))?;
+            pypi::clean_cache_contents(&app.ctx)
+                .map_err(|error| cache_clean_error("err.cache_clean_uv", error))?;
             downloads::validate_disposable_directory(dirs, &pip)
-                .map_err(anyhow::Error::from)
-                .and_then(|()| remove_cache_directory(&pip))
-                .context(t!("err.cache_clean_pip"))?;
+                .map_err(|error| cache_clean_error("err.cache_clean_pip", error))?;
+            remove_cache_directory(&pip).context(t!("err.cache_clean_pip"))?;
             println!("{}", t!("msg.cache_cleared"));
         }
         CacheCommand::Prune => {
@@ -1102,6 +1103,12 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cache_clean_error(stage: &str, error: osdk_core::Error) -> anyhow::Error {
+    // Render the localized cause here. The top-level diagnostic prefers a core
+    // error over its anyhow contexts, which would hide the completed stages.
+    anyhow!(error.localized()).context(t!(stage))
 }
 
 fn remove_cache_directory(directory: &std::path::Path) -> Result<()> {

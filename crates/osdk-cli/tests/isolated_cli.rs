@@ -2380,6 +2380,82 @@ fn yes_flag_confirms_cache_clean() {
 }
 
 #[test]
+fn cache_clean_uv_fallback_respects_shared_and_exclusive_root_locks() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let uv = root.join("cache/pkg/uv");
+    let wheel = uv.join("archive-v0/wheel");
+    std::fs::create_dir_all(wheel.parent().unwrap()).unwrap();
+    std::fs::write(&wheel, b"cached wheel").unwrap();
+    let pip = root.join("cache/pkg/pip");
+    std::fs::create_dir_all(&pip).unwrap();
+    std::fs::write(pip.join("wheel"), b"pip cache").unwrap();
+    let lock_path = uv.join(".lock");
+    std::fs::write(&lock_path, b"original lock").unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        lock.metadata().unwrap().ino()
+    };
+
+    for shared in [true, false] {
+        if shared {
+            lock.lock_shared().unwrap();
+        } else {
+            lock.lock().unwrap();
+        }
+        let output = run_isolated(root, &["--yes", "cache", "clean"]);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("is in use"), "{stderr}");
+        assert!(
+            stderr.contains("download cache cleanup completed"),
+            "{stderr}"
+        );
+        assert!(wheel.is_file());
+        assert!(lock_path.is_file());
+        assert!(pip.join("wheel").is_file());
+        lock.unlock().unwrap();
+    }
+
+    let output = run_isolated(root, &["--yes", "cache", "clean"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(!pip.exists());
+    assert_eq!(std::fs::read_dir(&uv).unwrap().count(), 1);
+    assert_eq!(std::fs::read(&lock_path).unwrap(), b"original lock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), inode);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_clean_uv_fallback_creates_lock_and_removes_links_without_following_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let uv = root.join("cache/pkg/uv");
+    let model_dir = root.join("data/models");
+    std::fs::create_dir_all(&uv).unwrap();
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let model = model_dir.join("model.gguf");
+    std::fs::write(&model, b"model data").unwrap();
+    std::os::unix::fs::symlink(&model_dir, uv.join("link")).unwrap();
+
+    let output = run_isolated(root, &["--yes", "cache", "clean"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(std::fs::read(&model).unwrap(), b"model data");
+    assert!(uv.join(".lock").is_file());
+    assert_eq!(std::fs::read_dir(&uv).unwrap().count(), 1);
+}
+
+#[test]
 fn cache_env_lists_both_pnpm_store_variable_generations() {
     let temporary = tempfile::tempdir().unwrap();
     let output = run_isolated(temporary.path(), &["cache", "env"]);

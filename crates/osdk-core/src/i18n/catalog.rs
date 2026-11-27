@@ -540,6 +540,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.uv_cache_busy",
+        (
+            "uv cache {path} is in use. Retry after uv exits.",
+            "uv 缓存 {path} 正在使用，请在 uv 退出后重试。",
+        ),
+    );
+    m.insert(
         "prompt.uninstall",
         (
             "Uninstall {tool} and reclaim its unreferenced store objects?",
