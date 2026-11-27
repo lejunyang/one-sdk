@@ -79,6 +79,11 @@ Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 S
 
 `osdk prune`、SDK `uninstall` 后和 `model remove` 后都会直接调用该函数。`uninstall` 先删除安装目录，之后才 GC；model remove 同理。当前实现**没有 claim/lease 机制，也没有获取全局 GC 锁**。尽管 [`lock.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) 的模块注释提到 guard store GC，实际 GC 调用点没有使用 `FileLock`。因此不能宣称 claim GC 是全局串行的，也不能宣称 GC 与正在进行的不同版本安装/模型发布互斥。
 
+模型项目引用登记和快照删除共用 `<data>/model-refs/registry.lock`。项目 prune
+只在本项目的弃用快照中选候选，遇到无法读取的项目登记时停止。要删除当前快照，
+同名目录里的快照必须都能清理且无视图成员。保留的快照继续用自己的 manifest
+保护 CAS blob。项目目录暂时不可达或搬迁时，原登记继续保护快照。
+
 这会留下实际竞争窗口：GC 的 live-set 扫描与删除之间，另一个进程可能新建引用；安装也可能先产生 CAS 对象、后写 manifest，此时并发 GC 可把尚未被 manifest 声明的对象视为不可达。per-version/per-snapshot 锁无法关闭这个全局窗口。生产文档和运维流程应把并发 `prune`/卸载与安装视为未协调操作。
 
 另外，GC 只删除对象文件，不清空空的 fan-out 目录。单个删除失败不会增加 removed-object 数量并会被静默跳过，但其大小可能已经计入返回的 byte 总数。

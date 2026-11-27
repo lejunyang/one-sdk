@@ -583,6 +583,7 @@ impl ModelStore {
     pub fn snapshots(&self, name: &str) -> Result<Vec<SnapshotEntry>> {
         validate_model_name(name)?;
         let root = self.model_root(name).join("snapshots");
+        crate::cache::downloads::safe_path(&self.dirs.models(), &root)?;
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -596,8 +597,10 @@ impl ModelStore {
                 continue;
             }
             let path = entry.path();
-            let kind = entry.file_type().map_err(|error| Error::io(&path, error))?;
-            let manifest = if kind.is_dir() {
+            let metadata = path
+                .symlink_metadata()
+                .map_err(|error| Error::io(&path, error))?;
+            let manifest = if metadata.is_dir() && !crate::store::dirlink::is_link(&metadata) {
                 self.load_path(&path).map(|installed| installed.manifest)
             } else {
                 Err(Error::other(format!(
@@ -627,6 +630,7 @@ impl ModelStore {
         let root = self.model_root(name);
         let lock_path = root.join(".locks").join(format!("{snapshot}.lock"));
         let path = root.join("snapshots").join(snapshot);
+        crate::cache::downloads::safe_path(&self.dirs.models(), &path)?;
         if !path.try_exists().map_err(|error| Error::io(&path, error))? {
             return Ok(false);
         }
@@ -636,11 +640,8 @@ impl ModelStore {
                 "cannot remove current snapshot of model {name}"
             )));
         }
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(Error::io(&path, error)),
-        }
+        crate::fs::remove_dir_all_forced(&path).map_err(|error| Error::io(&path, error))?;
+        Ok(true)
     }
 
     pub fn list(&self) -> Result<Vec<InstalledModel>> {
@@ -693,7 +694,7 @@ impl ModelStore {
         // being inert, not about the suite being weak.
         crate::store::dirlink::remove(&root.join(CURRENT_LINK))
             .map_err(|error| Error::io(root.join(CURRENT_LINK), error))?;
-        std::fs::remove_dir_all(&root).map_err(|error| Error::io(&root, error))?;
+        crate::fs::remove_dir_all_forced(&root).map_err(|error| Error::io(&root, error))?;
         Ok(true)
     }
 

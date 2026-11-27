@@ -1,7 +1,8 @@
 //! `runtimes` command handlers (split from commands.rs).
 
 use super::*;
-use osdk_core::model::refs::{ModelRefs, ProjectModelRefs};
+use crate::cli::ModelViewCommand;
+use osdk_core::model::refs::{plan_prune, ModelRefs, ProjectModelRefs, PruneAction};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -674,7 +675,19 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             }
         }
         ModelCommand::Env { command } => model_env(app, command)?,
-        ModelCommand::View { command } => crate::model_view::model_view(app, command)?,
+        ModelCommand::View { command } => {
+            let _guard = if matches!(
+                command,
+                ModelViewCommand::Add { .. }
+                    | ModelViewCommand::Remove { .. }
+                    | ModelViewCommand::Rebuild { .. }
+            ) {
+                Some(ModelRefs::new(&app.ctx.dirs).lock()?)
+            } else {
+                None
+            };
+            crate::model_view::model_view(app, command)?;
+        }
     }
     Ok(())
 }
@@ -867,20 +880,21 @@ pub(crate) async fn model_sync(
 ) -> Result<()> {
     let emitter = crate::model_output::ModelSyncEmitter::new(jsonl);
     let registry = ModelRefs::new(&app.ctx.dirs);
-    let _guard = if dry_run {
+    let guard = if dry_run {
         None
     } else {
         Some(registry.lock()?)
     };
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
-    let mut refs = if dry_run {
+    let mut first_registration = false;
+    let mut refs = if dry_run && !prune {
         None
     } else {
         let root = model_project_root(app, &path)?;
-        let mut refs = registry
-            .load(&root)?
-            .unwrap_or_else(|| ProjectModelRefs::new(root, path.clone()));
+        let existing = registry.load(&root)?;
+        first_registration = existing.is_none();
+        let mut refs = existing.unwrap_or_else(|| ProjectModelRefs::new(root, path.clone()));
         refs.lock = path.clone();
         Some(refs)
     };
@@ -906,6 +920,7 @@ pub(crate) async fn model_sync(
     }
     let mut restored = 0usize;
     let mut bootstrapped = std::collections::BTreeSet::new();
+    let mut pending_downloads = BTreeSet::new();
 
     // A declared model is (re-)pulled when the lock does not describe it, or
     // describes a different identity than the declaration now asks for. This is
@@ -938,6 +953,7 @@ pub(crate) async fn model_sync(
             ModelLockState::Missing => "project declaration",
             ModelLockState::Changed => "declaration changed",
         };
+        pending_downloads.insert(name.clone());
         if dry_run {
             let verb = if matches!(change, ModelLockState::Changed) {
                 "would re-lock"
@@ -1086,7 +1102,7 @@ pub(crate) async fn model_sync(
         });
         if let Some(installed) = present {
             if let Some(refs) = &mut refs {
-                if refs.record(name, installed.snapshot_key()) {
+                if refs.record(name, installed.snapshot_key()) && !dry_run {
                     registry.put_project(refs)?;
                 }
             }
@@ -1103,6 +1119,7 @@ pub(crate) async fn model_sync(
             crate::model_view::reconcile_declared_views(app, name, &entry.views, emitter.jsonl())?;
             continue;
         }
+        pending_downloads.insert(name.clone());
         if dry_run {
             emitter.emit(
                 &crate::model_output::ModelSyncEvent::new("model", "planned", true)
@@ -1231,7 +1248,7 @@ pub(crate) async fn model_sync(
             .iter()
             .map(|(name, _)| name.as_str())
             .collect::<BTreeSet<_>>();
-        if refs.retire_unlocked(&locked_names, target) {
+        if refs.retire_unlocked(&locked_names, target) && !dry_run {
             registry.put_project(refs)?;
         }
     }
@@ -1250,48 +1267,77 @@ pub(crate) async fn model_sync(
         );
     }
 
+    let mut pruned = 0;
     if prune && target.is_none() {
-        let declared: std::collections::BTreeSet<_> = if locked.is_empty() {
-            configured.iter().map(|(name, _)| name.clone()).collect()
-        } else {
-            locked.iter().map(|(name, _)| name.clone()).collect()
-        };
-        let mut pruned = 0usize;
-        for installed in store.list()? {
-            let name = installed.manifest.name.clone();
-            if declared.contains(&name) {
-                continue;
-            }
-            if dry_run {
-                emitter.emit(
-                    &crate::model_output::ModelSyncEvent::new("model", "planned", true)
-                        .model(&name)
-                        .action("remove")
-                        .reason("not declared in the lock"),
-                    || println!("would remove {name} (not declared in the lock)"),
-                )?;
-            } else if store.remove(&name)? {
-                emitter.emit(
-                    &crate::model_output::ModelSyncEvent::new("model", "completed", false)
-                        .model(&name)
-                        .action("remove")
-                        .reason("not declared in the lock"),
-                    || println!("removed {name} (not declared in the lock)"),
-                )?;
-            }
-            pruned += 1;
-        }
-        if pruned > 0 && !dry_run {
-            let models = app.ctx.dirs.models();
-            let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+        let refs = refs.as_mut().expect("prune loads project model references");
+        let registered = registry.load_all()?;
+        if first_registration {
             emitter.emit(
-                &crate::model_output::ModelSyncEvent::new("gc", "completed", false)
-                    .action("prune-cas")
-                    .changed(objects)
-                    .reason(&format!("{} freed", human_bytes(bytes))),
-                || println!("pruned {} object(s), {} freed", objects, human_bytes(bytes)),
+                &crate::model_output::ModelSyncEvent::new("prune", "unchanged", dry_run)
+                    .reason("no prior snapshot registrations for this project"),
+                || {
+                    println!(
+                        "no prior snapshot registrations for {}; existing snapshots kept",
+                        refs.root.display()
+                    )
+                },
             )?;
         }
+        for entry in plan_prune(store, refs, &registered, &pending_downloads)? {
+            let status = match &entry.action {
+                PruneAction::Skip { reason, .. } => {
+                    emitter.emit(
+                        &crate::model_output::ModelSyncEvent::new("model", "skipped", dry_run)
+                            .model(&entry.name)
+                            .action("remove")
+                            .path(&entry.path)
+                            .reason(reason),
+                        || println!("kept {}: {reason}", entry.path.display()),
+                    )?;
+                    continue;
+                }
+                _ if dry_run => "planned",
+                PruneAction::RemoveSnapshot => {
+                    store.remove_snapshot(&entry.name, &entry.snapshot)?;
+                    "completed"
+                }
+                PruneAction::RemoveModel => {
+                    store.remove(&entry.name)?;
+                    "completed"
+                }
+            };
+            if !dry_run {
+                refs.forget_retired(&entry.name, &entry.snapshot);
+                registry.put_project(refs)?;
+            }
+            let verb = if dry_run { "would remove" } else { "removed" };
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("model", status, dry_run)
+                    .model(&entry.name)
+                    .action("remove")
+                    .path(&entry.path)
+                    .reason("no longer referenced by this project"),
+                || {
+                    println!(
+                        "{verb} {} (no longer referenced by this project)",
+                        entry.path.display()
+                    )
+                },
+            )?;
+            pruned += 1;
+        }
+    }
+    drop(guard);
+    if pruned > 0 && !dry_run {
+        let models = app.ctx.dirs.models();
+        let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+        emitter.emit(
+            &crate::model_output::ModelSyncEvent::new("gc", "completed", false)
+                .action("prune-cas")
+                .changed(objects)
+                .reason(&format!("{} freed", human_bytes(bytes))),
+            || println!("pruned {} object(s), {} freed", objects, human_bytes(bytes)),
+        )?;
     }
 
     emitter.emit(

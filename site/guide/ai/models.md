@@ -168,7 +168,7 @@ osdk source unpin hf             # 取消固定，恢复自动选择
 osdk model sync qwen25          # 只同步一个模型
 osdk model sync                 # 同步整个项目
 osdk model sync --dry-run       # 只报告会做什么
-osdk model sync --prune         # 删除 lock 不再声明的本地快照
+osdk model sync --prune         # 清理本项目已弃用的快照
 ```
 
 还原时按 lock 中的不可变 revision 和文件 SHA-256 重建，而不是重新解释浮动分支。lock 同时
@@ -180,7 +180,10 @@ osdk model sync --prune         # 删除 lock 不再声明的本地快照
 排名；`--source` 同样生效。lock 里记录的官方端点不会被强制使用，因此镜像与 `source pin`
 照常起作用；而只存在于私有 endpoint 的模型，即使声明里已删掉 `endpoint`，也能按 lock 还原。
 
-`--prune` 仅适用于全项目同步，且默认关闭，因为它会删除重新获取代价较高的本地权重。
+`--prune` 仅适用于全项目同步。它清理本项目曾经同步、当前锁已不再引用的快照。
+其他项目已登记的引用、本地导入、尚未登记的旧快照和视图仍在使用的快照都会保留。
+首次同步会为当前锁登记已校验的快照。只从配置移除声明时，锁仍可继续引用快照。
+如果同步需要拉取或还原某个模型，该名称的清理留到下一次 `--prune`，这样预演无需下载即可列出本次可删的快照。
 
 ### `remove` 与 `unuse`
 

@@ -189,7 +189,7 @@ everything else is replayed from the immutable lock.
 osdk model sync qwen25          # one model
 osdk model sync                 # whole project
 osdk model sync --dry-run       # report without applying
-osdk model sync --prune         # remove snapshots no longer declared by the lock
+osdk model sync --prune         # reclaim retired snapshots from this project
 ```
 
 Restore uses the lock's immutable revision and file SHA-256 values rather than reinterpreting a
@@ -203,8 +203,14 @@ only then source pins and probe ranking; `--source` applies as well. An official
 lock is never forced, so mirrors and `source pin` keep working, while a model that exists only on
 a private endpoint restores from the lock even after `endpoint` is removed from the declaration.
 
-`--prune` applies only to whole-project synchronization and is off by default because it deletes
-weights that may be expensive to fetch again.
+`--prune` applies to whole-project synchronization. It removes snapshots previously
+synced by this project that its current lock no longer references. It preserves
+snapshots registered by other projects, local imports, older unregistered
+snapshots, and snapshots still in use by views. The first sync registers
+verified snapshots for the current lock. Removing a declaration alone can
+leave the snapshot referenced by the lock. If sync needs to pull or restore a
+model, pruning for that name is deferred until the next `--prune`, so a preview
+can list this run's removals without downloading anything.
 
 ### `remove` and `unuse`
 

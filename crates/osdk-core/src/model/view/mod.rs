@@ -309,12 +309,65 @@ impl ViewStore {
 
     fn load_manifest(&self, root: &Path) -> Result<ViewManifest> {
         let path = root.join(VIEW_MANIFEST_FILE);
-        if !path.is_file() {
-            return Ok(ViewManifest::default());
-        }
-        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ViewManifest::default())
+            }
+            Err(error) => return Err(Error::io(&path, error)),
+        };
         serde_json::from_slice(&bytes)
             .map_err(|e| Error::other(format!("invalid {VIEW_MANIFEST_FILE}: {e}")))
+    }
+
+    /// Hardlinks and copies retain their bytes after snapshot removal, while
+    /// rendered symlinks can still point into a formerly current snapshot.
+    pub(crate) fn links_into_snapshot(
+        &self,
+        state: &ViewState,
+        name: &str,
+        snapshot: &Path,
+    ) -> Result<bool> {
+        for kind in ViewKind::all() {
+            for (profile, specs) in state.profiles(*kind) {
+                if !specs
+                    .iter()
+                    .any(|spec| super::refs::same_model_name(&spec.model, name))
+                {
+                    continue;
+                }
+                let root = self.view_root(*kind, profile)?;
+                for (relative, owner) in self.load_manifest(&root)?.owners {
+                    if !super::refs::same_model_name(&owner, name) {
+                        continue;
+                    }
+                    let path = join_consumer(&root, &relative)?;
+                    let metadata = match path.symlink_metadata() {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(Error::io(&path, error)),
+                    };
+                    if !metadata.file_type().is_symlink() {
+                        continue;
+                    }
+                    let target =
+                        std::fs::read_link(&path).map_err(|error| Error::io(&path, error))?;
+                    let target = path
+                        .parent()
+                        .expect("rendered file has a parent")
+                        .join(target);
+                    // Resolve the parent only. The file itself can link onward to CAS.
+                    let parent = target.parent().expect("rendered link target has a parent");
+                    match dunce::canonicalize(parent) {
+                        Ok(directory) if directory.starts_with(snapshot) => return Ok(true),
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(Error::io(parent, error)),
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn save_manifest(&self, root: &Path, manifest: &ViewManifest) -> Result<()> {

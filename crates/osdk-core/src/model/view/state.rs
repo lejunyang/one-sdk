@@ -44,10 +44,13 @@ pub struct ViewEntrySpec {
 impl ViewState {
     pub fn load(dirs: &Dirs) -> Result<Self> {
         let path = state_path(dirs);
-        if !path.is_file() {
-            return Ok(Self::default());
-        }
-        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default())
+            }
+            Err(error) => return Err(Error::io(&path, error)),
+        };
         serde_json::from_slice(&bytes)
             .map_err(|e| Error::other(format!("invalid {VIEW_STATE_FILE}: {e}")))
     }

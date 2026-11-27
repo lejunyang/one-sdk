@@ -10,7 +10,8 @@ use crate::error::{Error, Result};
 use crate::lock::FileLock;
 use crate::project::root_id;
 
-use super::{valid_snapshot_key, validate_model_name, write_json_atomic};
+use super::view::{ViewKind, ViewState, ViewStore};
+use super::{valid_snapshot_key, validate_model_name, write_json_atomic, ModelStore, ProviderId};
 
 const SCHEMA: u32 = 1;
 
@@ -80,6 +81,15 @@ impl ProjectModelRefs {
         !names.is_empty()
     }
 
+    pub fn forget_retired(&mut self, name: &str, snapshot: &str) {
+        if let Some(keys) = self.retired.get_mut(name) {
+            keys.remove(snapshot);
+            if keys.is_empty() {
+                self.retired.remove(name);
+            }
+        }
+    }
+
     fn validate(&self, id: &str) -> Result<()> {
         if self.schema != SCHEMA
             || !self.root.is_absolute()
@@ -124,6 +134,35 @@ impl ModelRefs {
         self.load_path(&self.directory.join(format!("{id}.json")), &id)
     }
 
+    pub fn load_all(&self) -> Result<Vec<ProjectModelRefs>> {
+        let entries = match std::fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::io(&self.directory, error)),
+        };
+        let mut projects = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| Error::io(&self.directory, error))?
+                .path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    Error::other(format!("invalid model reference path: {}", path.display()))
+                })?;
+            let refs = self.load_path(&path, id)?.ok_or_else(|| {
+                Error::other(format!("model reference disappeared: {}", path.display()))
+            })?;
+            projects.push(refs);
+        }
+        projects.sort_by(|left, right| left.root.cmp(&right.root));
+        Ok(projects)
+    }
+
     fn load_path(&self, path: &Path, id: &str) -> Result<Option<ProjectModelRefs>> {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -152,6 +191,145 @@ impl ModelRefs {
         refs.updated_at = crate::source::now_secs();
         write_json_atomic(&self.directory.join(format!("{id}.json")), refs)
     }
+}
+
+#[derive(Debug)]
+pub enum PruneAction {
+    RemoveSnapshot,
+    RemoveModel,
+    Skip {
+        reason: String,
+        owner: Option<PathBuf>,
+    },
+}
+
+impl PruneAction {
+    fn skip(reason: impl Into<String>) -> Self {
+        Self::Skip {
+            reason: reason.into(),
+            owner: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PruneEntry {
+    pub name: String,
+    pub snapshot: String,
+    pub path: PathBuf,
+    pub action: PruneAction,
+}
+
+// Shared caches can live on case-insensitive filesystems. Err on the side of
+// retaining data for aliases of the same on-disk name.
+pub(crate) fn same_model_name(left: &str, right: &str) -> bool {
+    fn component(name: &str) -> &str {
+        match name {
+            "." | ".." => "_",
+            _ => name.trim_end_matches('.'),
+        }
+    }
+    component(left).eq_ignore_ascii_case(component(right))
+}
+
+pub fn plan_prune(
+    store: &ModelStore,
+    project: &ProjectModelRefs,
+    registered: &[ProjectModelRefs],
+    pending_downloads: &BTreeSet<String>,
+) -> Result<Vec<PruneEntry>> {
+    if project.retired.is_empty() {
+        return Ok(Vec::new());
+    }
+    let views = ViewStore::new(store.dirs.clone(), store.cas.clone(), store.link_mode);
+    let state = ViewState::load(&store.dirs)?;
+    let owners = std::iter::once(project)
+        .chain(registered.iter().filter(|other| other.root != project.root));
+    let mut plan = Vec::new();
+    for (name, keys) in &project.retired {
+        let snapshots = store.snapshots(name)?;
+        let current = store.current_snapshot(name)?;
+        let stable = store.model_root(name).join(super::CURRENT_LINK);
+        let stable_target = match dunce::canonicalize(&stable) {
+            Ok(target) => Some(target),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(Error::io(&stable, error)),
+        };
+        let has_view = ViewKind::all().iter().any(|kind| {
+            state
+                .profiles(*kind)
+                .values()
+                .flatten()
+                .any(|spec| same_model_name(&spec.model, name))
+        });
+        let mut candidates = Vec::new();
+        let snapshot_count = snapshots.len();
+        for entry in snapshots
+            .into_iter()
+            .filter(|entry| keys.contains(&entry.snapshot))
+        {
+            let is_current = current.as_deref() == Some(entry.snapshot.as_str());
+            let owner = owners.clone().find(|other| {
+                other.models.iter().any(|(other_name, keys)| {
+                    same_model_name(other_name, name) && keys.contains(&entry.snapshot)
+                })
+            });
+            let action = match (entry.manifest, owner) {
+                (Err(error), _) => PruneAction::skip(format!("unreadable snapshot manifest: {error}")),
+                (Ok(manifest), _) if manifest.schema != 1 || !same_model_name(&manifest.name, name) =>
+                    PruneAction::skip("invalid snapshot manifest identity"),
+                (Ok(manifest), _) if manifest.provider == ProviderId::Local =>
+                    PruneAction::skip("local import"),
+                (Ok(_), Some(owner)) => {
+                    let root = &owner.root;
+                    PruneAction::Skip {
+                        reason: format!("still referenced by {}", root.display()),
+                        owner: Some(root.clone()),
+                    }
+                }
+                (Ok(_), _) if pending_downloads.contains(name) =>
+                    PruneAction::skip("sync changes this model; run prune again after sync"),
+                (Ok(_), _) if is_current && has_view =>
+                    PruneAction::skip(format!("still in a model view; use `osdk model view remove` or `osdk model unuse {name}`")),
+                (Ok(_), _) => {
+                    let path = dunce::canonicalize(&entry.path).map_err(|error| Error::io(&entry.path, error))?;
+                    if !is_current && stable_target.as_ref() == Some(&path) {
+                        PruneAction::skip("still used by the stable current link")
+                    } else if !is_current && has_view && views.links_into_snapshot(&state, name, &path)? {
+                        PruneAction::skip("still linked from a model view; rebuild or remove that view")
+                    } else {
+                        PruneAction::RemoveSnapshot
+                    }
+                }
+            };
+            candidates.push(PruneEntry {
+                name: name.clone(),
+                snapshot: entry.snapshot,
+                path: entry.path,
+                action,
+            });
+        }
+        let remove_tree = candidates.len() == snapshot_count
+            && candidates
+                .iter()
+                .all(|entry| matches!(entry.action, PruneAction::RemoveSnapshot));
+        if let Some(index) = candidates
+            .iter()
+            .position(|entry| current.as_ref() == Some(&entry.snapshot))
+        {
+            let mut entry = candidates.remove(index);
+            if matches!(entry.action, PruneAction::RemoveSnapshot) {
+                entry.action = if remove_tree {
+                    PruneAction::RemoveModel
+                } else {
+                    PruneAction::skip("current snapshot; other snapshots must be kept")
+                };
+            }
+            candidates.push(entry);
+        }
+        plan.extend(candidates);
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]

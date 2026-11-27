@@ -20,6 +20,7 @@ osdk prune [--dry-run]
 | `cache env` | Print all supported downstream native-cache environment mappings |
 | `cache clean` | Remove download copies and uv/pip native caches; preserve CAS and installs |
 | `prune --dry-run` | Currently print a dry-run notice without computing or listing candidate objects |
+| `model sync --prune` | Remove retired project snapshots when no other project or view still uses them, then reclaim unreferenced CAS objects |
 | `prune` | Use SDK-install and model-snapshot manifests as roots and remove unreferenced CAS objects |
 
 `cache clean` preserves CAS, installations, models and remote/source metadata. Within `<cache>/pkg`, only uv/pip are cleaned. GC refuses to continue when it encounters a corrupt

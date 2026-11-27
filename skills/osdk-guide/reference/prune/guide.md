@@ -1,12 +1,12 @@
 # `osdk prune`
 
-回收 osdk CAS store 中不再被任何安装引用的对象。
+以 SDK 安装和模型快照的 manifest 为根，回收 osdk CAS 中没有引用的对象。清理当前项目已弃用的模型快照用 `osdk model sync --prune`。
 
 ```bash
 osdk prune [--dry-run]
 ```
 
-`--dry-run` 只显示可回收对象，不删除。该命令不等同于：
+`--dry-run` 仅输出演练提示。该命令不等同于：
 
 - `osdk cache clean`：清下载归档和下游包缓存。
 - `osdk cache prune`：只清未引用的下游缓存。

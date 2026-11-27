@@ -998,7 +998,7 @@ pub enum ModelCommand {
     Sync {
         /// Limit synchronization to one logical model name.
         name: Option<String>,
-        /// Remove local snapshots the lock no longer declares.
+        /// Remove unused snapshots previously synced by this project.
         ///
         /// Off by default: pruning deletes materialized weights, which are large
         /// and slow to re-fetch, so it is opt-in rather than a side effect of
