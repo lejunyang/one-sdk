@@ -155,8 +155,7 @@ impl Snapshot {
         if let Some(metadata) = current {
             if dirlink::is_link(&before)
                 && dirlink::is_link(&metadata)
-                && before.file_type() == metadata.file_type()
-                && fs::read_link(from)? == fs::read_link(to)?
+                && same_link(from, &before, to, &metadata)?
             {
                 return Ok(());
             }
@@ -241,6 +240,17 @@ fn added_package(name: &str, before: &Path, current: &Path) -> Result<bool> {
             .is_some_and(|meta| meta.is_dir() || dirlink::is_link(&meta)))
 }
 
+fn same_link(from: &Path, before: &Metadata, to: &Path, current: &Metadata) -> Result<bool> {
+    if before.file_type() != current.file_type() {
+        return Ok(false);
+    }
+    #[cfg(windows)]
+    if dirlink::reparse_tag(from)? != dirlink::reparse_tag(to)? {
+        return Ok(false);
+    }
+    Ok(fs::read_link(from)? == fs::read_link(to)?)
+}
+
 fn copy_leaf(from: &Path, to: &Path, metadata: &Metadata) -> Result<()> {
     if dirlink::is_link(metadata) {
         let target = fs::read_link(from)?;
@@ -250,13 +260,18 @@ fn copy_leaf(from: &Path, to: &Path, metadata: &Metadata) -> Result<()> {
         {
             use std::os::windows::fs::{symlink_dir, symlink_file, FileTypeExt};
 
-            let file_type = metadata.file_type();
-            if file_type.is_symlink_dir() {
-                symlink_dir(target, to)?;
-            } else if file_type.is_symlink_file() {
-                symlink_file(target, to)?;
-            } else {
-                dirlink::recreate_junction(&target, to)?;
+            match dirlink::reparse_tag(from)? {
+                dirlink::IO_REPARSE_TAG_MOUNT_POINT => dirlink::recreate_junction(&target, to)?,
+                dirlink::IO_REPARSE_TAG_SYMLINK if metadata.file_type().is_symlink_dir() => {
+                    symlink_dir(target, to)?;
+                }
+                dirlink::IO_REPARSE_TAG_SYMLINK => symlink_file(target, to)?,
+                tag => {
+                    return Err(anyhow!(
+                        "unsupported npm reparse tag {tag:#x} at {}",
+                        from.display()
+                    ))
+                }
             }
         }
     } else if metadata.is_file() {
@@ -336,11 +351,22 @@ mod tests {
         #[cfg(windows)]
         dirlink::create(&project, &link).unwrap();
         let original_link = fs::read_link(&link).unwrap();
+        #[cfg(windows)]
+        assert_eq!(
+            dirlink::reparse_tag(&link).unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
 
         fs::create_dir_all(&tools.bin).unwrap();
         let launcher = tools.bin.join("example.cmd");
         fs::write(&launcher, b"original launcher").unwrap();
         let snapshot = Snapshot::capture(&tools).unwrap();
+        #[cfg(windows)]
+        assert_eq!(
+            dirlink::reparse_tag(&snapshot.backup.path().join("node_modules/@scope/linked"))
+                .unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
         remove_entry(&link, &link.symlink_metadata().unwrap()).unwrap();
         fs::create_dir(&link).unwrap();
         fs::write(link.join("cli.js"), b"registry package").unwrap();
@@ -357,6 +383,11 @@ mod tests {
 
         snapshot.restore(&tools, []).unwrap();
         assert_eq!(fs::read_link(&link).unwrap(), original_link);
+        #[cfg(windows)]
+        assert_eq!(
+            dirlink::reparse_tag(&link).unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
         assert_eq!(fs::read(&launcher).unwrap(), b"original launcher");
         assert_eq!(fs::read(&tarball_file).unwrap(), b"local tarball");
         assert!(!added_bin.exists());
@@ -367,5 +398,44 @@ mod tests {
             fs::canonicalize(&project).unwrap()
         );
         assert_eq!(fs::read(project.join("cli.js")).unwrap(), b"local source");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn node_package_migration_restores_junction_over_symlink_to_same_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("target");
+        let tools = ManagedNodeTools {
+            npm: prefix.join("unused"),
+            bin: prefix.clone(),
+            prefix,
+        };
+        let project = tmp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let modules = modules(&tools.prefix);
+        fs::create_dir_all(&modules).unwrap();
+        let link = modules.join("linked");
+        dirlink::create(&project, &link).unwrap();
+        let original_target = fs::read_link(&link).unwrap();
+        assert_eq!(
+            dirlink::reparse_tag(&link).unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
+        let snapshot = Snapshot::capture(&tools).unwrap();
+
+        fs::remove_dir(&link).unwrap();
+        std::os::windows::fs::symlink_dir(&original_target, &link).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), original_target);
+        assert_eq!(
+            dirlink::reparse_tag(&link).unwrap(),
+            dirlink::IO_REPARSE_TAG_SYMLINK
+        );
+
+        snapshot.restore(&tools, []).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), original_target);
+        assert_eq!(
+            dirlink::reparse_tag(&link).unwrap(),
+            dirlink::IO_REPARSE_TAG_MOUNT_POINT
+        );
     }
 }

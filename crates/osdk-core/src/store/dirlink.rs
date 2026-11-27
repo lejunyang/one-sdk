@@ -39,6 +39,44 @@ pub fn recreate_junction(target: &Path, link: &Path) -> std::io::Result<()> {
     platform::create_junction(target, link)
 }
 
+#[cfg(windows)]
+pub const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+#[cfg(windows)]
+pub const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// Query the Windows reparse tag of the path itself, including dangling links.
+#[cfg(windows)]
+pub fn reparse_tag(path: &Path) -> std::io::Result<u32> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: file owns the open handle and info is writable for its full size.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(info.ReparseTag)
+}
+
 /// Point an existing link at a new target, creating it if absent.
 ///
 /// The link is removed and recreated rather than edited: there is no atomic
@@ -161,7 +199,7 @@ mod platform {
         use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
         use windows_sys::Win32::System::IO::DeviceIoControl;
 
-        const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+        use super::IO_REPARSE_TAG_MOUNT_POINT;
         const GENERIC_WRITE: u32 = 0x4000_0000;
 
         // A junction target must be fully qualified in the NT namespace
