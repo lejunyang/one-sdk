@@ -172,10 +172,18 @@ pub(crate) struct ModelSyncEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub dry_run: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<usize>,
 }
 
 impl ModelSyncEvent {
@@ -188,9 +196,13 @@ impl ModelSyncEvent {
             action: None,
             revision: None,
             path: None,
+            project: None,
+            snapshot: None,
             reason: None,
             dry_run,
             changed: None,
+            removed: None,
+            skipped: None,
         }
     }
 
@@ -214,6 +226,16 @@ impl ModelSyncEvent {
         self
     }
 
+    pub(crate) fn project(mut self, project: &Path) -> Self {
+        self.project = Some(project.display().to_string());
+        self
+    }
+
+    pub(crate) fn snapshot(mut self, snapshot: &str) -> Self {
+        self.snapshot = Some(snapshot.to_string());
+        self
+    }
+
     pub(crate) fn reason(mut self, reason: &str) -> Self {
         self.reason = Some(reason.to_string());
         self
@@ -221,6 +243,12 @@ impl ModelSyncEvent {
 
     pub(crate) fn changed(mut self, changed: usize) -> Self {
         self.changed = Some(changed);
+        self
+    }
+
+    pub(crate) fn prune_counts(mut self, removed: usize, skipped: usize) -> Self {
+        self.removed = Some(removed);
+        self.skipped = Some(skipped);
         self
     }
 }

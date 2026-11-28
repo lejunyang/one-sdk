@@ -3173,6 +3173,7 @@ sha256 = "{sha256}"
                 etag: None,
             }],
             created_at: 0,
+            prune_eligible: false,
         }
     }
 

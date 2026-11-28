@@ -10,6 +10,7 @@ The default layout is below. The data and cache roots are overridable, while sto
 - `<installs>/<dynamic-tool>/<version>/b3-v2-<digest>`: fingerprinted roots for osdk-owned isolated dynamic tools.
 - `<installs>/npm-global/<package>/<version>/b3-v2-<digest>`: fingerprinted roots for `use --global npm:<package>`. Older version-only roots containing `.osdk-tool.json` are detected as legacy state but never reused or executed.
 - `<data>/models/<name>/snapshots/<snapshot>`: materialized model snapshots.
+- `<data>/model-refs/<root-id>.json`: exact model snapshot references by project.
 - `<data>/store/<aa>/<bb>/<blake3>`: CAS shared by SDK and model files.
 - `<data>/shims`: command shims.
 - `<cache>/downloads`: downloaded tool archives and checksum/source/attestation sidecars.
@@ -83,6 +84,19 @@ Explicit `cache clean` keeps its existing download + uv/pip scope. Its download 
 [`Cas::gc_roots`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/store/mod.rs#L207) is a mark-and-sweep pass. It recursively scans every `.osdk-manifest.json` under installs and models, collects hashes into a live set, then walks the store and removes regular files outside that set. A corrupt manifest fails the entire GC closed before deletion. Directory traversal errors are skipped. Files whose names end exactly in `.tmp` are opportunistically deleted before liveness checking; other temporary forms such as `.tmp-<pid>` receive no special protection and are handled as ordinary unreferenced files.
 
 `osdk prune`, post-SDK-uninstall cleanup, and post-model-remove cleanup call this function directly. Uninstall removes the install tree before GC, and model removal does the same for its model tree. The current implementation has **no claim/lease mechanism and acquires no global GC lock**. Although the module comment in [`lock.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) mentions guarding store GC, no GC call site actually uses `FileLock`. It is therefore incorrect to claim that claim GC is globally serialized, or that GC is mutually exclusive with installation/publication of a different version or model.
+
+Model sync registration and snapshot removal share `<data>/model-refs/registry.lock`.
+Project pruning considers only that project's retired keys. Fresh snapshot
+manifests record `prune_eligible`. For older snapshots the field defaults to false.
+Registering or repairing an older snapshot leaves this protection in place.
+An unreadable registration or a lock that cleanup cannot read stops pruning.
+Removing the current snapshot requires all snapshots
+under the name to be eligible and no view membership. Retained snapshot manifests
+continue to protect CAS objects. A missing or moved project directory does not
+expire its registration.
+Unuse with `--keep-snapshot` atomically records the kept snapshot keys in
+`.osdk-kept.json` under the model directory. Explicit `model remove` clears
+the record when it removes the directory.
 
 This leaves a real race window: another process can create a reference between GC's live-set scan and deletion, and an installer can create CAS objects before writing its manifest, allowing concurrent GC to regard those objects as unreachable. Per-version and per-snapshot locks do not close that global window. Production guidance should treat concurrent `prune`/removal and installation as uncoordinated operations.
 

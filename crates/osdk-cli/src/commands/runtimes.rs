@@ -1,6 +1,12 @@
 //! `runtimes` command handlers (split from commands.rs).
 
 use super::*;
+use crate::cli::ModelViewCommand;
+use osdk_core::model::refs::{
+    plan_prune, same_model_name, ModelRefs, ProjectModelRefs, PruneAction, PruneEntry, PruneScope,
+};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 pub fn node(app: &App, command: NodeCommand) -> Result<()> {
     match command {
@@ -418,7 +424,10 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
                 views,
                 endpoint,
             };
-            let path = crate::config_edit::set_project_model(&name, &declaration)?;
+            let cwd = std::env::current_dir()?;
+            let path = model_config_path(app, &cwd);
+            crate::config_edit::set_project_model(&path, &name, &declaration)?;
+            app.ctx.config.project_config_path = Some(path.clone());
             // The file this command just wrote is itself a reason to require
             // trust (the source/endpoint keys redirect where bytes come from),
             // so re-pin it the way `osdk use` does: otherwise the next command
@@ -443,6 +452,7 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             map,
             json,
         } => {
+            let _guard = ModelRefs::new(&app.ctx.dirs).lock()?;
             if app.ctx.config.models.contains_key(&name) {
                 anyhow::bail!(
                     "model `{name}` is declared by the project; use another name or `osdk model unuse {name}` before importing local bytes"
@@ -515,41 +525,7 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             name,
             keep_snapshot,
         } => {
-            osdk_core::model::validate_model_name(&name)?;
-            let (config_path, declaration_removed) =
-                crate::config_edit::remove_project_model(&name)?;
-            let cwd = std::env::current_dir()?;
-            let lock_path = project_lock_path(app, &cwd);
-            let lock_removed = crate::lockfile::remove_model(&lock_path, &name)?;
-            let views_removed = crate::model_view::remove_model_from_all_views(app, &name)?;
-            let snapshot_removed = if keep_snapshot {
-                false
-            } else {
-                store.remove(&name)?
-            };
-            if snapshot_removed {
-                let models = app.ctx.dirs.models();
-                let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
-                println!(
-                    "removed local snapshot {name}; pruned {objects} object(s), {} freed",
-                    human_bytes(bytes)
-                );
-            }
-            if declaration_removed {
-                println!(
-                    "removed model declaration {name} from {}",
-                    config_path.display()
-                );
-            }
-            if lock_removed {
-                println!("removed model lock {name} from {}", lock_path.display());
-            }
-            if views_removed {
-                println!("removed {name} from model views");
-            }
-            if !declaration_removed && !lock_removed && !views_removed && !snapshot_removed {
-                println!("model {name} was not declared, locked, viewed, or materialized");
-            }
+            model_unuse(app, &store, &name, keep_snapshot)?;
         }
         ModelCommand::List { json } => {
             let installed = store.list()?;
@@ -652,8 +628,22 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             jsonl,
         } => model_sync(app, &store, name.as_deref(), prune, dry_run, jsonl).await?,
         ModelCommand::Remove { name } => {
+            osdk_core::model::validate_model_name(&name)?;
+            let registry = ModelRefs::new(&app.ctx.dirs);
+            let guard = registry.lock()?;
+            for project in registry
+                .load_all()?
+                .iter()
+                .filter(|project| project.references_model(&name))
+            {
+                eprintln!(
+                    "warning: model {name} is registered by project {}",
+                    project.root.display()
+                );
+            }
             let views_removed = crate::model_view::remove_model_from_all_views(app, &name)?;
             let removed = store.remove(&name)?;
+            drop(guard);
             if removed {
                 let models = app.ctx.dirs.models();
                 let (pruned, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
@@ -670,7 +660,19 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             }
         }
         ModelCommand::Env { command } => model_env(app, command)?,
-        ModelCommand::View { command } => crate::model_view::model_view(app, command)?,
+        ModelCommand::View { command } => {
+            let _guard = if matches!(
+                command,
+                ModelViewCommand::Add { .. }
+                    | ModelViewCommand::Remove { .. }
+                    | ModelViewCommand::Rebuild { .. }
+            ) {
+                Some(ModelRefs::new(&app.ctx.dirs).lock()?)
+            } else {
+                None
+            };
+            crate::model_view::model_view(app, command)?;
+        }
     }
     Ok(())
 }
@@ -757,25 +759,167 @@ pub(crate) fn persist_model_pull(
     app: &App,
     name: &str,
     installed: &osdk_core::model::InstalledModel,
-    quiet: bool,
-) -> Result<std::path::PathBuf> {
+) -> Result<(
+    PathBuf,
+    std::collections::BTreeMap<String, crate::lockfile::LockedModelView>,
+)> {
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     crate::lockfile::merge_model(&path, &installed.manifest)?;
-    if let Some(declaration) = applicable_model_declaration(app, name) {
+    let views = if let Some(declaration) = applicable_model_declaration(app, name) {
         crate::lockfile::set_model_selection(
             &path,
             name,
             declaration.include.clone(),
             declaration.exclude.clone(),
         )?;
-    }
-    if let Some(declaration) = applicable_model_declaration(app, name) {
         let views = crate::lockfile::locked_views_from_declaration(&declaration.views);
         crate::lockfile::set_model_views(&path, name, views.clone())?;
-        crate::model_view::reconcile_declared_views(app, name, &views, quiet)?;
+        views
+    } else {
+        Default::default()
+    };
+    Ok((path, views))
+}
+
+fn model_project_root(app: &App, lock: &Path) -> Result<PathBuf> {
+    if let Some(project) = &app.ctx.config.project {
+        return Ok(project.root.clone());
     }
-    Ok(path)
+    let directory = lock.parent().expect("absolute project lock has a parent");
+    dunce::canonicalize(directory).with_context(|| format!("resolving {}", directory.display()))
+}
+
+fn model_config_path(app: &App, cwd: &Path) -> PathBuf {
+    app.ctx
+        .config
+        .project_config_path
+        .clone()
+        .unwrap_or_else(|| cwd.join("osdk.toml"))
+}
+
+fn model_unuse(
+    app: &App,
+    store: &osdk_core::model::ModelStore,
+    name: &str,
+    keep_snapshot: bool,
+) -> Result<()> {
+    osdk_core::model::validate_model_name(name)?;
+    let registry = ModelRefs::new(&app.ctx.dirs);
+    let guard = registry.lock()?;
+    let cwd = std::env::current_dir()?;
+    let config_path = model_config_path(app, &cwd);
+    let lock_path = project_lock_path(app, &cwd);
+    let root = model_project_root(app, &lock_path)?;
+    let mut refs = registry
+        .load(&root)?
+        .unwrap_or_else(|| ProjectModelRefs::new(root, lock_path.clone()));
+    refs.lock = lock_path.clone();
+    let registered = registry.load_all()?;
+    let other_projects: Vec<_> = registered
+        .iter()
+        .filter(|project| project.root != refs.root && project.references_model(name))
+        .collect();
+    refs.retire_model(name);
+    // A pre-registry lock can still identify its materialized bytes for this
+    // explicit command. An unrelated snapshot with the same name is not owned.
+    if let Some((_, entry)) = crate::lockfile::locked_models(&lock_path)?
+        .into_iter()
+        .find(|(locked_name, _)| locked_name == name)
+    {
+        for snapshot in store.snapshots(name)? {
+            if snapshot
+                .manifest
+                .as_ref()
+                .is_ok_and(|manifest| verify_restored_against_lock(name, &entry, manifest).is_ok())
+            {
+                refs.retire_locked_snapshot(name, &snapshot.snapshot);
+            }
+        }
+    }
+    let plan = if keep_snapshot {
+        // Commit the user's retention choice before releasing any references.
+        refs.keep_retired_snapshots(store, name)?;
+        Vec::new()
+    } else {
+        plan_model_prune(
+            store,
+            &refs,
+            &registered,
+            PruneScope::Unuse {
+                name,
+                detach_views: other_projects.is_empty(),
+            },
+        )?
+    };
+    let detach_views = other_projects.is_empty()
+        && if keep_snapshot {
+            store
+                .current_snapshot(name)?
+                .is_some_and(|key| refs.owns_retired_snapshot(name, &key))
+        } else {
+            plan.iter()
+                .any(|entry| matches!(entry.action, PruneAction::RemoveModel))
+        };
+    let declaration_removed = crate::config_edit::remove_project_model(&config_path, name)?;
+    let lock_removed = crate::lockfile::remove_model(&lock_path, name)?;
+    if !plan.is_empty() {
+        registry.put_project(&mut refs)?;
+    }
+    for project in &other_projects {
+        println!(
+            "keeping snapshots of {name} referenced by project {}",
+            project.root.display()
+        );
+    }
+    let has_other_projects = !other_projects.is_empty();
+    let views_removed = detach_views && crate::model_view::remove_model_from_all_views(app, name)?;
+    let mut snapshots_removed = 0;
+    for entry in plan {
+        match entry.action {
+            PruneAction::Skip {
+                ref reason,
+                ref owner,
+            } => {
+                if !other_projects
+                    .iter()
+                    .any(|project| owner.as_ref() == Some(&project.root))
+                {
+                    println!("kept {}: {reason}", entry.path.display());
+                }
+            }
+            _ => snapshots_removed += usize::from(entry.remove(store)?),
+        }
+    }
+    let references_removed = refs.forget_model(name);
+    if references_removed {
+        registry.put_project(&mut refs)?;
+    }
+    drop(guard);
+    if snapshots_removed > 0 {
+        let models = app.ctx.dirs.models();
+        let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+        println!(
+            "removed {snapshots_removed} snapshot(s) of {name}; pruned {objects} object(s), {} freed",
+            human_bytes(bytes)
+        );
+    }
+    if declaration_removed {
+        println!(
+            "removed model declaration {name} from {}",
+            config_path.display()
+        );
+    }
+    if lock_removed {
+        println!("removed model lock {name} from {}", lock_path.display());
+    }
+    if views_removed {
+        println!("removed {name} from model views");
+    }
+    if !declaration_removed && !lock_removed && !references_removed && !has_other_projects {
+        println!("model {name} has no references in this project");
+    }
+    Ok(())
 }
 
 /// Whether a `[models.<name>]` declaration is already faithfully described by the
@@ -852,8 +996,30 @@ pub(crate) async fn model_sync(
     jsonl: bool,
 ) -> Result<()> {
     let emitter = crate::model_output::ModelSyncEmitter::new(jsonl);
+    let registry = ModelRefs::new(&app.ctx.dirs);
+    let guard = if dry_run {
+        None
+    } else {
+        Some(registry.lock()?)
+    };
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
+    let mut first_registration = false;
+    let mut refs = if dry_run && !prune {
+        None
+    } else {
+        let root = model_project_root(app, &path)?;
+        let existing = registry.load(&root)?;
+        first_registration = existing.is_none();
+        let mut refs = existing.unwrap_or_else(|| ProjectModelRefs::new(root, path.clone()));
+        if refs.lock != path {
+            refs.lock = path.clone();
+            if !dry_run {
+                registry.put_project(&mut refs)?;
+            }
+        }
+        Some(refs)
+    };
     let mut locked = crate::lockfile::locked_models(&path)?;
     if let Some(target) = target {
         locked.retain(|(name, _)| name == target);
@@ -876,6 +1042,14 @@ pub(crate) async fn model_sync(
     }
     let mut restored = 0usize;
     let mut bootstrapped = std::collections::BTreeSet::new();
+    let mut pending_downloads = BTreeSet::new();
+    let mut pending_views = Vec::new();
+    let render_views = |pending: Vec<(String, _)>| -> Result<()> {
+        for (name, views) in pending {
+            crate::model_view::reconcile_declared_views(app, &name, &views, emitter.jsonl())?;
+        }
+        Ok(())
+    };
 
     // A declared model is (re-)pulled when the lock does not describe it, or
     // describes a different identity than the declaration now asks for. This is
@@ -908,6 +1082,7 @@ pub(crate) async fn model_sync(
             ModelLockState::Missing => "project declaration",
             ModelLockState::Changed => "declaration changed",
         };
+        pending_downloads.insert(name.clone());
         if dry_run {
             let verb = if matches!(change, ModelLockState::Changed) {
                 "would re-lock"
@@ -982,7 +1157,13 @@ pub(crate) async fn model_sync(
                 .unwrap_or(ModelLockState::Missing);
             match result {
                 Ok(installed) => {
-                    let lock_path = persist_model_pull(app, &name, &installed, emitter.jsonl())?;
+                    let (lock_path, views) = persist_model_pull(app, &name, &installed)?;
+                    if let Some(refs) = &mut refs {
+                        if refs.record(&name, installed.snapshot_key()) {
+                            registry.put_project(refs)?;
+                        }
+                    }
+                    pending_views.push((name.clone(), views));
                     let verb = if matches!(change, ModelLockState::Changed) {
                         "re-locked declared model"
                     } else {
@@ -1019,6 +1200,7 @@ pub(crate) async fn model_sync(
             }
         }
         if let Some(error) = first_error {
+            render_views(pending_views)?;
             return Err(error);
         }
     }
@@ -1027,21 +1209,6 @@ pub(crate) async fn model_sync(
         if let Some(target) = target {
             locked.retain(|(name, _)| name == target);
         }
-    }
-    if locked.is_empty() && configured.is_empty() && !prune {
-        emitter.emit(
-            &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
-                .action("sync")
-                .path(&path)
-                .changed(0),
-            || {
-                println!(
-                    "no models declared in {} or project configuration",
-                    path.display()
-                )
-            },
-        )?;
-        return Ok(());
     }
     // First decide, serially, which locked models actually need fetching: an
     // intact snapshot is left alone (and only its views reconciled), a dry run
@@ -1054,13 +1221,18 @@ pub(crate) async fn model_sync(
         }
         // Verify before deciding, so an intact snapshot is left alone and a
         // corrupted one is not mistaken for a present one.
-        let present = store
-            .verify(name)
-            .map(|manifest| manifest.revision == entry.revision)
-            .unwrap_or(false);
-        if present {
+        let present = store.current(name).ok().filter(|installed| {
+            verify_restored_against_lock(name, entry, &installed.manifest).is_ok()
+                && installed.verify().is_ok()
+        });
+        if let Some(installed) = present {
+            if let Some(refs) = &mut refs {
+                if refs.record(name, installed.snapshot_key()) && !dry_run {
+                    registry.put_project(refs)?;
+                }
+            }
             emitter.emit(
-                &crate::model_output::ModelSyncEvent::new("model", "unchanged", false)
+                &crate::model_output::ModelSyncEvent::new("model", "unchanged", dry_run)
                     .model(name)
                     .action("verify")
                     .revision(&entry.revision),
@@ -1069,9 +1241,12 @@ pub(crate) async fn model_sync(
             // Views are part of what the lock declares; reconciling here makes
             // `model sync` also (re)build them on a machine that never ran
             // `model view add`.
-            crate::model_view::reconcile_declared_views(app, name, &entry.views, emitter.jsonl())?;
+            if !dry_run {
+                pending_views.push((name.clone(), entry.views.clone()));
+            }
             continue;
         }
+        pending_downloads.insert(name.clone());
         if dry_run {
             emitter.emit(
                 &crate::model_output::ModelSyncEvent::new("model", "planned", true)
@@ -1168,7 +1343,12 @@ pub(crate) async fn model_sync(
                 }
                 continue;
             }
-            crate::model_view::reconcile_declared_views(app, &name, &entry.views, emitter.jsonl())?;
+            if let Some(refs) = &mut refs {
+                if refs.record(&name, installed.snapshot_key()) {
+                    registry.put_project(refs)?;
+                }
+            }
+            pending_views.push((name.clone(), entry.views.clone()));
             emitter.emit(
                 &crate::model_output::ModelSyncEvent::new("model", "completed", false)
                     .model(&name)
@@ -1186,65 +1366,177 @@ pub(crate) async fn model_sync(
             restored += 1;
         }
         if let Some(error) = first_error {
+            render_views(pending_views)?;
             return Err(error);
         }
     }
 
-    if prune && target.is_none() {
-        let declared: std::collections::BTreeSet<_> = if locked.is_empty() {
-            configured.iter().map(|(name, _)| name.clone()).collect()
-        } else {
-            locked.iter().map(|(name, _)| name.clone()).collect()
-        };
-        let mut pruned = 0usize;
-        for installed in store.list()? {
-            let name = installed.manifest.name.clone();
-            if declared.contains(&name) {
-                continue;
-            }
-            if dry_run {
-                emitter.emit(
-                    &crate::model_output::ModelSyncEvent::new("model", "planned", true)
-                        .model(&name)
-                        .action("remove")
-                        .reason("not declared in the lock"),
-                    || println!("would remove {name} (not declared in the lock)"),
-                )?;
-            } else if store.remove(&name)? {
-                emitter.emit(
-                    &crate::model_output::ModelSyncEvent::new("model", "completed", false)
-                        .model(&name)
-                        .action("remove")
-                        .reason("not declared in the lock"),
-                    || println!("removed {name} (not declared in the lock)"),
-                )?;
-            }
-            pruned += 1;
-        }
-        if pruned > 0 && !dry_run {
-            let models = app.ctx.dirs.models();
-            let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
-            emitter.emit(
-                &crate::model_output::ModelSyncEvent::new("gc", "completed", false)
-                    .action("prune-cas")
-                    .changed(objects)
-                    .reason(&format!("{} freed", human_bytes(bytes))),
-                || println!("pruned {} object(s), {} freed", objects, human_bytes(bytes)),
-            )?;
+    if let Some(refs) = &mut refs {
+        let locked_names = locked
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<BTreeSet<_>>();
+        if refs.retire_unlocked(&locked_names, target) && !dry_run {
+            registry.put_project(refs)?;
         }
     }
+    if locked.is_empty() && configured.is_empty() && !prune {
+        return emitter.emit(
+            &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
+                .action("sync")
+                .path(&path)
+                .changed(0),
+            || {
+                println!(
+                    "no models declared in {} or project configuration",
+                    path.display()
+                )
+            },
+        );
+    }
 
-    emitter.emit(
-        &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
-            .action("sync")
-            .changed(restored),
-        || {
-            if restored == 0 && !dry_run {
-                println!("all declared models are present");
+    let mut pruned = 0;
+    let mut retained = 0;
+    if prune && target.is_none() {
+        let refs = refs.as_mut().expect("prune loads project model references");
+        let registered = registry.load_all()?;
+        if first_registration {
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("prune", "unchanged", dry_run)
+                    .project(&refs.root)
+                    .reason("no prior snapshot registrations for this project"),
+                || {
+                    println!(
+                        "no prior snapshot registrations for {}; existing snapshots kept",
+                        refs.root.display()
+                    )
+                },
+            )?;
+        }
+        // View reconciliation may move an existing symlink. Plan against the
+        // same pre-reconciliation view state that dry-run reads.
+        let plan = plan_model_prune(
+            store,
+            refs,
+            &registered,
+            PruneScope::Sync(&pending_downloads),
+        )?;
+        if !dry_run {
+            render_views(std::mem::take(&mut pending_views))?;
+        }
+        for entry in plan {
+            let status = match &entry.action {
+                PruneAction::Skip { reason, owner } => {
+                    let project = owner.as_deref().unwrap_or(&refs.root);
+                    emitter.emit(
+                        &crate::model_output::ModelSyncEvent::new("model", "skipped", dry_run)
+                            .model(&entry.name)
+                            .action("remove")
+                            .path(&entry.path)
+                            .project(project)
+                            .snapshot(&entry.snapshot)
+                            .reason(reason),
+                        || {
+                            println!(
+                                "kept {} for {}: {reason}",
+                                entry.path.display(),
+                                project.display()
+                            )
+                        },
+                    )?;
+                    retained += 1;
+                    continue;
+                }
+                _ if dry_run => "planned",
+                _ => {
+                    if !entry.remove(store)? {
+                        continue;
+                    }
+                    "completed"
+                }
+            };
+            if !dry_run {
+                refs.forget_retired(&entry.name, &entry.snapshot);
+                registry.put_project(refs)?;
             }
-        },
-    )?;
+            let verb = if dry_run { "would remove" } else { "removed" };
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("model", status, dry_run)
+                    .model(&entry.name)
+                    .action("remove")
+                    .path(&entry.path)
+                    .project(&refs.root)
+                    .snapshot(&entry.snapshot)
+                    .reason("no longer referenced by this project"),
+                || {
+                    println!(
+                        "{verb} {} from {} (no longer referenced by this project)",
+                        entry.path.display(),
+                        refs.root.display()
+                    )
+                },
+            )?;
+            pruned += 1;
+        }
+    }
+    render_views(pending_views)?;
+    drop(guard);
+    if pruned > 0 && !dry_run {
+        let models = app.ctx.dirs.models();
+        let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+        emitter.emit(
+            &crate::model_output::ModelSyncEvent::new("gc", "completed", false)
+                .action("prune-cas")
+                .changed(objects)
+                .reason(&format!("{} freed", human_bytes(bytes))),
+            || println!("pruned {} object(s), {} freed", objects, human_bytes(bytes)),
+        )?;
+    }
+
+    let mut summary = crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
+        .action("sync")
+        .changed(restored);
+    if prune {
+        summary = summary.prune_counts(pruned, retained);
+    }
+    emitter.emit(&summary, || {
+        if prune {
+            let verb = if dry_run { "would remove" } else { "removed" };
+            println!("{verb} {pruned} snapshot(s); kept {retained} candidate(s)");
+        }
+        if restored == 0 && !dry_run {
+            println!("all declared models are present");
+        }
+    })?;
     Ok(())
+}
+
+fn plan_model_prune(
+    store: &osdk_core::model::ModelStore,
+    project: &ProjectModelRefs,
+    registered: &[ProjectModelRefs],
+    scope: PruneScope<'_>,
+) -> Result<Vec<PruneEntry>> {
+    let mut locks = BTreeMap::new();
+    Ok(plan_prune(
+        store,
+        project,
+        registered,
+        scope,
+        |other, name, manifest| {
+            let models = match locks.entry(other.lock.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(
+                    crate::lockfile::locked_models(&other.lock)
+                        .map_err(|error| osdk_core::error::Error::other(format!("{error:#}")))?,
+                ),
+            };
+            Ok(models.iter().any(|(locked_name, model)| {
+                same_model_name(name, locked_name)
+                    && verify_restored_against_lock(name, model, manifest).is_ok()
+            }))
+        },
+    )?)
 }
 
 /// Require a restored snapshot to match what the lock committed.
@@ -1262,6 +1554,16 @@ pub(crate) fn verify_restored_against_lock(
             manifest.revision,
             entry.revision
         );
+    }
+    if manifest.provider != entry.provider
+        || manifest.repository != entry.repository
+        || manifest.variant != entry.variant
+        || manifest.kind != entry.kind
+        || manifest.family != entry.family
+        || manifest.derived_from != entry.derived_from
+        || manifest.files.len() != entry.files.len()
+    {
+        anyhow::bail!("model {name} snapshot identity or file selection does not match the lock");
     }
     for locked in &entry.files {
         let actual = manifest

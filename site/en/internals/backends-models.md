@@ -168,7 +168,25 @@ Local imports use [`model/local.rs`](https://github.com/lejunyang/one-sdk/blob/m
 
 A local snapshot manifest never persists the input absolute path. Both lock writing and lock replay reject `provider=local`, because another machine cannot reproduce an arbitrary local path. Before publishing, the CLI rejects same-name project declarations/locks and an `hf-cache` view. It may render a ComfyUI view, and a later import re-renders any persisted view membership. `--json` reuses schema-1 `ModelShowOutput` without human text on stdout.
 
-`model list/show/path/verify/remove` operate on the current logical name. Verification checks both the CAS BLAKE3 hash and SHA-256. Removal deletes all snapshots under that logical name, then runs CAS GC with SDK installs and models as roots. Offline sync still requires cached provider metadata and every selected download, after which it can rematerialize a removed snapshot.
+`model list/show/path/verify/remove` operate on the current logical name. Verification checks both the CAS BLAKE3 hash and SHA-256. Removal deletes all snapshots under that logical name, then runs CAS GC with SDK installs and models as roots. Offline sync can replay a recorded snapshot from its manifests and verified CAS objects. With no matching snapshot record, replay requires cached provider metadata and the selected downloads.
+
+Successful sync registers the exact materialized snapshot key in
+`<data>/model-refs/<root-id>.json`, using the canonical project root and selected
+lock path. The same rule applies to new pulls, lock replays and verified local
+reuse. A single-name sync updates only that name. If a locked model fails to
+restore, its prior registration remains. Superseded keys are tracked separately
+from active references so a later prune can still find them.
+Cleanup also reads the lock paths of other registered projects and matches
+candidates by name, snapshot identity, file paths, sizes, and SHA-256 digests.
+This protects references introduced by a branch switch before the next sync.
+
+`model unuse` releases the selected project's registration for the name.
+For legacy data, an explicit unuse can also match materialized snapshots
+against the lock's identity and file list. Default cleanup checks other
+projects' references. `--keep-snapshot` records the exact keys to retain before
+releasing the registration. Later cleanups from any project skip those keys.
+Explicit `model remove` reports registrations before deletion and retains them
+for subsequent synchronization.
 
 The machine protocol is centralized in [`model_output.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/model_output.rs) and is independent of snapshot, lock, and view-state disk schemas. `import --json`, `list/show/path/verify`, and read-only view commands emit one schema-1 JSON document, while `sync --jsonl` uses one emitter for line-delimited events; human mode keeps its existing messages. Every machine stdout write passes through the same serializer. View reconciliation still runs in JSONL mode but suppresses its human report; the top level continues to write errors to stderr and exit non-zero. Absolute paths in the protocol are machine locations and retain native separators, while manifest-relative paths remain `/`-normalized cross-platform data.
 

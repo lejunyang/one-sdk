@@ -747,6 +747,7 @@ osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # 单个模型
 osdk model sync              # 整个项目
+osdk model sync --prune      # 清理本项目已弃用的快照
 osdk model show qwen25 --json
 osdk model sync --dry-run --jsonl
 ```
@@ -764,9 +765,11 @@ osdk model view path comfyui
 Civitai 的 `civitai.com` 与 `civitai.red` 都是内置官方来源。auto 模式会针对请求的精确版本探测两者；`.com` 保留兼容旧配置的 `official` source ID，`.red` 使用 `official-red`，也可显式 pin 或通过 `--source` 选择。
 
 `model sync` 会在 source、variant、语义元数据、include 或 exclude 变化时重新解析，并复现不可变 lock。
+`model sync --prune` 会保留其他项目仍在用的快照、引入项目跟踪前物化的快照和本地导入。
 `model import NAME PATH` 把本地文件或目录内容寻址写入 CAS，但不创建项目声明或 lock；本地导入只在
-当前机器可用，需要从原始字节重新导入。`model unuse NAME` 会移除项目声明、lock、视图和默认的
-本地字节；`--keep-snapshot` 可保留字节。`model remove NAME` 只删除本地字节和视图。
+当前机器可用，需要从原始字节重新导入。`model unuse NAME` 撤销本项目依赖并清理本项目不再使用的快照，
+保留其他项目仍在用的快照。用 `--keep-snapshot` 保留快照，后续项目清理也会跳过它们。`model remove NAME` 会先报告仍在引用的项目，
+随后按名称删除所有本地快照和视图。
 
 指南：[模型快照](site/guide/ai/models.md)
 ## 场景：给 AI 编码 Agent 装 skill

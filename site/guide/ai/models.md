@@ -27,8 +27,8 @@ osdk model view doctor <comfyui|hf-cache> [--profile P] [--json]
 ```
 
 `use` 受管写入项目声明，默认不下载；`--sync` 立即物化该模型。`sync NAME` 只处理一个
-模型，无参数时处理整个项目。`unuse` 撤销声明、lock 和视图并默认删除本地快照；
-`--keep-snapshot` 保留本地字节。`remove` 只删除本地快照和视图，保留项目声明与 lock。
+模型，无参数时处理整个项目。`unuse` 撤销本项目依赖，保留其他项目仍在用的快照。
+`--keep-snapshot` 保留本地快照，后续项目清理也会跳过它们。`remove` 按名称删除本机快照和视图，保留项目声明与 lock。
 
 ## 机器可读输出
 
@@ -40,7 +40,7 @@ revision、endpoint、variant、文件路径/大小/摘要、创建时间以及�
 
 `model sync --jsonl` 每行输出一个独立的 `schema_version: 1` 事件。固定字段为
 `event`、`status` 与 `dry_run`；事件按需增加 `model`、`action`、`revision`、`path`、
-`reason`、`changed`。`--dry-run --jsonl` 同样只输出事件，不混入人类文本。
+`reason`、`changed`。清理事件还可包含 `project`、`snapshot`，汇总可包含 `removed`、`skipped`。`--dry-run --jsonl` 同样只输出事件，不混入人类文本。
 
 机器模式中 stdout 只承载 JSON/JSONL；警告和错误写 stderr，失败保持非零退出码。CLI
 协议 schema 与 `.osdk-model.json`、`osdk.lock`、`.osdk-views.json` 的磁盘 schema 相互独立。
@@ -168,7 +168,7 @@ osdk source unpin hf             # 取消固定，恢复自动选择
 osdk model sync qwen25          # 只同步一个模型
 osdk model sync                 # 同步整个项目
 osdk model sync --dry-run       # 只报告会做什么
-osdk model sync --prune         # 删除 lock 不再声明的本地快照
+osdk model sync --prune         # 清理本项目已弃用的快照
 ```
 
 还原时按 lock 中的不可变 revision 和文件 SHA-256 重建，而不是重新解释浮动分支。lock 同时
@@ -180,13 +180,27 @@ osdk model sync --prune         # 删除 lock 不再声明的本地快照
 排名；`--source` 同样生效。lock 里记录的官方端点不会被强制使用，因此镜像与 `source pin`
 照常起作用；而只存在于私有 endpoint 的模型，即使声明里已删掉 `endpoint`，也能按 lock 还原。
 
-`--prune` 仅适用于全项目同步，且默认关闭，因为它会删除重新获取代价较高的本地权重。
+`--prune` 仅适用于全项目同步。它清理本项目曾经同步、当前锁已不再引用的快照。
+其他项目已登记或当前锁引用的快照、本地导入、视图仍在使用的快照和用 `--keep-snapshot` 保留的快照都会跳过。
+已登记的项目切换分支后，新锁里的引用立即受到保护。首次同步会为当前锁登记已校验的快照。
+引入项目清理前物化的快照即使补登记也会保留。只从配置移除声明时，锁仍可继续引用快照。
+如果同步需要拉取或还原某个模型，该名称的清理留到下一次 `--prune`，这样预演无需下载即可列出本次可删的快照。
+
+用 `osdk model sync --prune --dry-run --jsonl` 查看项目根、模型名、快照键和路径。
+`planned` 是预演将删除的快照，`completed` 是执行已删除的快照，
+`skipped` 表示保留并说明原因。有其他项目引用时，`project` 指向持有引用的项目。
+汇总的 `removed` 和 `skipped` 分别计数，预演的 `removed` 是预计删除数。预演只读。
 
 ### `remove` 与 `unuse`
 
-`osdk model remove <name>` 只删除本地快照和消费者视图，保留项目声明与 lock；之后
-`model sync <name>` 可恢复它。要彻底撤销项目依赖，使用 `model unuse <name>`：它会移除
-项目声明、lock、视图并默认删除快照，`--keep-snapshot` 可保留本机字节。
+`osdk model unuse <name>` 撤销当前项目的声明、lock 条目和引用登记。它清理本项目
+拥有且无人继续引用的快照。在其他项目仍引用同名模型时，保留共享快照和视图并报告项目路径。
+`--keep-snapshot` 解除引用并保留对应的快照。即使其他项目后来全部解除引用，项目清理也会保留这些快照。
+要手动删除它们，使用 `model remove`。
+
+`osdk model remove <name>` 先报告仍登记该模型的项目，再删除本机同名的全部快照和视图。
+适用于显式删除本地导入，或需要重新物化远程模型。项目声明、lock、引用登记均保留，
+远程模型可用 `model sync <name>` 恢复。
 ## Endpoint 与凭据
 
 解析优先级：

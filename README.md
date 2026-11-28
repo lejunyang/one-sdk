@@ -845,6 +845,7 @@ osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # one model
 osdk model sync              # whole project
+osdk model sync --prune      # reclaim this project’s retired snapshots
 osdk model show qwen25 --json
 osdk model sync --dry-run --jsonl
 ```
@@ -862,10 +863,14 @@ osdk model view path comfyui
 Civitai's `civitai.com` and `civitai.red` front doors are both built-in official sources. Auto mode probes both for the exact requested version, keeps the existing `official` source id for `.com`, and exposes `official-red` for an explicit pin or `--source` override.
 
 `model sync` re-resolves changes to source, variant, semantic metadata, include, or exclude, then replays immutable
-lock entries. `model import NAME PATH` snapshots a local file or directory into CAS without creating a
+lock entries. `model sync --prune` preserves snapshots still used by other projects, snapshots
+from before project tracking, and local imports.
+`model import NAME PATH` snapshots a local file or directory into CAS without creating a
 project declaration or lock entry; local imports are machine-specific and must be re-imported from their
-original bytes. `model unuse NAME` removes project intent, lock state, views, and normally local bytes;
-`--keep-snapshot` retains bytes. `model remove NAME` removes only local bytes and views.
+original bytes. `model unuse NAME` removes this project's model requirement and cleans up its unused
+snapshots. Use `--keep-snapshot` to retain those snapshots through future project cleanups.
+`model remove NAME` reports projects still using the model and deletes all local snapshots and
+views for the name.
 
 Guide: [Model snapshots](site/en/guide/ai/models.md)
 ## Scenario: install a skill for an AI coding agent

@@ -10,6 +10,7 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 - `<installs>/<dynamic-tool>/<version>/b3-v2-<digest>`：osdk 自有隔离动态工具的指纹化安装根。
 - `<installs>/npm-global/<package>/<version>/b3-v2-<digest>`：`use --global npm:<package>` 的指纹化安装根。包含 `.osdk-tool.json` 的旧版纯版本根只用于遗留识别，绝不会被复用或执行。
 - `<data>/models/<name>/snapshots/<snapshot>`：已物化的模型快照。
+- `<data>/model-refs/<root-id>.json`：各项目的精确模型快照引用。
 - `<data>/store/<aa>/<bb>/<blake3>`：SDK 与模型文件共享的 CAS。
 - `<data>/shims`：命令 shim。
 - `<cache>/downloads`：下载的工具归档及其 checksum/source/attestation sidecar。
@@ -77,6 +78,15 @@ Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 S
 [`Cas::gc_roots`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/store/mod.rs#L207) 是一次 mark-and-sweep：先递归扫描 installs 与 models 下所有 `.osdk-manifest.json`，把 hash 加入 live set，再遍历 store 删除不在集合中的普通文件。manifest 无法解析时整个 GC fail closed，不删除任何对象；目录遍历错误则被跳过。名称恰好以 `.tmp` 结尾的文件会在 liveness 检查前被尽力删除；`.tmp-<pid>` 等其他临时命名没有特殊保护，会按普通未引用文件处理。
 
 `osdk prune`、SDK `uninstall` 后和 `model remove` 后都会直接调用该函数。`uninstall` 先删除安装目录，之后才 GC；model remove 同理。当前实现**没有 claim/lease 机制，也没有获取全局 GC 锁**。尽管 [`lock.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) 的模块注释提到 guard store GC，实际 GC 调用点没有使用 `FileLock`。因此不能宣称 claim GC 是全局串行的，也不能宣称 GC 与正在进行的不同版本安装/模型发布互斥。
+
+模型项目引用登记和快照删除共用 `<data>/model-refs/registry.lock`。项目 prune
+只在本项目的弃用快照中选候选。新物化的快照在 manifest 中写入 `prune_eligible`，
+旧快照的默认值为 false。补登记或原地修复旧快照时保留这一保护。无法读取的项目登记
+或清理时遇到无法读取的锁会使清理停止。要删除当前快照，
+同名目录里的快照必须都能清理且无视图成员。保留的快照继续用自己的 manifest
+保护 CAS blob。项目目录暂时不可达或搬迁时，原登记继续保护快照。
+用 `unuse --keep-snapshot` 保留的快照键原子写入同名模型目录内的 `.osdk-kept.json`。
+显式 `model remove` 删除目录时一并清除保留记录。
 
 这会留下实际竞争窗口：GC 的 live-set 扫描与删除之间，另一个进程可能新建引用；安装也可能先产生 CAS 对象、后写 manifest，此时并发 GC 可把尚未被 manifest 声明的对象视为不可达。per-version/per-snapshot 锁无法关闭这个全局窗口。生产文档和运维流程应把并发 `prune`/卸载与安装视为未协调操作。
 

@@ -1,5 +1,6 @@
 //! Model references, immutable snapshot manifests, and local materialization.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,10 +18,12 @@ pub mod env;
 pub mod local;
 pub mod provider;
 pub mod pull;
+pub mod refs;
 pub mod source;
 pub mod view;
 
 const MODEL_MANIFEST_FILE: &str = ".osdk-model.json";
+const KEPT_SNAPSHOTS_FILE: &str = ".osdk-kept.json";
 const CURRENT_FILE: &str = "current.json";
 /// Stable directory name resolving to the current snapshot.
 ///
@@ -223,6 +226,9 @@ pub struct SnapshotManifest {
     pub derived_from: Option<String>,
     pub files: Vec<ModelFile>,
     pub created_at: u64,
+    /// Older snapshots may still be shared by projects that have never registered.
+    #[serde(default)]
+    pub prune_eligible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -257,6 +263,47 @@ struct CurrentSnapshot {
 pub struct InstalledModel {
     pub manifest: SnapshotManifest,
     pub path: PathBuf,
+}
+
+impl InstalledModel {
+    pub fn snapshot_key(&self) -> &str {
+        self.path
+            .file_name()
+            .and_then(|key| key.to_str())
+            .expect("snapshot directory has a UTF-8 key")
+    }
+
+    pub fn verify(&self) -> Result<()> {
+        for file in &self.manifest.files {
+            let path = self.path.join(safe_relative_path(&file.path)?);
+            let actual = crate::store::hash_file(&path)?;
+            if actual != file.cas_hash {
+                return Err(Error::ChecksumMismatch {
+                    name: file.path.clone(),
+                    expected: file.cas_hash.clone(),
+                    actual,
+                });
+            }
+            if let Some(expected) = file.sha256.as_deref() {
+                let actual = hash_file(&path, HashAlgo::Sha256)?;
+                if !actual.eq_ignore_ascii_case(expected) {
+                    return Err(Error::ChecksumMismatch {
+                        name: file.path.clone(),
+                        expected: expected.to_string(),
+                        actual,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct SnapshotEntry {
+    pub snapshot: String,
+    pub path: PathBuf,
+    pub manifest: Result<SnapshotManifest>,
 }
 
 pub struct ModelStore {
@@ -323,6 +370,11 @@ impl ModelStore {
             return self.load_path(&destination);
         }
         self.protect_existing_snapshot(&destination, &files)?;
+        // Repairing an existing snapshot does not establish its provenance.
+        let prune_eligible = !destination.exists()
+            || self
+                .load_path(&destination)
+                .is_ok_and(|installed| installed.manifest.prune_eligible);
 
         let temporary = snapshots.join(format!(".{snapshot}.tmp-{}", std::process::id()));
         if temporary.exists() {
@@ -394,6 +446,7 @@ impl ModelStore {
                 derived_from: identity.derived_from,
                 files: model_files,
                 created_at: crate::source::now_secs(),
+                prune_eligible,
             };
             write_json_atomic(&temporary.join(MODEL_MANIFEST_FILE), &manifest)?;
             std::fs::write(temporary.join(COMPLETE_MARKER), b"")
@@ -514,12 +567,123 @@ impl ModelStore {
     }
 
     pub fn current(&self, name: &str) -> Result<InstalledModel> {
+        let marker_path = self.model_root(name).join(CURRENT_FILE);
+        let snapshot = self.current_snapshot(name)?.ok_or_else(|| {
+            Error::io(
+                marker_path,
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            )
+        })?;
+        self.load_path(&self.model_root(name).join("snapshots").join(snapshot))
+    }
+
+    pub fn current_snapshot(&self, name: &str) -> Result<Option<String>> {
         validate_model_name(name)?;
-        let model_root = self.model_root(name);
-        let marker_path = model_root.join(CURRENT_FILE);
-        let bytes = std::fs::read(&marker_path).map_err(|error| Error::io(&marker_path, error))?;
-        let current: CurrentSnapshot = serde_json::from_slice(&bytes)?;
-        self.load_path(&model_root.join("snapshots").join(current.snapshot))
+        let path = self.model_root(name).join(CURRENT_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Error::io(&path, error)),
+        };
+        let pointer: CurrentSnapshot = serde_json::from_slice(&bytes)?;
+        Ok(Some(pointer.snapshot))
+    }
+
+    /// Enumerate published snapshot directories, retaining errors for incomplete
+    /// entries. Publication scratch and rollback directories use hidden names.
+    pub fn snapshots(&self, name: &str) -> Result<Vec<SnapshotEntry>> {
+        validate_model_name(name)?;
+        let root = self.model_root(name).join("snapshots");
+        crate::cache::downloads::safe_path(&self.dirs.models(), &root)?;
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::io(&root, error)),
+        };
+        let mut snapshots = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| Error::io(&root, error))?;
+            let snapshot = entry.file_name().to_string_lossy().into_owned();
+            if snapshot.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = path
+                .symlink_metadata()
+                .map_err(|error| Error::io(&path, error))?;
+            let manifest = if metadata.is_dir() && !crate::store::dirlink::is_link(&metadata) {
+                self.load_path(&path).map(|installed| installed.manifest)
+            } else {
+                Err(Error::other(format!(
+                    "invalid model snapshot directory: {}",
+                    path.display()
+                )))
+            };
+            snapshots.push(SnapshotEntry {
+                snapshot,
+                path,
+                manifest,
+            });
+        }
+        snapshots.sort_by(|left, right| left.snapshot.cmp(&right.snapshot));
+        Ok(snapshots)
+    }
+
+    fn kept_snapshots(&self, name: &str) -> Result<BTreeSet<String>> {
+        let path = self.model_root(name).join(KEPT_SNAPSHOTS_FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+                Error::other(format!(
+                    "invalid kept snapshots at {}: {error}",
+                    path.display()
+                ))
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(error) => Err(Error::io(&path, error)),
+        }
+    }
+
+    /// The registry lock serializes this with prune and explicit model removal.
+    fn keep_snapshots(&self, name: &str, keys: &BTreeSet<String>) -> Result<()> {
+        let snapshots = self.snapshots(name)?;
+        let mut kept = self.kept_snapshots(name)?;
+        let previous_count = kept.len();
+        kept.extend(
+            snapshots
+                .into_iter()
+                .map(|entry| entry.snapshot)
+                .filter(|key| keys.contains(key)),
+        );
+        if kept.len() > previous_count {
+            write_json_atomic(&self.model_root(name).join(KEPT_SNAPSHOTS_FILE), &kept)?;
+        }
+        Ok(())
+    }
+
+    /// Remove a single non-current snapshot. Callers serialize changes to the
+    /// model's current pointer while planning and applying removals.
+    pub fn remove_snapshot(&self, name: &str, snapshot: &str) -> Result<bool> {
+        validate_model_name(name)?;
+        if !valid_snapshot_key(snapshot) {
+            return Err(Error::other(format!(
+                "invalid model snapshot key: {snapshot}"
+            )));
+        }
+        let root = self.model_root(name);
+        let lock_path = root.join(".locks").join(format!("{snapshot}.lock"));
+        let path = root.join("snapshots").join(snapshot);
+        crate::cache::downloads::safe_path(&self.dirs.models(), &path)?;
+        if !path.try_exists().map_err(|error| Error::io(&path, error))? {
+            return Ok(false);
+        }
+        let _lock = FileLock::acquire(lock_path)?;
+        if self.current_snapshot(name)?.as_deref() == Some(snapshot) {
+            return Err(Error::other(format!(
+                "cannot remove current snapshot of model {name}"
+            )));
+        }
+        crate::fs::remove_dir_all_forced(&path).map_err(|error| Error::io(&path, error))?;
+        Ok(true)
     }
 
     pub fn list(&self) -> Result<Vec<InstalledModel>> {
@@ -544,27 +708,7 @@ impl ModelStore {
 
     pub fn verify(&self, name: &str) -> Result<SnapshotManifest> {
         let installed = self.current(name)?;
-        for file in &installed.manifest.files {
-            let path = installed.path.join(safe_relative_path(&file.path)?);
-            let actual = crate::store::hash_file(&path)?;
-            if actual != file.cas_hash {
-                return Err(Error::ChecksumMismatch {
-                    name: file.path.clone(),
-                    expected: file.cas_hash.clone(),
-                    actual,
-                });
-            }
-            if let Some(expected) = file.sha256.as_deref() {
-                let actual = hash_file(&path, HashAlgo::Sha256)?;
-                if !actual.eq_ignore_ascii_case(expected) {
-                    return Err(Error::ChecksumMismatch {
-                        name: file.path.clone(),
-                        expected: expected.to_string(),
-                        actual,
-                    });
-                }
-            }
-        }
+        installed.verify()?;
         Ok(installed.manifest)
     }
 
@@ -592,7 +736,7 @@ impl ModelStore {
         // being inert, not about the suite being weak.
         crate::store::dirlink::remove(&root.join(CURRENT_LINK))
             .map_err(|error| Error::io(root.join(CURRENT_LINK), error))?;
-        std::fs::remove_dir_all(&root).map_err(|error| Error::io(&root, error))?;
+        crate::fs::remove_dir_all_forced(&root).map_err(|error| Error::io(&root, error))?;
         Ok(true)
     }
 
@@ -772,6 +916,13 @@ pub fn safe_relative_path(value: &str) -> Result<PathBuf> {
         return Err(Error::config(format!("unsafe model file path `{value}`")));
     }
     Ok(path.to_path_buf())
+}
+
+fn valid_snapshot_key(key: &str) -> bool {
+    key.len() == 24
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn snapshot_key(identity: &SnapshotIdentity, files: &[DownloadedModelFile]) -> String {
@@ -1008,6 +1159,36 @@ mod tests {
             std::fs::read(stable_again.join("weights.bin")).unwrap(),
             b"second-bytes",
             "the stable path must resolve to the newest snapshot"
+        );
+
+        let snapshots = first.path.parent().unwrap();
+        std::fs::create_dir(snapshots.join(".rollback-test")).unwrap();
+        std::fs::create_dir(snapshots.join("incomplete")).unwrap();
+        let entries = store.snapshots("fixture").unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(entries
+            .iter()
+            .find(|entry| entry.snapshot == "incomplete")
+            .unwrap()
+            .manifest
+            .is_err());
+        assert_eq!(
+            store.current_snapshot("fixture").unwrap().as_deref(),
+            Some(second.snapshot_key())
+        );
+        assert!(store
+            .remove_snapshot("fixture", second.snapshot_key())
+            .is_err());
+        assert!(store
+            .remove_snapshot("fixture", first.snapshot_key())
+            .unwrap());
+        assert!(!store
+            .remove_snapshot("fixture", first.snapshot_key())
+            .unwrap());
+        assert!(!first.path.exists());
+        assert_eq!(
+            std::fs::read(stable.join("weights.bin")).unwrap(),
+            b"second-bytes"
         );
     }
 

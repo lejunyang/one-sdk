@@ -88,8 +88,13 @@ pub fn load(path: &Path) -> Result<Lockfile> {
 /// against what was committed rather than against whatever the provider serves
 /// today.
 pub fn locked_models(path: &Path) -> Result<Vec<(String, LockedModel)>> {
-    if !path.is_file() {
-        return Ok(Vec::new());
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => anyhow::bail!("lockfile is not a regular file: {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading lockfile {}", path.display()));
+        }
     }
     let models: Vec<_> = load(path)?.models.into_iter().collect();
     if let Some((name, _)) = models

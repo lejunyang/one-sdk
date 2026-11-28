@@ -20,6 +20,7 @@ osdk prune [--dry-run]
 | `cache env` | 打印所有受支持的下游原生缓存环境映射 |
 | `cache clean` | 删除下载副本及 uv/pip 原生缓存，保留 CAS 与安装 |
 | `prune --dry-run` | 当前只输出演练提示，不计算或列出候选对象 |
+| `model sync --prune` | 清理本项目已弃用且无其他项目或视图使用的远程快照，随后回收无引用的 CAS 对象。跳过引入项目清理前物化的快照和用 `--keep-snapshot` 保留的快照 |
 | `prune` | 以 SDK installs 与模型 snapshots 的 manifest 为根，删除无引用 CAS 对象 |
 
 `cache clean` 不删除 CAS、安装、模型或 remote/source metadata；在 `<cache>/pkg` 中只清 uv/pip，不清其他 manager store。
@@ -81,6 +82,6 @@ osdk model remove NAME
 
 `uninstall`、`cache clean` 和非演练 `prune` 需要确认。交互终端显示提示；非交互
 环境必须使用 `--yes`、`OSDK_YES=true` 或 `settings.yes=true`，否则失败。
-`--quiet` 只关闭进度，不代表同意。`model remove` 当前不要求确认。
+`--quiet` 只关闭进度，不代表同意。`model remove` 会先报告仍引用该名称的项目，然后直接删除同名快照。
 对 osdk 自有动态工具，uninstall 会派生完整配置身份，只删除对应指纹化根；相同 backend 和
 version 的其他身份仍然保留。

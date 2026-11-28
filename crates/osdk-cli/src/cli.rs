@@ -973,7 +973,7 @@ pub enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Remove project intent, lock state, views, and normally the local snapshot.
+    /// Remove this project's model declaration and references, and clean up unused snapshots.
     Unuse {
         /// Local logical name to stop declaring.
         name: String,
@@ -998,7 +998,7 @@ pub enum ModelCommand {
     Sync {
         /// Limit synchronization to one logical model name.
         name: Option<String>,
-        /// Remove local snapshots the lock no longer declares.
+        /// Remove unused snapshots previously synced by this project.
         ///
         /// Off by default: pruning deletes materialized weights, which are large
         /// and slow to re-fetch, so it is opt-in rather than a side effect of
@@ -1048,7 +1048,7 @@ pub enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Remove local snapshots while keeping project declaration and lock state.
+    /// Delete all local snapshots by name and report projects still referencing them.
     Remove { name: String },
     /// Manage provider environment exported by shell activation.
     Env {
