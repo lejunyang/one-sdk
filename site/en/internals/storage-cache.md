@@ -77,7 +77,30 @@ Policy never invokes CAS GC or removes store blobs, installations, native manage
 
 Offline model replay scans canonical snapshot paths, cross-checks both manifests and identity/path/hash/size, then verifies CAS BLAKE3 and available SHA-256. CAS sources are never registered as downloads. Missing materialization is rebuilt in a sibling stage after rejecting extra/edited data. The old tree stays in a unique rollback location until replacement and the current record commit; failure restores it (or reports the retained location if rollback itself fails). Original unique content and blobs are preserved. Only recorded file sets can be replayed; removal/GC does not permanently pin orphan content for offline reinstall.
 
-Explicit `cache clean` keeps its existing download + uv/pip scope. Its download portion now performs coordinated per-file unlink and preserves links/lock files. `cache prune` still delegates only to uv.
+`cache clean` validates the download, uv, and pip paths before cleaning them in that order. The downloads stage takes osdk's own exclusive lease and exits immediately if an osdk install holds it.
+
+uv 0.8.19 introduced a shared lock on `<cache>/pkg/uv/.lock` during installation. Native clean preserves the cache root and lock file starting in uv 0.13.1, so osdk delegates clean from that version onward. If managed uv cannot launch or is between 0.8.19 and 0.13.0, osdk tries an exclusive lock on the same file without waiting, then removes the entries while preserving the root and lock. A detected version older than 0.8.19 produces an upgrade message. [0.8.18 initialization](https://github.com/astral-sh/uv/blob/0.8.18/crates/uv-cache/src/lib.rs#L314-L352) · [0.8.19 shared lock](https://github.com/astral-sh/uv/blob/0.8.19/crates/uv-cache/src/lib.rs#L397-L413) · [0.13.1 clean](https://github.com/astral-sh/uv/blob/0.13.1/crates/uv-cache/src/lib.rs#L544-L589)
+
+`cache prune` leaves entry selection to managed uv 0.8.19 or later. For both delegated commands, osdk resolves the validated cache path to an absolute path in its own working directory and passes it to uv through `--cache-dir` and `UV_CACHE_DIR`. Both commands ignore uv configuration files and `UV_NO_CACHE`. Native failures surface uv's diagnostics and stop cleanup. Coordination depends on other processes participating in the cache lock and on filesystem support for that lock.
+
+### Downstream cache cleanup scope
+
+| Cache and default location | `cache clean` | `cache prune` | Native command and concurrency evidence |
+| --- | --- | --- | --- |
+| osdk downloads, `<cache>/downloads` | Clean under an exclusive downloads lease | Preserve | osdk installs and pulls hold shared leases |
+| uv, `<cache>/pkg/uv` | Delegate to uv or clear entries under the same lock | Delegate to uv | Lock protocol and version boundaries above |
+| pip, `<cache>/pkg/pip` | Warn, then clear directly | Preserve | pip 26.2.1 `cache purge` unlinks files individually and does not wait for external pip installs. [pip source](https://github.com/pypa/pip/blob/26.2.1/src/pip/_internal/commands/cache.py#L165-L223) |
+| npm, `<cache>/pkg/npm`, `<cache>/npm/v1/cache`, and `<data>/store/npm` | Preserve | Preserve | npm 11.4.2 offers `cache clean --force` and `cache verify`. Its documentation describes cache integrity. Waiting for concurrent installs was not verified. [npm documentation](https://docs.npmjs.com/cli/v11/commands/npm-cache) |
+| pnpm store, `<cache>/pkg/pnpm-store` | Preserve | Preserve | pnpm 10.12.4 offers `store prune`. Cleanup during external installs was not tested. [pnpm documentation](https://pnpm.io/cli/store) |
+| `PNPM_HOME`, `<data>/global/pnpm` in managed execution and `<cache>/pkg/pnpm` in `cache env` | Preserve | Preserve | Installation root for global packages and commands |
+| Cargo, `<cache>/pkg/cargo`, and `<data>/cargo` for Rust shims and exec | Preserve | Preserve | Cargo home holds executables and configuration. `cargo clean` clears build output. [Cargo documentation](https://doc.rust-lang.org/cargo/commands/cargo-clean.html) |
+| Gradle, `<cache>/pkg/gradle` | Preserve | Preserve | Gradle User Home holds configuration, wrappers, and runtime state. Concurrent cleanup was not verified. [Gradle documentation](https://docs.gradle.org/current/userguide/directory_layout.html) |
+| Go, `<cache>/pkg/go-mod` and `<cache>/pkg/go-build` | Preserve | Preserve | `go clean -modcache` and `go clean -cache` clean these separately. Concurrent cleanup was not tested. [Go documentation](https://pkg.go.dev/cmd/go#hdr-Remove_object_files_and_cached_files) |
+| Yarn, Classic cache at `<cache>/pkg/yarn-classic` and managed global folder at `<data>/global/yarn`. Berry follows project configuration. | Preserve | Preserve | Both generations offer `yarn cache clean`. Concurrent cleanup was not tested. [Classic](https://classic.yarnpkg.com/en/docs/cli/cache) · [Berry](https://yarnpkg.com/cli/cache/clean) |
+| Bun, `<cache>/pkg/bun` | Preserve | Preserve | `bun pm cache rm` can remove files that projects using Bun's global store link to. Concurrent cleanup was not tested. [Bun documentation](https://bun.com/docs/pm/cli/pm#cache) |
+| Deno, `<cache>/pkg/deno` | Preserve | Preserve | `deno clean` clears shared execution and compilation caches. Concurrent cleanup was not tested. [Deno documentation](https://docs.deno.com/runtime/reference/cli/clean/) |
+
+Both commands preserve alternate cache directories chosen by users, model-client caches under `<cache>/pkg/models`, and installed content.
 
 ## GC, removal, and the concurrency caveat
 

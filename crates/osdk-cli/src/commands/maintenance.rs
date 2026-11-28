@@ -1008,6 +1008,7 @@ pub fn task(app: &mut App, command: crate::cli::TaskCommand) -> Result<()> {
 
 pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
     use crate::cli::CacheCommand;
+    use osdk_core::backend::pypi::{self, UvCacheAction, UvCacheOutcome};
     match command {
         CacheCommand::Status { json } => {
             let mut report = osdk_core::cache::downloads::collect(
@@ -1057,49 +1058,57 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             }
         }
         CacheCommand::Clean => {
+            use osdk_core::cache::downloads;
+
+            let dirs = &app.ctx.dirs;
+            let pip = osdk_core::cache::downstream_root(&dirs.cache).join("pip");
+            downloads::validate_disposable_directory(dirs, &dirs.downloads())?;
+            pypi::validate_cache(&app.ctx)?;
+            downloads::validate_disposable_directory(dirs, &pip)?;
+            let pip_warned = pip.is_dir();
+            if pip_warned {
+                eprintln!("{}", t!("warn.pip_cache_in_use", path = pip.display()));
+            }
             if !app.prompt.confirm(&t!("prompt.cache_clean"))? {
                 println!("{}", t!("msg.cancelled"));
                 return Ok(());
             }
-            osdk_core::cache::downloads::clean(&app.ctx.dirs)?;
-            // The Python installer caches are osdk-managed now, so leaving them
-            // out would make `cache clean` quietly incomplete: osdk would be
-            // the reason they exist while offering no way to reclaim them.
-            //
-            // Only these two directories are touched, never `<cache>/pkg`
-            // wholesale -- that root also holds cargo, gradle and the Go caches,
-            // and cargo's in particular is a shared home containing installed
-            // binaries rather than just downloads.
-            let downstream = osdk_core::cache::downstream_root(&app.ctx.dirs.cache);
-            for name in ["uv", "pip"] {
-                let directory = downstream.join(name);
-                if directory.exists() {
-                    osdk_core::cache::downloads::validate_disposable_directory(
-                        &app.ctx.dirs,
-                        &directory,
-                    )?;
-                    std::fs::remove_dir_all(&directory)
-                        .with_context(|| format!("removing {}", directory.display()))?;
-                }
+            downloads::clean(dirs)
+                .map_err(|error| cache_clean_error("err.cache_clean_downloads", error))?;
+            pypi::maintain_cache(&app.ctx, UvCacheAction::Clean)
+                .map_err(|error| cache_clean_error("err.cache_clean_uv", error))?;
+            downloads::validate_disposable_directory(dirs, &pip)
+                .map_err(|error| cache_clean_error("err.cache_clean_pip", error))?;
+            // pip can create its cache while uv is waiting for an install.
+            if !pip_warned && pip.is_dir() {
+                eprintln!("{}", t!("warn.pip_cache_in_use", path = pip.display()));
             }
+            remove_cache_directory(&pip).context(t!("err.cache_clean_pip"))?;
             println!("{}", t!("msg.cache_cleared"));
         }
-        CacheCommand::Prune => {
-            let outcome = osdk_core::backend::pypi::prune_cache(&app.ctx)?;
-            if !outcome.uv_available {
-                // Said plainly rather than reported as a successful no-op: uv is
-                // what decides which entries are dangling, so without it this
-                // command has nothing to do at all.
-                println!("uv is not installed, so there is nothing to prune; run `osdk install pypi:uv` first");
-            } else {
-                match &outcome.uv_output {
-                    Some(reported) => println!("{reported}"),
-                    None => println!("nothing to prune"),
-                }
+        CacheCommand::Prune => match pypi::maintain_cache(&app.ctx, UvCacheAction::Prune)? {
+            UvCacheOutcome::Empty => println!("{}", t!("msg.uv_cache_empty")),
+            UvCacheOutcome::PruneUnavailable => {
+                println!("{}", t!("msg.uv_cache_prune_unavailable"));
             }
-        }
+            UvCacheOutcome::Native | UvCacheOutcome::LockedFallback => {}
+        },
     }
     Ok(())
+}
+
+fn cache_clean_error(stage: &str, error: osdk_core::Error) -> anyhow::Error {
+    // Render the localized cause here. The top-level diagnostic prefers a core
+    // error over its anyhow contexts, which would hide the completed stages.
+    anyhow!(error.localized()).context(t!(stage))
+}
+
+fn remove_cache_directory(directory: &std::path::Path) -> Result<()> {
+    match std::fs::remove_dir_all(directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", directory.display())),
+    }
 }
 
 fn print_download_cache_report(

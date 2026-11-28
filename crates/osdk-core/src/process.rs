@@ -6,7 +6,7 @@
 //! byte limits. Foreground commands deliberately inherit all three standard
 //! streams and are spawned exactly once without a shell.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,7 @@ pub struct CommandSpec {
     program: OsString,
     args: Vec<OsString>,
     env: BTreeMap<OsString, OsString>,
+    remove_env: BTreeSet<OsString>,
     cwd: Option<PathBuf>,
     clear_env: bool,
 }
@@ -50,6 +51,7 @@ impl CommandSpec {
             program: program.into(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            remove_env: BTreeSet::new(),
             cwd: None,
             clear_env: false,
         }
@@ -86,6 +88,12 @@ impl CommandSpec {
             env.into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
+        self
+    }
+
+    /// Remove an inherited variable before applying explicit overrides.
+    pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
+        self.remove_env.insert(key.into());
         self
     }
 
@@ -126,6 +134,9 @@ impl CommandSpec {
         let mut command = Command::new(&self.program);
         if self.clear_env {
             command.env_clear();
+        }
+        for key in &self.remove_env {
+            command.env_remove(key);
         }
         command.args(&self.args).envs(&self.env);
         if let Some(cwd) = &self.cwd {
@@ -204,13 +215,14 @@ pub enum TerminationStatus {
     Failed(io::ErrorKind),
 }
 
-/// Non-secret context for an otherwise ambiguous spawn error.
+/// Non-secret context for a spawn failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnContext {
     /// The command supplied an explicit working directory. The operating
     /// system does not identify whether it or the executable caused errors
     /// such as `NotFound` or `PermissionDenied`.
     WithWorkingDirectory,
+    WithoutWorkingDirectory,
 }
 
 /// The explicit result of bounded captured execution.
@@ -220,9 +232,8 @@ pub enum CommandOutcome {
     NotInstalled,
     /// The executable was found but the operating system denied execution.
     PermissionDenied,
-    /// Spawning failed in a context where the error cannot safely be
-    /// attributed to executable discovery, for example when a working
-    /// directory was configured.
+    /// The child could not be started. Context helps distinguish executable
+    /// errors from errors involving an explicit working directory.
     SpawnFailed {
         kind: io::ErrorKind,
         context: SpawnContext,
@@ -240,7 +251,7 @@ pub enum CommandOutcome {
         status: ExitStatus,
         output: CapturedOutput,
     },
-    /// Spawning, polling, or setting up capture failed for another I/O reason.
+    /// Polling or setting up capture failed after spawning the child.
     ExecutionFailed {
         kind: io::ErrorKind,
         output: CapturedOutput,
@@ -401,12 +412,9 @@ fn run_captured(command: &CommandSpec, limits: CaptureLimits) -> CommandOutcome 
             return match error.kind() {
                 io::ErrorKind::NotFound => CommandOutcome::NotInstalled,
                 io::ErrorKind::PermissionDenied => CommandOutcome::PermissionDenied,
-                kind => CommandOutcome::ExecutionFailed {
+                kind => CommandOutcome::SpawnFailed {
                     kind,
-                    output: CapturedOutput {
-                        elapsed: started.elapsed(),
-                        ..CapturedOutput::default()
-                    },
+                    context: SpawnContext::WithoutWorkingDirectory,
                 },
             };
         }

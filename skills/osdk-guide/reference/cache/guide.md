@@ -7,7 +7,7 @@
 | `dir` | 打印共享缓存目录 |
 | `env` | 打印 uv/pip/npm 等下游缓存重定向变量 |
 | `clean` | 删除下载归档和 uv/pip 缓存，保留 CAS store 与安装 |
-| `prune` | 只删没有环境继续引用的缓存条目 |
+| `prune` | 委托受管 uv 回收它判定未使用的条目 |
 
 ```bash
 osdk cache dir
@@ -19,6 +19,12 @@ osdk cache prune
 `clean` 更彻底，之后可能重新下载；`prune` 更保守且没有 dry-run，因为底层 uv prune
 没有可忠实映射的预览模式。回收 osdk store 中不再引用的对象使用一级命令 `osdk prune`。
 缓存目录路径可由 `OSDK_CACHE_DIR` 覆盖；下载副本保留策略使用下文的 `[settings.download_cache]`。
+清理 uv 缓存时，受管 uv 0.13.1 或更新版本会等待同一缓存上的安装结束。
+受管 uv 不可用，或版本在 0.8.19 至 0.13.0 之间时，`clean` 先尝试取得 uv 的缓存锁。
+缓存正忙时以非零状态退出，等安装结束后再重试。`cache prune` 需要受管 uv 0.8.19 或更新版本。
+使用 pip 时，先等安装结束再运行 `cache clean`。pip 没有共享清理锁，`--yes` 仍会显示风险提示。
+两个命令只维护 osdk 管理的路径，保留通过 `UV_CACHE_DIR` 或 `PIP_CACHE_DIR` 另选的目录。
+相对的 `OSDK_CACHE_DIR` 以启动 osdk 时的工作目录为准，即使 uv 设置了 `UV_WORKING_DIR`。
 
 ## 下载副本保留策略
 

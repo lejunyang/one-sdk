@@ -71,7 +71,30 @@ Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 S
 
 离线模型重建扫描规范快照路径中的两个 manifest，核对 identity、文件路径、hash、size，再验证 CAS 的 BLAKE3 和可用 SHA-256；源是 CAS，不登记为下载缓存。旧快照缺少文件时先拒绝额外/已修改数据，再构建完整 sibling stage；旧树保留在唯一 rollback 位置直到替换与 `current` 提交都成功，失败恢复旧树（若恢复本身失败则报告保留位置）。不会删除原安装中的唯一内容或 blob。只有实际记录的文件集可重放，卸载/GC 不会为离线重建永久保留孤儿内容。
 
-`cache clean` 保留原先显式清理下载和 uv/pip 的范围；下载部分改为受 lease 保护的逐文件删除，链接和锁文件保留。`cache prune` 仍只调用 uv 自有 prune。
+`cache clean` 先校验下载、uv、pip 的目标路径，然后依次清理。下载阶段持有 osdk 自己的独占 lease。若 osdk 的安装正在使用该 lease，命令立即退出。
+
+uv 0.8.19 起在安装时持有 `<cache>/pkg/uv/.lock` 的共享锁。原生 `cache clean` 到 0.13.1 才保留缓存根和锁文件，因此 osdk 从 0.13.1 起委托 clean。可执行文件缺失、无法启动，或版本在 0.8.19 至 0.13.0 之间时，osdk 尝试非阻塞独占同一文件，清理条目并保留目录和锁。已知低于 0.8.19 的版本会收到升级提示。 [0.8.18 初始化](https://github.com/astral-sh/uv/blob/0.8.18/crates/uv-cache/src/lib.rs#L314-L352) · [0.8.19 共享锁](https://github.com/astral-sh/uv/blob/0.8.19/crates/uv-cache/src/lib.rs#L397-L413) · [0.13.1 清理](https://github.com/astral-sh/uv/blob/0.13.1/crates/uv-cache/src/lib.rs#L544-L589)
+
+`cache prune` 由受管 uv 0.8.19 或更新版本决定回收哪些条目。osdk 在自己的工作目录内将预检通过的 uv 缓存路径转成绝对路径，再通过 `--cache-dir` 和 `UV_CACHE_DIR` 传给 uv。两个委托命令都忽略 uv 配置文件和 `UV_NO_CACHE`。原生清理失败时会显示 uv 的诊断并退出。协调要求其他进程使用共享缓存锁且文件系统支持该锁。
+
+### 下游缓存清理范围
+
+| 对象与默认位置 | `cache clean` | `cache prune` | 原生命令与并发依据 |
+| --- | --- | --- | --- |
+| osdk 下载副本，`<cache>/downloads` | 独占下载 lease 后清理 | 保留 | osdk 安装/拉取持共享 lease |
+| uv，`<cache>/pkg/uv` | 委托 uv，或持同一锁清内容 | 委托 uv | 锁协议与版本边界见上文 |
+| pip，`<cache>/pkg/pip` | 提示风险后直接清理 | 保留 | pip 26.2.1 的 `cache purge` 逐文件删除，不会等待外部 pip 安装。 [pip 实现](https://github.com/pypa/pip/blob/26.2.1/src/pip/_internal/commands/cache.py#L165-L223) |
+| npm，`<cache>/pkg/npm`、`<cache>/npm/v1/cache`、`<data>/store/npm` | 保留 | 保留 | npm 11.4.2 提供 `cache clean --force` 和 `cache verify`。文档描述缓存完整性，等待并发安装的行为未核验。 [npm 文档](https://docs.npmjs.com/cli/v11/commands/npm-cache) |
+| pnpm store，`<cache>/pkg/pnpm-store` | 保留 | 保留 | pnpm 10.12.4 提供 `store prune`，与外部安装的并发行为未实测。 [pnpm 文档](https://pnpm.io/cli/store) |
+| `PNPM_HOME`，受管执行用 `<data>/global/pnpm`，`cache env` 列出 `<cache>/pkg/pnpm` | 保留 | 保留 | 全局包和命令的安装目录 |
+| Cargo，`<cache>/pkg/cargo`，Rust shim/exec 用 `<data>/cargo` | 保留 | 保留 | home 包含命令和配置。`cargo clean` 清理构建产物。 [Cargo 文档](https://doc.rust-lang.org/cargo/commands/cargo-clean.html) |
+| Gradle，`<cache>/pkg/gradle` | 保留 | 保留 | Gradle User Home 含配置、wrapper 和运行状态。外部清理的并发行为未核验。 [Gradle 文档](https://docs.gradle.org/current/userguide/directory_layout.html) |
+| Go，`<cache>/pkg/go-mod`、`<cache>/pkg/go-build` | 保留 | 保留 | `go clean -modcache` 和 `go clean -cache` 可分别清理。并发清理未实测。 [Go 文档](https://pkg.go.dev/cmd/go#hdr-Remove_object_files_and_cached_files) |
+| Yarn，Classic 缓存在 `<cache>/pkg/yarn-classic`，受管全局目录在 `<data>/global/yarn`。Berry 遵循项目配置。 | 保留 | 保留 | 两代都有 `yarn cache clean`，并发清理未实测。 [Classic](https://classic.yarnpkg.com/en/docs/cli/cache) · [Berry](https://yarnpkg.com/cli/cache/clean) |
+| Bun，`<cache>/pkg/bun` | 保留 | 保留 | `bun pm cache rm` 会删除使用 Bun 全局 store 的项目可能链接到的文件。并发清理未实测。 [Bun 文档](https://bun.com/docs/pm/cli/pm#cache) |
+| Deno，`<cache>/pkg/deno` | 保留 | 保留 | `deno clean` 清理运行和编译所用的共享缓存。并发清理未实测。 [Deno 文档](https://docs.deno.com/runtime/reference/cli/clean/) |
+
+用户通过环境变量另选的缓存目录、模型客户端的 `<cache>/pkg/models` 和已安装内容均保留。
 
 ## GC、卸载与并发 caveat
 

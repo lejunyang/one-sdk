@@ -219,20 +219,17 @@ osdk install "pypi:ruff[python=3.12]@0.6.9"
 
 ## 缓存
 
-uv 的缓存归 osdk 管（`<cache>/pkg/uv`），所以有两种回收方式，区别是要不要保留
-正在被环境使用的内容：
+osdk 将 uv 的共享缓存放在 `<cache>/pkg/uv`。可以按 uv 的规则回收未使用的条目，也可以清空缓存内容。
 
 ```bash
-osdk cache prune   # 只丢弃 uv 认为已无引用的条目
-osdk cache clean   # 连 uv 与 pip 缓存整个删掉
+osdk cache prune        # 按 uv 的规则回收未使用条目
+osdk --yes cache clean  # 清理下载、uv 和 pip 缓存
 ```
 
-uv 会把解包后的 wheel 硬链接进每个 venv，因此那些对象虽然位于缓存目录、却仍是
-活的。实测在一个已填充的缓存上，`prune` 报告「no unused entries」且 `archive-v0`
-一字节未减；`clean` 则会删掉它，于是每个环境下次都要重新下载。
-
-`prune` 没有预览模式：`uv cache prune` 本身没有，osdk 也不会靠猜来伪造一个。
-未安装 uv 时它会直接说明无事可做，而不是报告一次成功的空操作。
+`cache clean` 可能让下次安装重新下载。受管 uv 0.13.1 或更新版本会等待同一缓存上的安装结束。
+受管 uv 不可用，或版本在 0.8.19 至 0.13.0 之间时，缓存正忙会使清理以非零状态退出。
+`cache prune` 需要受管 uv 0.8.19 或更新版本，无预览模式。
+使用 pip 时，请在安装结束后再运行 `cache clean`。详见[缓存与清理](../maintenance/cache)。
 
 ::: warning uv 缓存目录归 uv 独占
 实测 `uv cache prune` 会删掉它自己缓存根目录下任何它不认识的东西。不要往

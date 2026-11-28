@@ -15,7 +15,7 @@ osdk prune [--dry-run]
 | --- | --- |
 | `cache status [--json]` | 查看下载副本占用、策略、重试和可回收候选 |
 | `cache trim [--dry-run] [--json]` | 按策略回收已登记的下载副本；不清 CAS 或原生缓存 |
-| `cache prune` | 委托 uv 回收其未使用缓存；无预览 |
+| `cache prune` | 委托受管 uv 回收未使用的 uv 缓存，无预览 |
 | `cache dir` | 打印缓存根、downloads、CAS 和 downstream 根目录 |
 | `cache env` | 打印所有受支持的下游原生缓存环境映射 |
 | `cache clean` | 删除下载副本及 uv/pip 原生缓存，保留 CAS 与安装 |
@@ -24,7 +24,17 @@ osdk prune [--dry-run]
 | `prune` | 以 SDK installs 与模型 snapshots 的 manifest 为根，删除无引用 CAS 对象 |
 
 `cache clean` 不删除 CAS、安装、模型或 remote/source metadata；在 `<cache>/pkg` 中只清 uv/pip，不清其他 manager store。
+清理前会检查目标路径。链接、无效目录或与持久数据重叠的目标会让命令在删除前退出。
+如果执行中途失败，`cache clean` 会报告已完成的阶段。
 GC 遇到损坏 manifest 会拒绝继续，防止误删仍在使用的对象。
+
+清理 uv 缓存时，受管 uv 0.13.1 或更新版本会等待占用同一缓存的 uv 安装完成。
+受管 uv 不可用，或版本在 0.8.19 至 0.13.0 之间时，`cache clean` 会先尝试取得 uv 的缓存锁。
+缓存忙时命令以非零状态退出，可在安装结束后重试。`cache prune` 需要受管 uv 0.8.19 或更新版本。
+请在 pip 安装结束后再运行 `cache clean`。共享 pip 缓存没有协调清理的锁，使用 `--yes` 时也会显示风险提示。
+两个命令只清理 osdk 管理的路径，保留通过 `UV_CACHE_DIR` 或 `PIP_CACHE_DIR` 另选的目录。
+相对的 `OSDK_CACHE_DIR` 以启动 osdk 时的工作目录为准，即使 uv 设置了 `UV_WORKING_DIR`。
+各管理器的覆盖范围见[下游缓存清理范围](../../internals/storage-cache#下游缓存清理范围)。
 
 `osdk container cache status` 是另一条路径：它通过受支持的原生聚合接口查询 Docker
 Engine 或 Buildx 构建器自有的存储。详见[容器运行时、Registry 与原生操作](../system/containers)。

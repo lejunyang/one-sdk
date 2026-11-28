@@ -850,66 +850,215 @@ fn locate_uv(ctx: &Ctx) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// What a prune did, so the caller can report it without re-deriving anything.
 #[cfg(feature = "install")]
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct PruneOutcome {
-    /// uv's own report, when uv ran.
-    pub uv_output: Option<String>,
-    /// Whether uv was available at all.
-    pub uv_available: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UvCacheAction {
+    Clean,
+    Prune,
 }
 
-/// Drop cache entries nothing references, keeping what environments still use.
-///
-/// This is deliberately not `cache clean`. uv hardlinks each unpacked wheel into
-/// every venv that needs it, so those objects are live even though they sit in
-/// the cache: measured on a populated cache, `uv cache prune` reported "No unused
-/// entries found" and left `archive-v0` byte-for-byte intact, while `clean`
-/// deletes it and forces every environment to download again.
-///
-/// **The decision is uv's alone, deliberately.** An earlier version of this also
-/// swept "orphaned" cache generations -- uv suffixes each bucket with a schema
-/// version (`simple-v25`, `archive-v0`), so upgrading uv leaves the previous one
-/// behind. Two measurements killed that idea. osdk cannot tell which generation
-/// is live: `uv cache` exposes no way to ask, and the heuristic that filled the
-/// gap (newest mtime per prefix) was measured picking the *wrong* one, proposing
-/// deletion of the bucket actually in use. And it was unnecessary anyway -- `uv
-/// cache prune` already removes a stale `simple-v24`, and indeed anything else it
-/// does not recognise under its own cache root, verified by running uv directly
-/// with osdk out of the picture.
-///
-/// That second finding is worth remembering for another reason: **uv treats its
-/// cache directory as exclusively its own**. Nothing else may store anything
-/// under `<cache>/pkg/uv` and expect it to survive.
 #[cfg(feature = "install")]
-pub fn prune_cache(ctx: &Ctx) -> Result<PruneOutcome> {
-    let cache_root = crate::cache::downstream_root(&ctx.dirs.cache).join("uv");
-    let mut outcome = PruneOutcome::default();
+pub enum UvCacheOutcome {
+    Native,
+    LockedFallback,
+    Empty,
+    PruneUnavailable,
+}
 
-    let Some(uv) = locate_uv(ctx).filter(|candidate| uv_is_spawnable(candidate)) else {
-        return Ok(outcome);
+/// Validate the cache and its root lock before any explicit maintenance.
+#[cfg(feature = "install")]
+pub fn validate_cache(ctx: &Ctx) -> Result<PathBuf> {
+    let root = crate::cache::downstream_root(&ctx.dirs.cache).join("uv");
+    crate::cache::downloads::validate_disposable_directory(&ctx.dirs, &root)?;
+    let lock = root.join(".lock");
+    crate::cache::downloads::safe_path(&ctx.dirs.cache, &lock)?;
+    match std::fs::symlink_metadata(&lock) {
+        Ok(metadata) if !metadata.is_file() => Err(Error::other(format!(
+            "uv cache lock {} must be a regular file",
+            lock.display()
+        ))),
+        Ok(_) => Ok(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(root),
+        Err(error) => Err(Error::io(&lock, error)),
+    }
+}
+
+/// Clear entries under the same exclusive root lock that uv uses.
+#[cfg(feature = "install")]
+fn clean_cache_contents(root: &Path) -> Result<()> {
+    use std::fs::{self, OpenOptions, TryLockError};
+    use std::io::ErrorKind;
+
+    let path = root.join(".lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| Error::io(&path, error))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(Error::other(crate::t!(
+                "err.uv_cache_busy",
+                path = root.display()
+            )));
+        }
+        Err(TryLockError::Error(error)) => return Err(Error::io(&path, error)),
+    }
+
+    // Keep the root and lock in place so waiting uv processes and new arrivals
+    // continue to lock the same file.
+    for entry in fs::read_dir(root).map_err(|error| Error::io(root, error))? {
+        let entry = entry.map_err(|error| Error::io(root, error))?;
+        if entry.file_name() == ".lock" {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| Error::io(&path, error))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTypeExt;
+            if kind.is_symlink_dir() {
+                fs::remove_dir(&path).map_err(|error| Error::io(&path, error))?;
+                continue;
+            }
+        }
+        let removed = if kind.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => {}
+            // uv can unlink one of its temporary files as it finishes.
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(&path, error)),
+        }
+    }
+    Ok(())
+}
+
+/// Maintain the uv cache owned by osdk. Only uv can decide which cache
+/// generations and entries are eligible for pruning.
+#[cfg(feature = "install")]
+pub fn maintain_cache(ctx: &Ctx, action: UvCacheAction) -> Result<UvCacheOutcome> {
+    use crate::process::{CommandRunner, CommandSpec, SystemCommandRunner};
+
+    let cache_root = validate_cache(ctx)?;
+    if !cache_root
+        .try_exists()
+        .map_err(|error| Error::io(&cache_root, error))?
+    {
+        return Ok(UvCacheOutcome::Empty);
+    }
+
+    if let Some(uv) = compatible_cache_uv(ctx, action)? {
+        // uv can change its working directory before resolving the cache path.
+        let cache_root =
+            std::path::absolute(&cache_root).map_err(|error| Error::io(&cache_root, error))?;
+        let operation = match action {
+            UvCacheAction::Clean => "clean",
+            UvCacheAction::Prune => "prune",
+        };
+        let command = CommandSpec::new(uv)
+            .args(["--no-config", "cache", operation, "--cache-dir"])
+            .arg(&cache_root)
+            .env("UV_CACHE_DIR", &cache_root)
+            .env("UV_NO_CACHE", "false")
+            .env_remove("UV_CONFIG_FILE");
+        eprintln!(
+            "{}",
+            crate::t!(
+                "msg.uv_cache_native",
+                operation = operation,
+                path = cache_root.display()
+            )
+        );
+        let status = SystemCommandRunner
+            .run_foreground(&command)
+            .map_err(|error| {
+                Error::other(crate::t!(
+                    "err.uv_cache_command",
+                    operation = operation,
+                    path = cache_root.display(),
+                    cause = error
+                ))
+            })?;
+        if !status.success() {
+            return Err(Error::other(crate::t!(
+                "err.uv_cache_command",
+                operation = operation,
+                path = cache_root.display(),
+                cause = status
+            )));
+        }
+        return Ok(UvCacheOutcome::Native);
+    }
+
+    match action {
+        UvCacheAction::Clean => {
+            clean_cache_contents(&cache_root)?;
+            Ok(UvCacheOutcome::LockedFallback)
+        }
+        UvCacheAction::Prune => Ok(UvCacheOutcome::PruneUnavailable),
+    }
+}
+
+#[cfg(feature = "install")]
+fn compatible_cache_uv(ctx: &Ctx, action: UvCacheAction) -> Result<Option<PathBuf>> {
+    use semver::Version;
+
+    let Some(uv) = locate_uv(ctx) else {
+        return Ok(None);
     };
-    outcome.uv_available = true;
-
-    let mut command = std::process::Command::new(&uv);
-    command.arg("cache").arg("prune");
-    // Point uv at the osdk-managed cache explicitly rather than relying on the
-    // ambient environment: `crate::cache` only sets `UV_CACHE_DIR` for interactive
-    // shells, so a process osdk spawns would otherwise prune uv's default cache.
-    command.arg("--cache-dir").arg(&cache_root);
-    let output = command.output().map_err(|error| Error::io(&uv, error))?;
-    if !output.status.success() {
-        return Err(Error::other(format!(
-            "`uv cache prune` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+    let Some(version) = uv_cache_version(&uv)? else {
+        return Ok(None);
+    };
+    // uv introduced shared root locking in 0.8.19. Its native prune
+    // preserves the lock, while native clean unlinked it until 0.13.1.
+    let first_shared_lock = Version::new(0, 8, 19);
+    if version < first_shared_lock {
+        return Err(Error::other(crate::t!(
+            "err.uv_cache_version",
+            version = version,
+            minimum = first_shared_lock
         )));
     }
-    let reported = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !reported.is_empty() {
-        outcome.uv_output = Some(reported);
+    Ok((action == UvCacheAction::Prune || version >= Version::new(0, 13, 1)).then_some(uv))
+}
+
+#[cfg(feature = "install")]
+fn uv_cache_version(uv: &Path) -> Result<Option<semver::Version>> {
+    use crate::process::{
+        CaptureLimits, CommandOutcome, CommandRunner, CommandSpec, SystemCommandRunner,
+    };
+
+    let command = CommandSpec::new(uv).arg("--version");
+    match SystemCommandRunner.run_captured(&command, CaptureLimits::default()) {
+        CommandOutcome::NotInstalled
+        | CommandOutcome::PermissionDenied
+        | CommandOutcome::SpawnFailed { .. } => Ok(None),
+        CommandOutcome::Exited { status, output } if status.success() => {
+            let version = std::str::from_utf8(&output.stdout)
+                .ok()
+                .and_then(|text| text.strip_prefix("uv "))
+                .and_then(|text| text.split_whitespace().next())
+                .and_then(|version| semver::Version::parse(version).ok());
+            version.map(Some).ok_or_else(|| {
+                Error::other(crate::t!(
+                    "err.uv_cache_unknown_version",
+                    path = uv.display()
+                ))
+            })
+        }
+        outcome => Err(Error::other(crate::t!(
+            "err.uv_cache_probe",
+            path = uv.display(),
+            cause = format_args!("{outcome:?}")
+        ))),
     }
-    Ok(outcome)
 }
 
 /// The install identity for one `pypi:` environment.

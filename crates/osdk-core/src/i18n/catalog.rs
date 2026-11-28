@@ -514,8 +514,89 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "msg.cache_cleared",
         (
-            "cleared downloaded archives (CAS store + installs kept)",
-            "已清理下载的归档（保留 CAS 存储区与已安装内容）",
+            "cleared the download, uv and pip caches (CAS and installs kept)",
+            "已清理下载缓存、uv 缓存和 pip 缓存（保留 CAS 和已安装内容）",
+        ),
+    );
+    m.insert(
+        "err.cache_clean_downloads",
+        (
+            "download cache cleanup failed before uv and pip cleanup",
+            "下载缓存清理失败，尚未清理 uv 和 pip 缓存",
+        ),
+    );
+    m.insert(
+        "err.cache_clean_uv",
+        (
+            "download cache cleanup completed. uv cache cleanup failed before pip cleanup",
+            "下载缓存已清理。uv 缓存清理失败，尚未清理 pip 缓存",
+        ),
+    );
+    m.insert(
+        "err.cache_clean_pip",
+        (
+            "download and uv cache cleanup completed. pip cache cleanup failed and may be partial",
+            "下载缓存和 uv 缓存已清理。pip 缓存清理失败，可能已删除部分内容",
+        ),
+    );
+    m.insert(
+        "warn.pip_cache_in_use",
+        (
+            "warning: pip cache {path} has no shared cleanup lock. Run cache clean after pip installs finish.",
+            "警告：pip 缓存 {path} 没有共享清理锁，请在 pip 安装结束后再执行 cache clean。",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_busy",
+        (
+            "uv cache {path} is in use. Retry after uv exits.",
+            "uv 缓存 {path} 正在使用，请在 uv 退出后重试。",
+        ),
+    );
+    m.insert(
+        "msg.uv_cache_native",
+        (
+            "running managed uv cache {operation} for {path}. uv may wait for active installs.",
+            "正在用受管 uv 对 {path} 执行 cache {operation}，uv 可能等待正在进行的安装。",
+        ),
+    );
+    m.insert(
+        "msg.uv_cache_empty",
+        ("no managed uv cache to prune", "没有可回收的受管 uv 缓存"),
+    );
+    m.insert(
+        "msg.uv_cache_prune_unavailable",
+        (
+            "managed uv is unavailable. To prune the cache, run `osdk install pypi:uv`.",
+            "受管 uv 不可用。要回收缓存，请先运行 `osdk install pypi:uv`。",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_version",
+        (
+            "uv {version} installs without the shared cache lock. Upgrade to uv {minimum} or later to maintain this cache.",
+            "uv {version} 安装时不持有共享缓存锁。请升级到 uv {minimum} 或更高版本后再维护缓存。",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_unknown_version",
+        (
+            "could not determine the managed uv version from `{path} --version`",
+            "无法通过 `{path} --version` 识别受管 uv 的版本",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_probe",
+        (
+            "could not check the managed uv version at {path} ({cause})",
+            "无法检查 {path} 中受管 uv 的版本（{cause}）",
+        ),
+    );
+    m.insert(
+        "err.uv_cache_command",
+        (
+            "`uv cache {operation}` failed for {path} ({cause})",
+            "`uv cache {operation}` 对 {path} 执行失败（{cause}）",
         ),
     );
     m.insert(

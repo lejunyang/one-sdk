@@ -3498,6 +3498,159 @@ fn yes_flag_confirms_cache_clean() {
     );
     assert!(!archive.exists());
     assert!(temp.path().join("cache/downloads").is_dir());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("shared cleanup lock"));
+}
+
+#[test]
+fn cache_clean_warns_for_pip_and_preserves_other_native_cache_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let pip = root.join("cache/pkg/pip");
+    std::fs::create_dir_all(&pip).unwrap();
+    std::fs::write(pip.join("wheel"), b"cached pip wheel").unwrap();
+    let uv = root.join("cache/pkg/uv");
+    std::fs::create_dir_all(&uv).unwrap();
+    std::fs::write(uv.join("wheel"), b"cached uv wheel").unwrap();
+    let protected = [
+        "cache/pkg/npm",
+        "cache/npm/v1/cache",
+        "cache/pkg/pnpm",
+        "cache/pkg/pnpm-store",
+        "cache/pkg/cargo/bin",
+        "data/cargo/bin",
+        "data/cargo/config",
+        "cache/pkg/go-mod",
+        "cache/pkg/go-build",
+        "cache/pkg/gradle",
+        "cache/pkg/yarn",
+        "cache/pkg/yarn-classic",
+        "cache/pkg/bun",
+        "cache/pkg/deno",
+        "cache/pkg/models",
+        "cache/remote",
+        "cache/sources",
+        "data/global/pnpm",
+        "data/global/yarn",
+        "data/models",
+        "data/shims",
+        "data/skills",
+        "config",
+        "store/npm",
+        "installs",
+    ];
+    for directory in protected {
+        let path = root.join(directory);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("keep"), directory).unwrap();
+    }
+
+    let prune = run_isolated(root, &["cache", "prune"]);
+    assert!(prune.status.success(), "{:?}", prune);
+    assert!(String::from_utf8_lossy(&prune.stdout).contains("managed uv is unavailable"));
+    assert!(pip.join("wheel").is_file());
+    assert!(uv.join("wheel").is_file());
+
+    let unconfirmed = run_isolated(root, &["cache", "clean"]);
+    assert!(!unconfirmed.status.success());
+    let stderr = String::from_utf8_lossy(&unconfirmed.stderr);
+    assert!(
+        stderr
+            .lines()
+            .next()
+            .unwrap()
+            .contains("shared cleanup lock"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("rerun with --yes"), "{stderr}");
+    assert!(pip.join("wheel").is_file());
+
+    let output = run_isolated(root, &["--yes", "--lang", "zh", "cache", "clean"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("没有共享清理锁"));
+    assert!(!pip.exists());
+    assert!(!uv.join("wheel").exists());
+    for directory in protected {
+        assert_eq!(
+            std::fs::read_to_string(root.join(directory).join("keep")).unwrap(),
+            directory
+        );
+    }
+}
+
+#[test]
+fn cache_clean_uv_fallback_respects_shared_and_exclusive_root_locks() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let uv = root.join("cache/pkg/uv");
+    let wheel = uv.join("archive-v0/wheel");
+    std::fs::create_dir_all(wheel.parent().unwrap()).unwrap();
+    std::fs::write(&wheel, b"cached wheel").unwrap();
+    let pip = root.join("cache/pkg/pip");
+    std::fs::create_dir_all(&pip).unwrap();
+    std::fs::write(pip.join("wheel"), b"pip cache").unwrap();
+    let lock_path = uv.join(".lock");
+    std::fs::write(&lock_path, b"original lock").unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        lock.metadata().unwrap().ino()
+    };
+
+    for shared in [true, false] {
+        if shared {
+            lock.lock_shared().unwrap();
+        } else {
+            lock.lock().unwrap();
+        }
+        let output = run_isolated(root, &["--yes", "cache", "clean"]);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("is in use"), "{stderr}");
+        assert!(
+            stderr.contains("download cache cleanup completed"),
+            "{stderr}"
+        );
+        assert!(wheel.is_file());
+        assert!(lock_path.is_file());
+        assert!(pip.join("wheel").is_file());
+        lock.unlock().unwrap();
+    }
+
+    let output = run_isolated(root, &["--yes", "cache", "clean"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(!pip.exists());
+    assert_eq!(std::fs::read_dir(&uv).unwrap().count(), 1);
+    assert_eq!(std::fs::read(&lock_path).unwrap(), b"original lock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), inode);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_clean_uv_fallback_creates_lock_and_removes_links_without_following_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let uv = root.join("cache/pkg/uv");
+    let model_dir = root.join("data/models");
+    std::fs::create_dir_all(&uv).unwrap();
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let model = model_dir.join("model.gguf");
+    std::fs::write(&model, b"model data").unwrap();
+    std::os::unix::fs::symlink(&model_dir, uv.join("link")).unwrap();
+
+    let output = run_isolated(root, &["--yes", "cache", "clean"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(std::fs::read(&model).unwrap(), b"model data");
+    assert!(uv.join(".lock").is_file());
+    assert_eq!(std::fs::read_dir(&uv).unwrap().count(), 1);
 }
 
 #[test]
@@ -12436,16 +12589,52 @@ fn cache_clean_refuses_a_native_cache_parent_link_to_persistent_models() {
     let model = temp.path().join("data/models/uv/unique-model.gguf");
     std::fs::create_dir_all(model.parent().unwrap()).unwrap();
     std::fs::write(&model, b"unique model data").unwrap();
-    std::fs::create_dir_all(temp.path().join("cache")).unwrap();
+    let archive = temp.path().join("cache/downloads/archive.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::write(&archive, b"cached download").unwrap();
     std::os::unix::fs::symlink(
         temp.path().join("data/models"),
         temp.path().join("cache/pkg"),
     )
     .unwrap();
-    let output = run_isolated(temp.path(), &["--yes", "cache", "clean"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in cache path"));
+    for action in ["clean", "prune"] {
+        let output = run_isolated(temp.path(), &["--yes", "cache", action]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in cache path"));
+    }
     assert_eq!(std::fs::read(&model).unwrap(), b"unique model data");
+    assert_eq!(std::fs::read(&archive).unwrap(), b"cached download");
+}
+
+#[test]
+fn cache_clean_preflights_pip_and_uv_lock_before_removing_downloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let archive = root.join("cache/downloads/archive.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::write(&archive, b"cached download").unwrap();
+    let uv = root.join("cache/pkg/uv");
+    std::fs::create_dir_all(&uv).unwrap();
+    std::fs::write(uv.join("wheel"), b"cached wheel").unwrap();
+    let pip = root.join("cache/pkg/pip");
+    std::fs::write(&pip, b"not a directory").unwrap();
+
+    let output = run_isolated(root, &["--yes", "cache", "clean"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).replace('\\', "/");
+    assert!(stderr.contains("/cache/pkg/pip"), "{stderr}");
+    assert!(archive.is_file());
+    assert!(uv.join("wheel").is_file());
+
+    std::fs::remove_file(&pip).unwrap();
+    std::fs::create_dir(uv.join(".lock")).unwrap();
+    for action in ["clean", "prune"] {
+        let output = run_isolated(root, &["--yes", "cache", action]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must be a regular file"));
+    }
+    assert!(archive.is_file());
+    assert!(uv.join("wheel").is_file());
 }
 
 #[test]
