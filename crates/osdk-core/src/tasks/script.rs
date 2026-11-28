@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use mlua::{DeserializeOptions, HookTriggers, Lua, LuaSerdeExt, Value, VmState};
 
 use crate::error::{Error, Result};
+use crate::fs::normalize_lexically;
 
 /// Captured stdout and stderr are deliberately bounded. A task that needs to
 /// stream an unbounded build log should use `run`, whose stdio is inherited.
@@ -342,7 +343,7 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     path.set(
         "absolute",
         lua.create_function(move |_, target: String| {
-            Ok(normalize_path(&resolve_path(&dir, &target))
+            Ok(normalize_lexically(&resolve_path(&dir, &target))
                 .to_string_lossy()
                 .to_string())
         })
@@ -353,8 +354,8 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     path.set(
         "relative",
         lua.create_function(move |_, (target, base): (String, Option<String>)| {
-            let target = normalize_path(&resolve_path(&dir, &target));
-            let base = normalize_path(&resolve_path(&dir, base.as_deref().unwrap_or(".")));
+            let target = normalize_lexically(&resolve_path(&dir, &target));
+            let base = normalize_lexically(&resolve_path(&dir, base.as_deref().unwrap_or(".")));
             Ok(relative_path(&target, &base).to_string_lossy().to_string())
         })
         .map_err(to_lua)?,
@@ -740,31 +741,6 @@ fn resolve_path(dir: &Path, target: &str) -> PathBuf {
     } else {
         dir.join(target)
     }
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    use std::path::Component;
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if normalized
-                    .file_name()
-                    .is_some_and(|name| name != std::ffi::OsStr::new(".."))
-                {
-                    normalized.pop();
-                } else if !normalized.has_root() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    normalized
 }
 
 fn relative_path(target: &Path, base: &Path) -> PathBuf {

@@ -57,6 +57,19 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 
 显式继承：子项目 `osdk.toml` 可设置 `extends = "../../osdk.toml"`。目录嵌套不会自动继承。优先级为 CLI/环境变量、子文件字段、显式继承的祖先字段、用户配置、默认值。映射按键合并（包括 env），标量与列表替换，`false`、`[]` 都是有效覆盖。继承的依赖 sources/outputs/dir 与任务 dir/file 路径属于声明它的文件。发现 roots/projects 留在根目录，已发现的子配置不能重定义整个目录。继承子项目以根项目声明为默认，显式 provider 字段优先；独立子配置自行声明 provider。根/子目录调用依赖使用同一目录与有效 provider/工具选项。继承链中每个可执行或改变来源的配置都单独检查信任，信任子文件不代表信任父文件。自身循环、非祖先引用及越过仓库边界均报错。`[task].roots` 仍单独负责聚合；继承的 runner 默认值转换到具体子任务。
 
-迁移：显式 `sources`/`outputs` 路径统一属于声明它的配置文件，根配置声明子项目时需要项目路径前缀（如 `sources = ["apps/api/package.json"]`）；内置默认路径仍属于识别的项目。`sources = []` 去掉默认输入，无法证明 freshness；原生 workspace 仍保留必需的成员/锁输入。自动准备工具会应用子项目工具选项和来源设置；共享 workspace 要求有效工具上下文一致。
+迁移：显式 `sources`/`outputs` 路径统一属于声明它的配置文件，根配置声明子项目时需要项目路径前缀（如 `sources = ["apps/api/package.json"]`）；内置默认路径仍属于识别的项目。`sources = []` 去掉默认输入，无法证明 freshness；pnpm 和 uv 的共享安装仍保留必需的成员与锁输入。自动准备工具会应用子项目工具选项和来源设置；共享 workspace 要求有效工具上下文一致。
+
+Cargo 成员可从根配置用 `[deps].roots` 单独声明，启用 `[deps.cargo]` 即可。
+Cargo 决定成员归属。若还没有可用的 Cargo，本地锁可用于暂定预览。允许安装工具的实际调用
+会先准备 Rust，再用该工具链的 Cargo 确认锁归属。确认的成员在成员目录拉取，默认使用工作区根锁，
+也支持 Cargo 1.97 起通过 `resolver.lockfile-path` 或 `CARGO_RESOLVER_LOCKFILE_PATH`
+指定的锁。若 `CARGO_HOME` 为空，配置从有效的 `HOME`（Windows 上是 `USERPROFILE`）
+下的 `.cargo` 读取。已知锁路径缺少文件时，osdk 拒绝冻结计划。锁路径未确定时，冻结预览
+仍可显示 `cargo fetch --locked`，实际拉取由 Cargo 校验。新鲜度依据实际生效的锁、
+Cargo 配置、根清单及成员清单。
+Cargo 由共享 rustup 代理提供时，代理使用 osdk 为该项目选中的工具链。
+工作区外的路径依赖会触发实际的冻结拉取。独立 crate 已有本地锁时，即使无法确定
+实际锁路径，普通 `deps` 也会运行 `cargo fetch --locked`，由 Cargo 校验。
+Cargo 的 `sources = []` 会关闭新鲜度判定。
 
 裸 `depends` 名称限定同项目或共享 workspace 内的 provider；跨安装单元使用 `//path:provider`。依赖顺序不会隐式启用未选择的 provider。共享成员的包管理器版本声明冲突会报错。

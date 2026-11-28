@@ -534,9 +534,9 @@ Command overrides accept argv arrays, such as `run = ["pnpm", "install", "--offl
 
 You don't have to call it every time. A bare `osdk install`, `osdk run <task>` or
 `osdk exec` compares manifest hashes first and materializes only when stale. On a
-hit that costs a fraction of a millisecond, starts no package manager, and does not
-run the deep `--verify` scan. Naming a tool (`osdk install node@22`) never triggers
-it; skip once with `--no-deps`, or turn it off per provider with `auto = false`:
+hit it skips the install. Use `osdk deps --verify` for a deep scan. Naming a tool
+(`osdk install node@22`) never triggers a deps install. Skip once with `--no-deps`,
+or turn it off per provider with `auto = false`:
 
 ```bash
 osdk run dev                # materialize if stale, then run the task
@@ -545,17 +545,18 @@ osdk run dev --no-deps      # not this time
 
 For `pip-requirements`, osdk resolves the full transitive closure with
 `uv pip install -r`; a top-level `requirements.txt` is not treated as an exact
-lock or synchronized set. For providers with native locks, osdk decides
-frozen-vs-not by looking for the lockfile itself rather than
-delegating it: with a lockfile it installs frozen, without one it falls back to
-a plain install **and says so**. That matters because `yarn@1` and `bun` install
-happily with no lockfile at all, so passing a flag and trusting it would be
-silently wrong on half the matrix. Use `--frozen` to turn that fallback into an
-error:
+lock or synchronized set. Use `--frozen` in CI to require an existing native
+lockfile that the provider can use without changing it.
 
 ```bash
 osdk deps --frozen
 ```
+
+In a Cargo workspace, `osdk deps //crates/demo:cargo --frozen --no-install-tools`
+uses the workspace lock selected by Cargo, usually the root `Cargo.lock`, even
+if the member directory still has its own lockfile. Install or link Rust first
+when using `--no-install-tools`. For a standalone crate with a committed
+`Cargo.lock`, `osdk deps --frozen` can prepare Rust on the first run.
 
 Build and lifecycle scripts are off by default. Turn them on per provider, which
 requires approving the config:

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 fn run(root: &Path, cwd: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_osdk"))
@@ -16,6 +16,1003 @@ fn write(root: &Path, path: &str, text: &str) {
     let path = root.join(path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
+}
+
+fn native_test_cargo() -> PathBuf {
+    let cargo = std::env::var_os("OSDK_TEST_CARGO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO")));
+    assert!(
+        cargo.is_absolute() && cargo.is_file() && matching_rustc(&cargo).is_file(),
+        "set OSDK_TEST_CARGO to the absolute path of a native Cargo next to rustc: {}",
+        cargo.display()
+    );
+    cargo
+}
+
+fn matching_rustc(cargo: &Path) -> PathBuf {
+    cargo.with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+}
+
+struct CargoWorkspace {
+    temp: tempfile::TempDir,
+    cargo: PathBuf,
+}
+
+impl CargoWorkspace {
+    fn new(cargo: PathBuf) -> Self {
+        let temp = tempfile::Builder::new()
+            .prefix("osdk Cargo 工作区 ")
+            .tempdir()
+            .unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("state/home")).unwrap();
+        write(
+            root,
+            "Cargo.toml",
+            "[workspace]\nmembers = ['crates/demo', 'crates/other']\nresolver = '3'\n",
+        );
+        write(
+            root,
+            "osdk.toml",
+            "[tools]\nrust = '=trial-rust'\n[deps]\nroots = ['crates/demo']\n[deps.cargo]\n",
+        );
+        write(root, "crates/demo/src/lib.rs", "");
+        write(root, "crates/other/src/lib.rs", "");
+        write(
+            root,
+            "crates/demo/Cargo.toml",
+            "[package]\nname = 'demo'\nversion = '0.1.0'\nedition = '2024'\n",
+        );
+        write(
+            root,
+            "crates/other/Cargo.toml",
+            "[package]\nname = 'other'\nversion = '0.1.0'\nedition = '2024'\n",
+        );
+        Self { temp, cargo }
+    }
+
+    fn standalone(cargo: PathBuf) -> Self {
+        let fixture = Self::new(cargo);
+        let root = fixture.temp.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = 'standalone'\nversion = '0.1.0'\nedition = '2024'\n",
+        );
+        write(root, "src/lib.rs", "");
+        write(
+            root,
+            "osdk.toml",
+            "[tools]\nrust = '=trial-rust'\n[deps.cargo]\n",
+        );
+        fixture
+    }
+
+    fn command(&self, program: &Path) -> Command {
+        let root = self.temp.path();
+        let mut command = Command::new(program);
+        command
+            .current_dir(root)
+            .env("HOME", root.join("state/home"))
+            .env("USERPROFILE", root.join("state/home"))
+            .env("CARGO_HOME", root.join("state/cargo"))
+            .env_remove("CARGO_RESOLVER_LOCKFILE_PATH")
+            .env("RUSTUP_HOME", root.join("state/rustup"))
+            .env("RUSTC", matching_rustc(&self.cargo))
+            .env("CARGO_TARGET_DIR", root.join("state/target"))
+            .env("CARGO_NET_OFFLINE", "true");
+        command
+    }
+
+    fn link_rust(&self) {
+        let root = self.temp.path();
+        let toolchain = self.cargo.parent().unwrap().parent().unwrap();
+        write(root, "state/installs/rust/trial-rust/.osdk-complete", "");
+        write(
+            root,
+            "state/installs/rust/trial-rust/.osdk-linked",
+            toolchain.to_str().unwrap(),
+        );
+    }
+
+    fn link_rust_with_shared_cargo(&self) -> PathBuf {
+        let root = self.temp.path();
+        let rustc = matching_rustc(&self.cargo);
+        let linked = root.join("local-rust");
+        std::fs::create_dir_all(linked.join("bin")).unwrap();
+        // The linked sysroot contributes rustc, while the shared bin owns Cargo.
+        std::fs::copy(&rustc, linked.join("bin").join(rustc.file_name().unwrap())).unwrap();
+        write(root, "state/installs/rust/trial-rust/.osdk-complete", "");
+        write(
+            root,
+            "state/installs/rust/trial-rust/.osdk-linked",
+            linked.to_str().unwrap(),
+        );
+        let bin = root.join("state/data/cargo/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        bin.join(self.cargo.file_name().unwrap())
+    }
+
+    fn native(&self, args: &[&str]) -> Output {
+        self.command(&self.cargo).args(args).output().unwrap()
+    }
+
+    fn osdk(&self) -> Command {
+        let root = self.temp.path();
+        let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_osdk")));
+        command
+            .env("OSDK_OFFLINE", "true")
+            .env("OSDK_CONFIG_DIR", root.join("state/config"))
+            .env("OSDK_DATA_DIR", root.join("state/data"))
+            .env("OSDK_CACHE_DIR", root.join("state/cache"))
+            .env("OSDK_INSTALL_DIR", root.join("state/installs"))
+            .env("OSDK_STORE_DIR", root.join("state/store"));
+        command
+    }
+
+    fn run(&self, provider: &str, extra: &[&str]) -> Output {
+        self.osdk()
+            .args(["deps", provider, "--frozen", "--no-install-tools"])
+            .args(extra)
+            .output()
+            .unwrap()
+    }
+
+    fn member(&self, extra: &[&str]) -> Output {
+        self.run("//crates/demo:cargo", extra)
+    }
+
+    fn generate_lock(&self) -> Vec<u8> {
+        let output = self.native(&["generate-lockfile", "--offline"]);
+        assert!(output.status.success(), "{output:?}");
+        std::fs::read(self.temp.path().join("Cargo.lock")).unwrap()
+    }
+
+    fn assert_locks(&self, expected: Option<&[u8]>) {
+        let root = self.temp.path();
+        match expected {
+            Some(bytes) => assert_eq!(std::fs::read(root.join("Cargo.lock")).unwrap(), bytes),
+            None => assert!(!root.join("Cargo.lock").exists()),
+        }
+        assert!(!root.join("crates/demo/Cargo.lock").exists());
+    }
+}
+
+#[test]
+fn cargo_metadata_unavailable_explains_why_a_member_cannot_freeze() {
+    let fixture = CargoWorkspace::new(PathBuf::from(env!("CARGO")));
+    let output = fixture.member(&["--dry-run"]);
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("without an installed or linked Cargo"),
+        "{error}"
+    );
+    assert!(error.contains("osdk install rust"), "{error}");
+    fixture.assert_locks(None);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_standalone_frozen_uses_cargo_from_the_shared_bin() {
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    let lock = fixture.generate_lock();
+    let shared = fixture.link_rust_with_shared_cargo();
+    std::fs::copy(&fixture.cargo, shared).unwrap();
+
+    let preview = fixture.run("cargo", &["--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+    let actual = fixture.run("cargo", &["--explain"]);
+    assert!(actual.status.success(), "{actual:?}");
+    let stdout = String::from_utf8_lossy(&actual.stdout);
+    assert!(stdout.contains("Cargo workspace query:"), "{stdout}");
+    assert!(stdout.contains("cargo fetch --locked"), "{stdout}");
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
+#[cfg(unix)]
+fn cargo_standalone_frozen_selects_linked_rust_for_the_real_proxy() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    let lock = fixture.generate_lock();
+    let root = fixture.temp.path();
+    let rustup_home = root.join("state/data/rustup");
+    let toolchains = rustup_home.join("toolchains");
+    std::fs::create_dir_all(&toolchains).unwrap();
+    let host = osdk_core::platform::Platform::current().llvm_triple();
+    let native_toolchain = fixture.cargo.parent().unwrap().parent().unwrap();
+    symlink(native_toolchain, toolchains.join(format!("stable-{host}"))).unwrap();
+
+    let shared_bin = root.join("state/data/cargo/bin");
+    std::fs::create_dir_all(&shared_bin).unwrap();
+    let cargo_bin = std::env::var_os("CARGO_HOME").map(|home| PathBuf::from(home).join("bin"));
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    // In an activated osdk environment, PATH may put dispatch shims first.
+    let rustup = cargo_bin
+        .into_iter()
+        .chain(std::env::split_paths(&path))
+        .map(|dir| dir.join("rustup"))
+        .find(|program| program.is_file())
+        .expect("the real Cargo proxy test requires rustup in CARGO_HOME/bin or on PATH");
+    let isolated_rustup = shared_bin.join("rustup");
+    std::fs::copy(rustup, &isolated_rustup).unwrap();
+    let proxy = shared_bin.join("cargo");
+    std::fs::hard_link(isolated_rustup, &proxy).unwrap();
+
+    let linked = root.join("local-rust");
+    std::fs::create_dir_all(linked.join("bin")).unwrap();
+    symlink(native_toolchain.join("lib"), linked.join("lib")).unwrap();
+    symlink(matching_rustc(&fixture.cargo), linked.join("bin/rustc")).unwrap();
+    let registration = fixture
+        .osdk()
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(["rust", "toolchain", "link", "trial-rust"])
+        .arg(&linked)
+        .output()
+        .unwrap();
+    assert!(registration.status.success(), "{registration:?}");
+
+    let unselected = fixture
+        .command(&proxy)
+        .env("RUSTUP_HOME", &rustup_home)
+        .env("CARGO_HOME", shared_bin.parent().unwrap())
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .args(["fetch", "--locked", "--offline"])
+        .output()
+        .unwrap();
+    assert!(!unselected.status.success(), "{unselected:?}");
+    assert!(String::from_utf8_lossy(&unselected.stderr).contains("no default is configured"));
+
+    let actual = fixture
+        .osdk()
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .args([
+            "deps",
+            "cargo",
+            "--frozen",
+            "--no-install-tools",
+            "--explain",
+        ])
+        .output()
+        .unwrap();
+    assert!(actual.status.success(), "{actual:?}");
+    let stdout = String::from_utf8_lossy(&actual.stdout);
+    assert!(stdout.contains("Cargo workspace root:"), "{stdout}");
+    assert!(
+        stdout.contains("cargo fetch --locked --offline"),
+        "{stdout}"
+    );
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
+#[cfg(unix)]
+fn cargo_standalone_frozen_rechecks_shared_proxy_when_metadata_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    let lock = fixture.generate_lock();
+    let proxy = fixture.link_rust_with_shared_cargo();
+    for metadata in ["exit 1", "echo 'proxy banner'; exit 0"] {
+        std::fs::write(
+            &proxy,
+            format!(
+                "#!/bin/sh\n[ \"$RUSTUP_AUTO_INSTALL\" = '0' ] || exit 2\nif [ \"$1\" = metadata ]; then\n{metadata}\nfi\nexec \"$(dirname \"$RUSTC\")/cargo\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..2 {
+            let actual = fixture
+                .osdk()
+                .env("RUSTUP_AUTO_INSTALL", "1")
+                .args(["deps", "cargo", "--frozen", "--no-install-tools"])
+                .output()
+                .unwrap();
+            assert!(actual.status.success(), "{metadata}: {actual:?}");
+            assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+        }
+    }
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_standalone_preserves_lock_when_config_cannot_be_parsed() {
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    write(
+        root,
+        ".cargo/config.toml",
+        "term = {\n    progress.when = 'never',\n}\n",
+    );
+    let native = fixture.native(&["fetch", "--locked", "--offline"]);
+    assert!(native.status.success(), "{native:?}");
+    let run = || {
+        fixture
+            .osdk()
+            .args(["deps", "cargo", "--no-install-tools"])
+            .output()
+            .unwrap()
+    };
+    for _ in 0..2 {
+        let actual = run();
+        assert!(actual.status.success(), "{actual:?}");
+        assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    }
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    write(root, "Cargo.toml", &manifest.replace("0.1.0", "0.2.0"));
+    let actual = run();
+    let bytes = std::fs::read(root.join("Cargo.lock")).unwrap();
+    assert!(
+        !actual.status.success() && bytes == lock,
+        "expected stale-lock rejection and identical bytes, got {actual:?}, unchanged={}",
+        bytes == lock
+    );
+    assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_standalone_does_not_record_an_unconfirmed_lock() {
+    let fixture = CargoWorkspace::standalone(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let local_lock = fixture.generate_lock();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    write(root, "Cargo.toml", &manifest.replace("0.1.0", "0.2.0"));
+    let alternate = root.join("alternate/Cargo.lock");
+    std::fs::create_dir(alternate.parent().unwrap()).unwrap();
+    let generated = fixture
+        .command(&fixture.cargo)
+        .env("CARGO_RESOLVER_LOCKFILE_PATH", &alternate)
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{generated:?}");
+    let alternate_lock = std::fs::read(&alternate).unwrap();
+    assert_ne!(local_lock, alternate_lock);
+    write(
+        root,
+        ".cargo/config.toml",
+        "term = {\n    progress.when = 'never',\n}\n[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+    );
+
+    let actual = fixture
+        .osdk()
+        .args(["deps", "cargo", "--no-install-tools"])
+        .output()
+        .unwrap();
+    assert!(actual.status.success(), "{actual:?}");
+    assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    fixture.assert_locks(Some(&local_lock));
+    assert_eq!(std::fs::read(&alternate).unwrap(), alternate_lock);
+
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("osdk.lock")).unwrap()).unwrap();
+    let cargo = saved["deps"]["cargo"].as_table().unwrap();
+    assert!(!cargo.contains_key("native_lock"), "{cargo:?}");
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    let verified = fixture
+        .osdk()
+        .args(["deps", "cargo", "--verify"])
+        .output()
+        .unwrap();
+    assert!(verified.status.success(), "{verified:?}");
+    fixture.assert_locks(None);
+    assert_eq!(std::fs::read(alternate).unwrap(), alternate_lock);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_frozen_prepares_rust_before_accepting_a_local_lock() {
+    let cargo = native_test_cargo();
+    for workspace_member in [false, true] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        let root = fixture.temp.path();
+        let config = root.join("osdk.toml");
+        let mut config_text = std::fs::read_to_string(&config).unwrap();
+        let provider = if workspace_member {
+            let lock = fixture.generate_lock();
+            std::fs::write(root.join("crates/demo/Cargo.lock"), lock).unwrap();
+            std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+            "//crates/demo:cargo"
+        } else {
+            write(
+                root,
+                "Cargo.toml",
+                "[package]\nname = 'standalone'\nversion = '0.1.0'\nedition = '2024'\n",
+            );
+            write(root, "src/lib.rs", "");
+            fixture.generate_lock();
+            config_text = config_text.replace("[deps]\nroots = ['crates/demo']\n", "");
+            "cargo"
+        };
+        // Cached native binaries, without the marker used by osdk to select Rust.
+        // Preseed the rustup bootstrap as well so tool preparation stays offline.
+        write(
+            root,
+            &format!(
+                "state/data/cargo/bin/rustup{}",
+                std::env::consts::EXE_SUFFIX
+            ),
+            "",
+        );
+        let bin = root.join("state/data/rustup/toolchains/trial-rust/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for binary in [&cargo, &matching_rustc(&cargo)] {
+            std::fs::copy(binary, bin.join(binary.file_name().unwrap())).unwrap();
+        }
+        std::fs::write(config, config_text).unwrap();
+        let marker = root.join("state/installs/rust/trial-rust/.osdk-complete");
+        let local_lock = root.join(if workspace_member {
+            "crates/demo/Cargo.lock"
+        } else {
+            "Cargo.lock"
+        });
+        let bytes = std::fs::read(&local_lock).unwrap();
+
+        let preview = fixture.run(provider, &["--dry-run"]);
+        assert!(preview.status.success(), "{preview:?}");
+        assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+        assert!(!marker.exists());
+
+        let forbidden = fixture.run(provider, &[]);
+        assert!(!forbidden.status.success(), "{forbidden:?}");
+        assert!(String::from_utf8_lossy(&forbidden.stderr).contains("--no-install-tools"));
+        assert!(!marker.exists());
+
+        let actual = fixture
+            .osdk()
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root.join("osdk.toml"))
+            .args(["deps", provider, "--frozen"])
+            .output()
+            .unwrap();
+        assert!(marker.is_file(), "{actual:?}");
+        if workspace_member {
+            assert!(!actual.status.success(), "{actual:?}");
+            assert!(
+                String::from_utf8_lossy(&actual.stderr)
+                    .contains("no Cargo.lock in Cargo workspace root"),
+                "{actual:?}"
+            );
+            assert!(!root.join("Cargo.lock").exists());
+        } else {
+            assert!(actual.status.success(), "{actual:?}");
+            assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+        }
+        assert_eq!(std::fs::read(local_lock).unwrap(), bytes);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_workspace_member_frozen_uses_the_native_root_lock() {
+    let cargo = native_test_cargo();
+    for scenario in ["valid", "missing", "stale", "excluded", "unlisted"] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        fixture.link_rust();
+        let root = fixture.temp.path();
+        if scenario == "excluded" || scenario == "unlisted" {
+            let exclude = if scenario == "excluded" {
+                "exclude = ['crates/demo']\n"
+            } else {
+                ""
+            };
+            write(
+                root,
+                "Cargo.toml",
+                &format!("[workspace]\nmembers = ['crates/other']\nresolver = '3'\n{exclude}"),
+            );
+        }
+        let lock = (scenario != "missing").then(|| fixture.generate_lock());
+        if scenario == "stale" {
+            let first = fixture.member(&[]);
+            assert!(first.status.success(), "{first:?}");
+            let unchanged = fixture.member(&[]);
+            assert!(unchanged.status.success(), "{unchanged:?}");
+            assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+            eprintln!("unchanged member: successful frozen fetch reused the cache");
+            write(
+                root,
+                "crates/other/Cargo.toml",
+                "[package]\nname = 'other'\nversion = '0.2.0'\nedition = '2024'\n",
+            );
+            let native = fixture.native(&[
+                "fetch",
+                "--locked",
+                "--offline",
+                "--manifest-path",
+                "crates/demo/Cargo.toml",
+            ]);
+            assert!(!native.status.success(), "{native:?}");
+            let stderr = String::from_utf8_lossy(&native.stderr);
+            assert!(
+                stderr.contains("lock file") && stderr.contains("--locked"),
+                "{stderr}"
+            );
+        }
+
+        let preview = fixture.member(&["--dry-run"]);
+        fixture.assert_locks(lock.as_deref());
+        let actual = fixture.member(&[]);
+        fixture.assert_locks(lock.as_deref());
+        let statuses = (preview.status.code(), actual.status.code());
+        if scenario == "valid" || scenario == "stale" {
+            let expected = "cargo fetch --locked --offline";
+            assert!(preview.status.success(), "{scenario}: {preview:?}");
+            let stdout = String::from_utf8_lossy(&preview.stdout);
+            assert!(
+                stdout.contains("would run in") && stdout.contains(expected),
+                "{stdout}"
+            );
+            assert!(
+                String::from_utf8_lossy(&actual.stdout).contains(expected),
+                "{actual:?}"
+            );
+            if scenario == "valid" {
+                assert!(actual.status.success(), "{actual:?}");
+                let explain = fixture.member(&["--list", "--explain"]);
+                assert!(explain.status.success(), "{explain:?}");
+                let text = String::from_utf8_lossy(&explain.stdout);
+                assert!(text.contains("Cargo workspace query: "), "{text}");
+                assert!(text.contains("Cargo workspace root: "), "{text}");
+                assert!(
+                    text.contains("native lock: ") && text.contains("Cargo.lock"),
+                    "{text}"
+                );
+                assert!(text.contains(expected), "{text}");
+                let root_plan = fixture.run("//:cargo", &["--dry-run"]);
+                assert!(root_plan.status.success(), "{root_plan:?}");
+                assert!(
+                    String::from_utf8_lossy(&root_plan.stdout).contains(expected),
+                    "{root_plan:?}"
+                );
+            } else {
+                assert!(!actual.status.success(), "{actual:?}");
+                let stderr = String::from_utf8_lossy(&actual.stderr);
+                assert!(
+                    stderr.contains("lock file") && stderr.contains("--locked"),
+                    "{stderr}"
+                );
+            }
+        } else {
+            let reason = match scenario {
+                "missing" => "no Cargo.lock in Cargo workspace root ",
+                "excluded" => "Cargo uses this directory as its workspace root",
+                "unlisted" => "current package believes it's in a workspace when it's not",
+                _ => unreachable!(),
+            };
+            for output in [preview, actual] {
+                assert!(!output.status.success(), "{scenario}: {output:?}");
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains(reason), "{scenario}: {stderr}");
+                assert!(!String::from_utf8_lossy(&output.stdout).contains("cargo fetch"));
+            }
+        }
+        eprintln!("{scenario}: preview/actual exit {statuses:?}; lock bytes and presence checked");
+    }
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_workspace_member_ignores_a_leftover_local_lock() {
+    let cargo = native_test_cargo();
+    for remove_root_lock in [true, false] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        let root = fixture.temp.path();
+        let member_lock = root.join("crates/demo/Cargo.lock");
+        fixture.link_rust();
+        let lock = fixture.generate_lock();
+        std::fs::write(&member_lock, &lock).unwrap();
+        let first = fixture.member(&[]);
+        assert!(first.status.success(), "{first:?}");
+        let unchanged = fixture.member(&[]);
+        assert!(unchanged.status.success(), "{unchanged:?}");
+        assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+
+        let root_lock = root.join("Cargo.lock");
+        let reason = if remove_root_lock {
+            std::fs::remove_file(&root_lock).unwrap();
+            let preview = fixture.member(&["--dry-run"]);
+            assert!(!preview.status.success(), "{preview:?}");
+            "no Cargo.lock in Cargo workspace root"
+        } else {
+            write(
+                root,
+                "crates/other/Cargo.toml",
+                "[package]\nname = 'other'\nversion = '0.2.0'\nedition = '2024'\n",
+            );
+            "lock file"
+        };
+        let actual = fixture.member(&[]);
+        assert!(!actual.status.success(), "{actual:?}");
+        let stderr = String::from_utf8_lossy(&actual.stderr);
+        assert!(
+            stderr.contains(reason) && stderr.contains("--locked"),
+            "{stderr}"
+        );
+        if remove_root_lock {
+            assert!(!root_lock.exists());
+        } else {
+            assert_eq!(std::fs::read(&root_lock).unwrap(), lock);
+        }
+        assert_eq!(std::fs::read(&member_lock).unwrap(), lock);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_requires_native_membership_even_with_a_local_lock() {
+    let cargo = native_test_cargo();
+    let fixture = CargoWorkspace::new(cargo);
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let workspace = "[workspace]\nmembers = ['crates/other']\nresolver = '3'\n";
+    write(
+        root,
+        "Cargo.toml",
+        &format!("{workspace}exclude = ['crates/demo']\n"),
+    );
+    let root_lock = fixture.generate_lock();
+    let native = fixture.native(&[
+        "generate-lockfile",
+        "--offline",
+        "--manifest-path",
+        "crates/demo/Cargo.toml",
+    ]);
+    assert!(native.status.success(), "{native:?}");
+    let member_lock = root.join("crates/demo/Cargo.lock");
+    let local = std::fs::read(&member_lock).unwrap();
+    let excluded = fixture.member(&[]);
+    assert!(excluded.status.success(), "{excluded:?}");
+    assert!(String::from_utf8_lossy(&excluded.stdout).contains("cargo fetch --locked"));
+
+    write(root, "Cargo.toml", workspace);
+    for extra in [&[][..], &["--dry-run"][..]] {
+        let unlisted = fixture.member(extra);
+        assert!(!unlisted.status.success(), "{unlisted:?}");
+        let stderr = String::from_utf8_lossy(&unlisted.stderr);
+        assert!(
+            stderr.contains("current package believes it's in a workspace"),
+            "{stderr}"
+        );
+    }
+    assert_eq!(std::fs::read(root.join("Cargo.lock")).unwrap(), root_lock);
+    assert_eq!(std::fs::read(member_lock).unwrap(), local);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_workspace_frozen_tracks_the_effective_lock_path() {
+    let cargo = native_test_cargo();
+    for source in ["provider environment", "nested Cargo config"] {
+        let fixture = CargoWorkspace::new(cargo.clone());
+        fixture.link_rust();
+        let root = fixture.temp.path();
+        let lock = fixture.generate_lock();
+        let configured = root.join("alternate/Cargo.lock");
+        std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
+        std::fs::write(&configured, &lock).unwrap();
+        if source == "provider environment" {
+            let config = root.join("osdk.toml");
+            let mut text = std::fs::read_to_string(&config).unwrap();
+            text.push_str(
+                "[deps.cargo.env]\nCARGO_RESOLVER_LOCKFILE_PATH = '../../alternate/Cargo.lock'\n",
+            );
+            std::fs::write(config, text).unwrap();
+        } else {
+            write(
+                root,
+                ".cargo/config.toml",
+                "include = ['rules/lock.toml']\n",
+            );
+            write(
+                root,
+                ".cargo/rules/lock.toml",
+                "include = ['../resolver.toml']\n",
+            );
+            write(
+                root,
+                ".cargo/resolver.toml",
+                "[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+            );
+            let native = fixture.native(&[
+                "fetch",
+                "--locked",
+                "--offline",
+                "--manifest-path",
+                "crates/demo/Cargo.toml",
+            ]);
+            assert!(native.status.success(), "{native:?}");
+        }
+
+        let first = fixture.member(&[]);
+        assert!(first.status.success(), "{source}: {first:?}");
+        let unchanged = fixture.member(&[]);
+        assert!(unchanged.status.success(), "{source}: {unchanged:?}");
+        assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+        let stale = String::from_utf8(lock.clone())
+            .unwrap()
+            .replace("version = \"0.1.0\"", "version = \"0.9.0\"");
+        std::fs::write(&configured, &stale).unwrap();
+        let rejected = fixture.member(&[]);
+        assert!(!rejected.status.success(), "{source}: {rejected:?}");
+        assert!(String::from_utf8_lossy(&rejected.stdout).contains("cargo fetch --locked"));
+        assert_eq!(std::fs::read(&configured).unwrap(), stale.as_bytes());
+        std::fs::remove_file(&configured).unwrap();
+        for extra in [&[][..], &["--dry-run"][..]] {
+            let missing = fixture.member(extra);
+            assert!(!missing.status.success(), "{source}: {missing:?}");
+            let stderr = String::from_utf8_lossy(&missing.stderr);
+            assert!(
+                stderr.contains("alternate") && stderr.contains("Cargo.lock"),
+                "{stderr}"
+            );
+            assert!(!configured.exists());
+        }
+        fixture.assert_locks(Some(&lock));
+
+        std::fs::write(&configured, &lock).unwrap();
+        std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+        let preview = fixture.member(&["--dry-run", "--force"]);
+        assert!(preview.status.success(), "{source}: {preview:?}");
+        assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+        let actual = fixture.member(&["--force"]);
+        assert!(actual.status.success(), "{source}: {actual:?}");
+        assert_eq!(std::fs::read(configured).unwrap(), lock);
+        fixture.assert_locks(None);
+    }
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    target_env = "gnu",
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_workspace_frozen_uses_exact_lockfile_environment_key() {
+    let fixture = CargoWorkspace::new(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    let alternate = root.join("alternate/Cargo.lock");
+    std::fs::create_dir(alternate.parent().unwrap()).unwrap();
+    std::fs::write(&alternate, &lock).unwrap();
+    let config_path = root.join("osdk.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        config_path,
+        format!(
+            "{config}[deps.cargo.env]\ncargo_resolver_lockfile_path = '../../alternate/Cargo.lock'\n"
+        ),
+    )
+    .unwrap();
+
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    let unchanged = fixture.member(&[]);
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    let missing = fixture.member(&[]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no Cargo.lock in Cargo workspace root")
+    );
+    fixture.assert_locks(None);
+    assert_eq!(std::fs::read(alternate).unwrap(), lock);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_workspace_frozen_tracks_lock_under_provider_home() {
+    let fixture = CargoWorkspace::new(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    let home = root.join("provider-home");
+    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let config = root.join("osdk.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let home_value = toml::Value::String(home.to_str().unwrap().into());
+    std::fs::write(
+        config,
+        format!("{text}[deps.cargo.env]\nCARGO_HOME = ''\n{home_key} = {home_value}\n"),
+    )
+    .unwrap();
+    write(
+        root,
+        "provider-home/.cargo/config.toml",
+        "[resolver]\nlockfile-path = 'alternate/Cargo.lock/'\n",
+    );
+    let configured_lock = home.join("alternate/Cargo.lock");
+    std::fs::create_dir_all(configured_lock.parent().unwrap()).unwrap();
+    std::fs::write(&configured_lock, &lock).unwrap();
+    let native = || {
+        fixture
+            .command(&fixture.cargo)
+            .current_dir(root.join("crates/demo"))
+            .env("CARGO_HOME", "")
+            .env(home_key, &home)
+            .args(["fetch", "--locked", "--offline"])
+            .output()
+            .unwrap()
+    };
+    let native_first = native();
+    assert!(native_first.status.success(), "{native_first:?}");
+
+    let preview = fixture.member(&["--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("cargo fetch --locked"));
+
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    assert!(String::from_utf8_lossy(&first.stdout).contains("cargo fetch --locked"));
+    let unchanged = fixture.member(&[]);
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+    assert_eq!(std::fs::read(&configured_lock).unwrap(), lock);
+    std::fs::remove_file(&configured_lock).unwrap();
+    let native_missing = native();
+    assert!(!native_missing.status.success(), "{native_missing:?}");
+    assert!(String::from_utf8_lossy(&native_missing.stderr).contains("alternate"));
+
+    let missing = fixture.member(&[]);
+    assert!(!missing.status.success(), "{missing:?}");
+    let error = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        error.contains("provider-home") && error.contains("alternate"),
+        "{error}"
+    );
+    assert!(!configured_lock.exists());
+    fixture.assert_locks(Some(&lock));
+}
+
+#[test]
+#[cfg(unix)]
+fn cargo_workspace_frozen_deduplicates_cargo_home_by_directory() {
+    let fixture = CargoWorkspace::new(native_test_cargo());
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    let lock = fixture.generate_lock();
+    let shared = root.join("shared/cargo");
+    write(
+        root,
+        "shared/cargo/config.toml",
+        "include = [{ path = '../profile.toml', optional = true }]\n",
+    );
+    // This include would only be found through the CARGO_HOME spelling.
+    write(
+        root,
+        "shared/profile.toml",
+        "[resolver]\nlockfile-path = 'alternate/Cargo.lock'\n",
+    );
+    let alternate = root.join("alternate/Cargo.lock");
+    std::fs::create_dir(alternate.parent().unwrap()).unwrap();
+    std::fs::write(&alternate, &lock).unwrap();
+    std::os::unix::fs::symlink(&shared, root.join(".cargo")).unwrap();
+    let config_path = root.join("osdk.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    let home = toml::Value::String(shared.to_str().unwrap().into());
+    std::fs::write(
+        config_path,
+        format!("{config}[deps.cargo.env]\nCARGO_HOME = {home}\n"),
+    )
+    .unwrap();
+
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    assert!(String::from_utf8_lossy(&first.stdout).contains("cargo fetch --locked"));
+    let unchanged = fixture.member(&[]);
+    assert!(unchanged.status.success(), "{unchanged:?}");
+    assert!(String::from_utf8_lossy(&unchanged.stdout).contains("is up to date"));
+
+    std::fs::remove_file(root.join("Cargo.lock")).unwrap();
+    let native = fixture
+        .command(&fixture.cargo)
+        .current_dir(root.join("crates/demo"))
+        .env("CARGO_HOME", shared)
+        .args(["fetch", "--locked", "--offline"])
+        .output()
+        .unwrap();
+    assert!(!native.status.success(), "{native:?}");
+    let missing = fixture.member(&[]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no Cargo.lock in Cargo workspace root")
+    );
+    fixture.assert_locks(None);
+    assert_eq!(std::fs::read(alternate).unwrap(), lock);
+}
+
+#[test]
+#[cfg_attr(
+    all(windows, target_env = "gnu"),
+    ignore = "run with Windows Cargo and rustc via OSDK_TEST_CARGO"
+)]
+fn cargo_workspace_frozen_rechecks_nonmember_path_dependencies() {
+    let cargo = native_test_cargo();
+    let fixture = CargoWorkspace::new(cargo);
+    fixture.link_rust();
+    let root = fixture.temp.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = ['crates/demo', 'crates/other']\nexclude = ['vendor/helper']\nresolver = '3'\n",
+    );
+    write(
+        root,
+        "crates/demo/Cargo.toml",
+        "[package]\nname = 'demo'\nversion = '0.1.0'\nedition = '2024'\n[dependencies]\nhelper = { path = '../../vendor/helper' }\n",
+    );
+    write(root, "vendor/helper/src/lib.rs", "");
+    let helper = |version: &str| {
+        write(
+            root,
+            "vendor/helper/Cargo.toml",
+            &format!("[package]\nname = 'helper'\nversion = '{version}'\nedition = '2024'\n"),
+        );
+    };
+    helper("0.1.0");
+    let lock = fixture.generate_lock();
+    let first = fixture.member(&[]);
+    assert!(first.status.success(), "{first:?}");
+    helper("0.2.0");
+
+    let native = fixture.native(&[
+        "fetch",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "crates/demo/Cargo.toml",
+    ]);
+    assert!(!native.status.success(), "{native:?}");
+    let actual = fixture.member(&[]);
+    assert!(!actual.status.success(), "{actual:?}");
+    assert!(String::from_utf8_lossy(&actual.stdout).contains("cargo fetch --locked"));
+    let stderr = String::from_utf8_lossy(&actual.stderr);
+    assert!(
+        stderr.contains("lock file") && stderr.contains("--locked"),
+        "{stderr}"
+    );
+    fixture.assert_locks(Some(&lock));
 }
 
 #[test]

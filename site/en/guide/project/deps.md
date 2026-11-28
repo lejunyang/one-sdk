@@ -40,9 +40,9 @@ osdk deps --explain         # also explain each freshness decision
 them if not. So after cloning a project, `osdk run dev` just works.
 
 That check is cheap: it compares manifest hashes and **does not scan installed
-files**. Roughly 0.16ms for a 20KiB lock, 2ms for a 2MiB monorepo lock -- and on a
-hit it does nothing else, with no package manager started. Deep verification is a
-separate thing, done only when you ask for `osdk deps --verify`.
+files**. On a hit it skips the dependency install. osdk checks membership with
+Cargo even if the member directory still has its own lockfile. Use
+`osdk deps --verify` for deep verification.
 
 Three cases never trigger it:
 
@@ -94,6 +94,37 @@ only become a concern at `cargo build`.
 whereas `uv sync --frozen` only promises not to update the lock and will quietly
 install the old set. So "`--locked` means the same thing everywhere" is not a safe
 assumption.
+
+If you declare just a Cargo member, for example with `[deps].roots = ["crates/demo"]`
+and `[deps.cargo]`, you can run:
+
+```bash
+osdk deps //crates/demo:cargo --frozen --no-install-tools
+```
+
+osdk uses the installed or linked Cargo to check workspace membership, then runs
+`cargo fetch --locked` in the member directory. The same plan appears with
+`--dry-run`. Cargo uses the root `Cargo.lock` by default. Cargo 1.97 and later can
+select another lock with `resolver.lockfile-path` or
+`CARGO_RESOLVER_LOCKFILE_PATH`. An empty `CARGO_HOME` makes Cargo read configuration
+from `.cargo` under the effective home directory. `[deps.cargo.env]` can set that
+directory through `HOME` (or `USERPROFILE` on Windows).
+Cargo ignores a leftover lock in a member directory.
+An excluded crate can use its own lock, while Cargo rejects an unlisted crate.
+If osdk knows the effective lock path and the file is missing, it rejects the
+frozen plan. If the path is unresolved, `--dry-run` can still show
+`cargo fetch --locked`. During the actual fetch, Cargo checks for a current lock
+and leaves it unchanged. osdk also runs the locked fetch for path dependencies
+outside the workspace. Use `--list --all --explain` to see the workspace root
+and the lock path when known.
+
+If Rust is missing, a local `Cargo.lock` can produce a provisional preview.
+An actual run without `--no-install-tools` can prepare Rust first, then use that
+Cargo to check which lock applies before fetching.
+If linked Rust provides Cargo through the shared rustup proxy, the locked fetch
+uses the toolchain selected by osdk. The rustup default toolchain can be unset.
+For a standalone crate with a local lock, even plain `deps` keeps `--locked`
+when osdk cannot determine the effective path, so Cargo can validate the lock.
 
 ::: tip go's toolchain is pinned
 `GOTOOLCHAIN` defaults to `auto`: when `go.mod` asks for a newer Go, go **downloads
@@ -511,7 +542,7 @@ Native pnpm and uv workspace members are discovered only below explicitly declar
 Explicit inheritance: a child `osdk.toml` can set `extends = "../../osdk.toml"`. Directory nesting alone does not inherit configuration. Priority is CLI/environment, child fields, explicitly inherited ancestor fields, user configuration, then defaults. Maps merge by key (including env); scalar values and arrays replace, so `false` and `[]` are meaningful. Inherited dependency sources/outputs/dir and task dir/file paths belong to their declaring file. Keep discovery roots/projects in the catalog root; a discovered child cannot redefine the catalog. Per-project declarations supply defaults to an inheriting child, whose explicit provider fields take precedence. An independent child config declares its own providers. Root and child dependency calls use the same catalog and effective provider/tool options. Each executable or source-changing config file in the chain needs its own trust; trusting a child file does not trust its parent. Self cycles, non-ancestor references and repository-boundary escapes fail. Task aggregation stays separate in `[task].roots`; inherited runner defaults are materialized into rooted task definitions.
 
 
-Migration: explicit `sources`/`outputs` paths now belong to their declaring config file, including root declarations for sub-projects; prefix them with the project path where needed (for example `sources = ["apps/api/package.json"]`). Built-in default paths still belong to the detected project. `sources = []` removes default inputs and cannot establish freshness; native workspaces retain mandatory membership/lock inputs. Child tool options and source settings apply during automatic tool preparation; shared workspaces require one consistent effective tool context.
+Migration: explicit `sources`/`outputs` paths now belong to their declaring config file, including root declarations for sub-projects; prefix them with the project path where needed (for example `sources = ["apps/api/package.json"]`). Built-in default paths still belong to the detected project. `sources = []` removes default inputs and cannot establish freshness; shared pnpm and uv installs retain mandatory membership and lock inputs. Child tool options and source settings apply during automatic tool preparation; shared workspaces require one consistent effective tool context.
 
 Bare `depends` names order providers in the same project or shared workspace; use `//path:provider` for a different installation unit. Selection does not implicitly enable omitted dependencies. Shared member package-manager version conflicts fail.
 Run the opt-in real-project smoke with `osdk run deps-monorepo-live`, or `python scripts/test-deps-monorepo.py --bin target/debug/osdk`. It uses temporary state and small npm/Python packages; it checks actual artifacts, shared coverage, member changes, inheritance, auto/disable and locked/offline failure paths. A discovered child may explicitly replace an inherited `disable` list with `[]`.

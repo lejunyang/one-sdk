@@ -33,6 +33,22 @@ osdk deps //apps/api:uv
 无操作数会处理全部声明 root。声明、provider 字段与信任规则见
 `reference/configuration/deps.md`。
 
+Cargo 成员可单独选择，例如 `osdk deps //crates/demo:cargo --frozen --no-install-tools`。
+osdk 用已安装或已链接的 Cargo 离线确认工作区归属，在成员目录执行
+`cargo fetch --locked`。默认使用根 `Cargo.lock`，也支持 Cargo 1.97 起的
+`resolver.lockfile-path` 和 `CARGO_RESOLVER_LOCKFILE_PATH`。若 `CARGO_HOME` 为空，
+Cargo 从有效的 `HOME`（Windows 上是 `USERPROFILE`）下的 `.cargo` 读取配置。
+`--dry-run` 展示计划，
+`--list --all --explain` 展示根和实际生效的锁。成员目录的旧锁不影响归属。
+被排除的 crate 可以使用自己的锁，未列入的 crate 由 Cargo 拒绝。已确定锁路径而文件缺失时，
+冻结计划失败。锁路径未确定时，预览仍可显示 `cargo fetch --locked`，实际拉取由 Cargo
+检查锁是否存在、是否过期。工作区外的路径依赖也由实际的冻结拉取校验。
+独立 crate 已有本地锁时，即使无法确定实际锁路径，普通 `deps` 也保留 `--locked`。
+Rust 尚未安装时，本地锁可以用于暂定预览。实际调用若允许安装工具，osdk 会先准备 Rust，
+再用该工具链确认生效的锁。
+共享 rustup 代理使用 osdk 选中的链接工具链执行冻结拉取，无需设置 rustup 默认工具链。
+`--no-install-tools` 仍禁止获取工具。
+
 成功安装后写入 `osdk.lock` 的 `run` 使用跨平台规范命令名（如 `bun`、`cargo`），
 不会记录仅供 Windows 查找可执行文件使用的 `.exe` / `.cmd` 后缀。
 

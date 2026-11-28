@@ -37,9 +37,8 @@ osdk deps --explain         # 附带说明每个新鲜度判定的理由
 之前，osdk 会先看声明的依赖是否还新鲜，过期才兑现。所以 clone 一个项目之后
 直接 `osdk run dev`，依赖已经就位。
 
-自动检查本身很便宜：它只比对清单哈希，**不扫描已装文件**。20KiB 的 lock 约
-0.16ms，2MiB 的巨型 monorepo lock 约 2ms——命中时除此之外不做任何事，不会启动
-包管理器。深度校验是另一回事，只在你显式要求 `osdk deps --verify` 时才做。
+自动检查比对清单哈希，命中时跳过安装。osdk 会查询 Cargo 确定工作区归属，
+包括仍留有本地锁的成员。需要扫描已装文件时，显式运行 `osdk deps --verify`。
 
 三种情况不会自动触发：
 
@@ -88,6 +87,31 @@ enable one in osdk.toml, for example:
 **冻结模式都是真的，而且 cargo 最严。** `cargo fetch --locked` 在缺 lock 与
 **lock 过期**时都会失败；相比之下 `uv sync --frozen` 只保证不改 lock，过期时会按旧
 lock 静默装。所以「`--locked` 一词在各生态含义相同」是不成立的假设。
+
+只声明一个 Cargo 成员时，可以在 `[deps]` 里设 `roots = ["crates/demo"]`，启用
+`[deps.cargo]`，再运行：
+
+```bash
+osdk deps //crates/demo:cargo --frozen --no-install-tools
+```
+
+osdk 用已安装或已链接的 Cargo 确认成员归属，在成员目录运行
+`cargo fetch --locked`。`--dry-run` 会展示同一计划。Cargo 默认使用工作区根的
+`Cargo.lock`，1.97 起可用 `resolver.lockfile-path` 或 `CARGO_RESOLVER_LOCKFILE_PATH`
+指定另一份锁。若将 `CARGO_HOME` 设为空，Cargo 从当前用户目录的 `.cargo` 读取配置，
+也会使用 `[deps.cargo.env]` 指定的 `HOME`（Windows 上是 `USERPROFILE`）。
+成员目录残留的本地锁不会参与归属。被排除的 crate 可以使用自己的锁，
+未列入工作区的 crate 由 Cargo 拒绝。锁路径已确定而文件缺失时，osdk 会拒绝冻结计划。
+锁路径还未确定时，`--dry-run` 仍可显示 `cargo fetch --locked`。实际拉取由 Cargo 检查
+锁是否存在、是否过期，并保留原锁。存在工作区外的路径依赖时，osdk 也会执行锁定拉取。
+用 `--list --all --explain` 可查看工作区根和已确认的锁路径。
+
+尚未安装 Rust 时，本地 `Cargo.lock` 可以用于暂定预览。实际调用若允许安装工具，
+osdk 会先准备 Rust，再用该工具链的 Cargo 确定生效的锁。
+链接的 Rust 若通过共享的 rustup 代理提供 Cargo，实跑会用 osdk 选中的工具链执行
+冻结拉取。rustup 可以不设默认工具链。
+独立 crate 已有本地锁时，即使 osdk 无法确定实际锁路径，普通 `deps` 也会保留
+`--locked`，由 Cargo 校验。
 
 ::: tip go 的工具链被钉住
 `GOTOOLCHAIN` 默认是 `auto`——`go.mod` 要求更新的 Go 时，go 会**自己下载**另一个
@@ -447,7 +471,7 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 显式继承：子项目 `osdk.toml` 可设置 `extends = "../../osdk.toml"`。目录嵌套不会自动继承。优先级为 CLI/环境变量、子文件字段、显式继承的祖先字段、用户配置、默认值。映射按键合并（包括 env），标量与列表替换，`false`、`[]` 都是有效覆盖。继承的依赖 sources/outputs/dir 与任务 dir/file 路径属于声明它的文件。发现 roots/projects 留在根目录，已发现的子配置不能重定义整个目录。继承子项目以根项目声明为默认，显式 provider 字段优先；独立子配置自行声明 provider。根/子目录调用依赖使用同一目录与有效 provider/工具选项。继承链中每个可执行或改变来源的配置都单独检查信任，信任子文件不代表信任父文件。自身循环、非祖先引用及越过仓库边界均报错。`[task].roots` 仍单独负责聚合；继承的 runner 默认值转换到具体子任务。
 
 
-迁移：显式 `sources`/`outputs` 路径统一属于声明它的配置文件，根配置声明子项目时需要项目路径前缀（如 `sources = ["apps/api/package.json"]`）；内置默认路径仍属于识别的项目。`sources = []` 去掉默认输入，无法证明 freshness；原生 workspace 仍保留必需的成员/锁输入。自动准备工具会应用子项目工具选项和来源设置；共享 workspace 要求有效工具上下文一致。
+迁移：显式 `sources`/`outputs` 路径统一属于声明它的配置文件，根配置声明子项目时需要项目路径前缀（如 `sources = ["apps/api/package.json"]`）；内置默认路径仍属于识别的项目。`sources = []` 去掉默认输入，无法证明 freshness；pnpm 和 uv 的共享安装仍保留必需的成员与锁输入。自动准备工具会应用子项目工具选项和来源设置；共享 workspace 要求有效工具上下文一致。
 
 裸 `depends` 名称限定同项目或共享 workspace 内的 provider；跨安装单元使用 `//path:provider`。依赖顺序不会隐式启用未选择的 provider。共享成员的包管理器版本声明冲突会报错。
 可用 `osdk run deps-monorepo-live` 或 `python scripts/test-deps-monorepo.py --bin target/debug/osdk` 运行真实项目验证；使用临时状态与小 npm/Python 包，检查实际产物、共享覆盖、成员变化、继承、auto/禁用及锁/离线失败。子配置可以用显式 `disable = []` 替换继承的禁用列表。
